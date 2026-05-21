@@ -266,6 +266,14 @@ npm run dev
 - [ ] 引入向量检索或本地语义索引
 - [ ] 支持团队共享文献库和多用户偏好
 
+## 🤝 Contributing
+
+⭐ If you find this project useful, a star would be greatly appreciated!
+
+🐛 Report bugs or ask questions via [Issues](https://github.com/DeLunnLi/PaperGraph/issues)
+
+🔀 Fork and submit a PR with your improvements — we'll review and add you to the contributors
+
 ## 许可证
 
 MIT License
