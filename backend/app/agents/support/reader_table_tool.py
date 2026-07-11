@@ -2,54 +2,70 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Callable
-
-from hello_agents.tools.base import Tool, ToolParameter
-from hello_agents.tools.response import ToolResponse
 
 logger = logging.getLogger(__name__)
 
 
-class ReaderTableTool(Tool):
-    """Extract a specific table from the current paper's PDF."""
+class ReaderTableTool:
+    """Extract a specific table from the current paper's PDF - no longer inherits from hello_agents.Tool."""
 
     def __init__(self, *, get_snap: Callable[[], dict[str, Any]]) -> None:
-        super().__init__(
-            name="reader_pdf_table",
-            description=(
-                "获取当前论文 PDF 中的指定表格内容。当用户询问表格数据或论文提到 'Tab. 3'/'Table 4' 时调用。"
-                "输入表号（如 '3'、'4'）或关键词（如 'ImageNet'、'ablation'），返回对应表格的 Markdown 内容。"
-            ),
-        )
         self._get_snap = get_snap
+        self.name = "reader_pdf_table"
+        self.description = (
+            "获取当前论文 PDF 中的指定表格内容。当用户询问表格数据或论文提到 'Tab. 3'/'Table 4' 时调用。"
+            "输入表号（如 '3'、'4'）或关键词（如 'ImageNet'、'ablation'），返回对应表格的 Markdown 内容。"
+        )
 
-    def get_parameters(self) -> list[ToolParameter]:
-        return [
-            ToolParameter(
-                name="table_ref",
-                type="string",
-                description="表格编号（如 '3'）或关键词（如 'ImageNet'、'ablation'）",
-                required=True,
-            ),
-        ]
+    def to_openai_schema(self) -> dict[str, Any]:
+        """Generate OpenAI function schema for this tool."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "table_ref": {
+                            "type": "string",
+                            "description": "表格编号（如 '3'）或关键词（如 'ImageNet'、'ablation'）",
+                        },
+                    },
+                    "required": ["table_ref"],
+                },
+            },
+        }
 
-    def run(self, parameters: dict[str, Any]) -> ToolResponse:
+    def run_with_timing(self, parameters: dict[str, Any]) -> Any:
+        """Run tool and return a response object compatible with old ToolResponse format."""
+        start = time.time()
+        try:
+            result = self.run(parameters)
+            elapsed_ms = int((time.time() - start) * 1000)
+            return _ToolResult("SUCCESS", result, elapsed_ms)
+        except Exception as exc:
+            elapsed_ms = int((time.time() - start) * 1000)
+            logger.debug("reader_pdf_table_failed", exc_info=exc)
+            return _ToolResult("ERROR", f"reader_pdf_table：执行失败：{exc}", elapsed_ms, code="EXEC_FAILED")
+
+    def run(self, parameters: dict[str, Any]) -> str:
         ref = str(parameters.get("table_ref") or "").strip()
         if not ref:
-            return ToolResponse.error("NO_REF", "请指定表格编号或关键词，如 table_ref='3'")
+            return "请指定表格编号或关键词，如 table_ref='3'"
 
         try:
             snap = self._get_snap() or {}
         except Exception as exc:
-            return ToolResponse.error("SNAP_FAILED", f"读取快照失败：{exc}")
+            return f"读取快照失败：{exc}"
 
         pdf_path = str(snap.get("_pdf_abspath") or "").strip()
         if not pdf_path:
             merged = str(snap.get("_pdf_merged_for_structure") or "").strip()
             if not merged or len(merged) < 200:
-                return ToolResponse.success(
-                    text="当前文献无可用 PDF。请先确认论文已保存且 PDF 已下载。"
-                )
+                return "当前文献无可用 PDF。请先确认论文已保存且 PDF 已下载。"
             tables = self._extract_tables_from_text(merged)
         else:
             try:
@@ -65,19 +81,15 @@ class ReaderTableTool(Tool):
                 tables = self._extract_tables_from_text(merged) if merged else []
 
         if not tables:
-            return ToolResponse.success(
-                text="未能从 PDF 中提取到表格。表格可能为图片格式或 PDF 文本提取不完整。"
-            )
+            return "未能从 PDF 中提取到表格。表格可能为图片格式或 PDF 文本提取不完整。"
 
         matched = self._find_table(tables, ref)
         if not matched:
             available = [t.get("label", f"表{i+1}") for i, t in enumerate(tables[:8])]
-            return ToolResponse.success(
-                text=f"未找到匹配 '{ref}' 的表格。可用表格：{', '.join(available)}"
-            )
+            return f"未找到匹配 '{ref}' 的表格。可用表格：{', '.join(available)}"
 
         result = f"## {matched['label']}\n\n{matched['content']}"
-        return ToolResponse.success(text=result)
+        return result
 
     @staticmethod
     def _parse_table_blocks(md: str) -> list[dict[str, Any]]:
@@ -136,3 +148,13 @@ class ReaderTableTool(Tool):
             if ref_lower in blob:
                 return t
         return None
+
+
+class _ToolResult:
+    """Simple result wrapper compatible with old ToolResponse interface."""
+
+    def __init__(self, status: str, text: str, elapsed_ms: int = 0, code: str | None = None) -> None:
+        self.status = status
+        self.text = text
+        self.elapsed_ms = elapsed_ms
+        self.error_info = {"code": code} if code else None

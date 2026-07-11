@@ -6,10 +6,7 @@ import logging
 from typing import Any, TypeVar
 from collections.abc import Callable
 
-from hello_agents import SimpleAgent
-
 from ...settings import get_settings
-from .agent_config import papergraph_agent_config
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +74,11 @@ def run_agent_task(
 
     for i in range(attempts):
         try:
-            agent = SimpleAgent(
-                name=agent_name,
-                llm=llm,
-                system_prompt=system_prompt,
-                config=papergraph_agent_config(),
-            )
-            raw = _run_with_optional_timeout(lambda: agent.run(user_prompt), resolved_timeout)
+            messages: list[dict[str, str]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
+            raw = _run_with_optional_timeout(lambda: llm.chat(messages).content, resolved_timeout)
             return (raw or "").strip()
         except Exception as exc:
             last_error = exc

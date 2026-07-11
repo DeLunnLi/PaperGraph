@@ -60,6 +60,7 @@ def get_library(
     read_status=None,
     tags: str | None = None,
     category: str | None = None,
+    user_id: int | None = None,
 ) -> PapersResponse:
     try:
 
@@ -78,6 +79,10 @@ def get_library(
             )
         else:
             papers_data = db.get_all_papers(limit=limit, offset=offset, order_by="created_at DESC")
+
+        # Filter by user_id if provided (multi-user isolation)
+        if user_id is not None:
+            papers_data = [p for p in papers_data if getattr(p, 'user_id', 1) == user_id]
 
         ids_missing_pdf = [
             int(p.id)

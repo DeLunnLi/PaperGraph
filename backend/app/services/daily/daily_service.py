@@ -27,7 +27,7 @@ from ..feedback.negative_feedback_memory import (
     maybe_promote_longterm_from_recent_skips,
     record_skip_negative_pref,
 )
-from ..llm.llm_service import coerce_hello_agents_llm_output_to_str, get_llm, is_llm_configured
+from ..llm.llm_service import get_llm, is_llm_configured
 from ..retrieval.recall_jobs import dedupe_papers
 
 logger = logging.getLogger(__name__)
@@ -83,9 +83,7 @@ def _select_personalized_and_general(
                 ensure_ascii=False,
             )
             pick_temp = 0.55 if diversify else 0.2
-            raw = coerce_hello_agents_llm_output_to_str(
-                get_llm().invoke([{"role": "user", "content": prompt}], temperature=pick_temp, max_tokens=400)
-            )
+            raw = get_llm().chat([{"role": "user", "content": prompt}], temperature=pick_temp, max_tokens=400).content
             data = json.loads(raw.strip().lstrip("```json").rstrip("```").strip())
             llm_p = [int(i) for i in (data.get("personalized") or [])[:personalized_k] if 0 <= int(i) < len(pool)]
             llm_g = [
@@ -195,9 +193,7 @@ def summarize_daily_theme_keywords_sync(
 {{\\"personalized\\":[\\"\u2026\\"],\\"general\\":[\\"\u2026\\"]}}
 \u952e\u540d\u5fc5\u987b\u4e3a\u82f1\u6587\uff1b\u82e5\u67d0\u7ec4\u65e0\u6709\u6548\u6807\u9898\u5219\u5bf9\u5e94\u6570\u7ec4\u4e3a []\u3002"""
     try:
-        raw = coerce_hello_agents_llm_output_to_str(
-            llm.invoke([{"role": "user", "content": prompt}], temperature=0.15, max_tokens=420)
-        )
+        raw = llm.chat([{"role": "user", "content": prompt}], temperature=0.15, max_tokens=420).content
     except Exception as e:
         logger.warning("daily_theme_keywords: invoke failed: %s", e)
         return [], []
@@ -226,8 +222,7 @@ def _build_strategy_explanation(
         f"候选池{n_candidates}篇，记忆词{n_memory_kw}条参与"
     )
     try:
-        raw = agent.llm.invoke([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=80)
-        return coerce_hello_agents_llm_output_to_str(raw).strip()[:200]
+        return agent.llm.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=80).content.strip()[:200]
     except Exception:
         return fallback
 

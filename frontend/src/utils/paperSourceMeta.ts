@@ -5,6 +5,7 @@ const RESULT_SOURCE_META: Record<string, { label: string; color: string }> = {
   openalex: { label: 'OpenAlex', color: 'purple' },
   crossref: { label: 'Crossref', color: 'default' },
   pubmed: { label: 'PubMed', color: 'green' },
+  mcp: { label: 'MCP', color: 'magenta' },
   unknown: { label: '其他', color: 'default' },
 }
 

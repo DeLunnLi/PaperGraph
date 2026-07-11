@@ -18,6 +18,7 @@ class SearchRecipe(str, Enum):
     AUTHOR = "author"
     VENUE_YEAR = "venue_year"
     METHOD = "method"
+    DEEP = "deep"
 
 
 def _is_venue_method(plan: "ResolvedSearchPlan") -> bool:
@@ -140,6 +141,10 @@ RECIPE_RULES: list[RecipeRule] = [
 
 
 def finalize_plan_recipe(plan: "ResolvedSearchPlan") -> "ResolvedSearchPlan":
+    if getattr(plan, "deep_search", False):
+        plan.recipe = SearchRecipe.DEEP
+        plan.max_iterations = max(0, min(3, int(plan.max_iterations or 2)))
+        return plan
     for predicate, recipe, apply_fn in RECIPE_RULES:
         if predicate(plan):
             plan.recipe = recipe

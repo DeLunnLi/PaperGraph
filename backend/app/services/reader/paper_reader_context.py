@@ -8,18 +8,23 @@ import time
 from typing import Any
 
 def extract_pdf_text_full(abspath: str | None) -> str:
+    """Extract full PDF text. Uses enhanced extractor with OCR + dedup, falls back to original."""
+    try:
+        from .pdf_extract import extract_pdf_text_enhanced
+        result = extract_pdf_text_enhanced(abspath)
+        if result and len(result) >= 200:
+            return result
+    except Exception:
+        pass
+    # Fallback to original logic
     if not abspath or not os.path.isfile(abspath):
         return ""
     best = ""
-
-    # Priority 1: pymupdf4llm Markdown — preserves tables, headings, structure
     try:
         import pymupdf4llm
         best = (pymupdf4llm.to_markdown(abspath) or "").strip()
     except Exception:
         pass
-
-    # Priority 2: fitz plain text — only as fallback if Markdown is too short
     try:
         import fitz
         doc = fitz.open(abspath)
@@ -30,14 +35,10 @@ def extract_pdf_text_full(abspath: str | None) -> str:
                 pages.append(t.strip())
         doc.close()
         fitz_text = "\n\n".join(pages).strip()
-
-        # Prefer Markdown even if shorter (preserves tables), but fall back if
-        # Markdown is clearly broken (< 30% of fitz length and < 500 chars)
         if not best or (len(best) < 500 and len(fitz_text) > len(best) * 3):
             best = fitz_text
     except Exception:
         pass
-
     if len(best) < 200:
         try:
             import fitz
@@ -54,6 +55,57 @@ def extract_pdf_text_full(abspath: str | None) -> str:
         except Exception:
             pass
     return best
+
+
+def extract_pdf_text_with_pages(abspath: str | None) -> list[dict]:
+    """Extract PDF text as per-page dicts with 1-based page numbers.
+
+    Uses enhanced extractor with OCR + header/footer dedup, falls back to original.
+    """
+    try:
+        from .pdf_extract import extract_pdf_pages_enhanced
+        result = extract_pdf_pages_enhanced(abspath)
+        if result:
+            return result
+    except Exception:
+        pass
+    # Fallback to original logic
+    if not abspath or not os.path.isfile(abspath):
+        return []
+    out: list[dict] = []
+    try:
+        import pymupdf4llm
+        chunks = pymupdf4llm.to_markdown(abspath, page_chunks=True)
+        if isinstance(chunks, list) and chunks:
+            for item in chunks:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or "").strip()
+                if not text:
+                    continue
+                meta = item.get("metadata") or {}
+                try:
+                    page = int(meta.get("page_number") or 0)
+                except (TypeError, ValueError):
+                    page = 0
+                if page <= 0:
+                    continue
+                out.append({"page": page, "text": text})
+            if out:
+                return out
+    except Exception:
+        pass
+    try:
+        import fitz
+        doc = fitz.open(abspath)
+        for i, page in enumerate(doc):
+            t = (page.get_text("text") or "").strip()
+            if t:
+                out.append({"page": i + 1, "text": t})
+        doc.close()
+    except Exception:
+        pass
+    return out
 
 
 def extract_pdf_tables_markdown(abspath: str | None) -> str:
@@ -235,6 +287,8 @@ def _ensure_cache_table(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE paper_pdf_excerpt_cache ADD COLUMN last_hit_at INTEGER")
     if "last_miss_at" not in cols:
         cur.execute("ALTER TABLE paper_pdf_excerpt_cache ADD COLUMN last_miss_at INTEGER")
+    if "excerpt_pages" not in cols:
+        cur.execute("ALTER TABLE paper_pdf_excerpt_cache ADD COLUMN excerpt_pages TEXT")
     conn.commit()
 
 def _pdf_stat(abspath: str) -> tuple[int, int | None]:
@@ -244,12 +298,13 @@ def _pdf_stat(abspath: str) -> tuple[int, int | None]:
     except Exception:
         return None
 
-def _cache_get(db_path: str, paper_id: int, pdf_abspath: str, max_age_days: int = 30) -> str | None:
+def _cache_get(db_path: str, paper_id: int, pdf_abspath: str, max_age_days: int = 30) -> tuple[str | None, list[dict] | None]:
+    """Return (excerpt_text, pages). (None, None) on miss."""
     if not db_path or not pdf_abspath:
-        return None
+        return None, None
     st = _pdf_stat(pdf_abspath)
     if not st:
-        return None
+        return None, None
     mtime, size = st
     now = int(time.time())
     conn = None
@@ -258,7 +313,7 @@ def _cache_get(db_path: str, paper_id: int, pdf_abspath: str, max_age_days: int 
         cur = conn.cursor()
         _ensure_cache_table(conn)
         cur.execute(
-            "SELECT pdf_mtime,pdf_size,excerpt,updated_at FROM paper_pdf_excerpt_cache WHERE paper_id=?",
+            "SELECT pdf_mtime,pdf_size,excerpt,updated_at,excerpt_pages FROM paper_pdf_excerpt_cache WHERE paper_id=?",
             (int(paper_id),),
         )
         row = cur.fetchone()
@@ -268,10 +323,11 @@ def _cache_get(db_path: str, paper_id: int, pdf_abspath: str, max_age_days: int 
                 (int(paper_id), pdf_abspath, mtime, size, "", 0, 1, now),
             )
             conn.commit()
-            return None
+            return None, None
         ok = int(row[0] or 0) == mtime and int(row[1] or 0) == size
         ex = (row[2] or "").strip()
         updated_at = int(row[3] or 0)
+        pages_raw = row[4] if len(row) > 4 else None
         expired = bool(updated_at and max_age_days > 0 and (now - updated_at) > max_age_days * 86400)
         if ok and ex and (not expired):
             cur.execute(
@@ -279,21 +335,41 @@ def _cache_get(db_path: str, paper_id: int, pdf_abspath: str, max_age_days: int 
                 (now, int(paper_id)),
             )
             conn.commit()
-            return ex
+            pages = _deserialize_pages(pages_raw)
+            return ex, pages
 
         cur.execute(
             "UPDATE paper_pdf_excerpt_cache SET miss_count=miss_count+1,last_miss_at=? WHERE paper_id=?",
             (now, int(paper_id)),
         )
         conn.commit()
-        return None
+        return None, None
     except Exception:
-        return None
+        return None, None
     finally:
         if conn:
             conn.close()
 
-def _cache_set(db_path: str, paper_id: int, pdf_abspath: str, excerpt: str) -> None:
+def _serialize_pages(pages: list[dict]) -> str:
+    import json as _json
+    try:
+        return _json.dumps(pages, ensure_ascii=False)
+    except Exception:
+        return ""
+
+def _deserialize_pages(raw: str | None) -> list[dict] | None:
+    if not raw:
+        return None
+    import json as _json
+    try:
+        data = _json.loads(raw)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return None
+
+def _cache_set(db_path: str, paper_id: int, pdf_abspath: str, excerpt: str, pages: list[dict] | None = None) -> None:
     if not db_path or not pdf_abspath:
         return
     st = _pdf_stat(pdf_abspath)
@@ -301,6 +377,7 @@ def _cache_set(db_path: str, paper_id: int, pdf_abspath: str, excerpt: str) -> N
         return
     mtime, size = st
     now = int(time.time())
+    pages_blob = _serialize_pages(pages) if pages else None
     conn = None
     try:
         conn = sqlite3.connect(db_path)
@@ -308,16 +385,17 @@ def _cache_set(db_path: str, paper_id: int, pdf_abspath: str, excerpt: str) -> N
         _ensure_cache_table(conn)
         cur.execute(
             """
-            INSERT INTO paper_pdf_excerpt_cache(paper_id,pdf_abspath,pdf_mtime,pdf_size,excerpt,updated_at)
-            VALUES(?,?,?,?,?,?)
+            INSERT INTO paper_pdf_excerpt_cache(paper_id,pdf_abspath,pdf_mtime,pdf_size,excerpt,updated_at,excerpt_pages)
+            VALUES(?,?,?,?,?,?,?)
             ON CONFLICT(paper_id) DO UPDATE SET
               pdf_abspath=excluded.pdf_abspath,
               pdf_mtime=excluded.pdf_mtime,
               pdf_size=excluded.pdf_size,
               excerpt=excluded.excerpt,
-              updated_at=excluded.updated_at
+              updated_at=excluded.updated_at,
+              excerpt_pages=excluded.excerpt_pages
             """,
-            (int(paper_id), pdf_abspath, mtime, size, excerpt or "", now),
+            (int(paper_id), pdf_abspath, mtime, size, excerpt or "", now, pages_blob),
         )
         conn.commit()
     except Exception:
@@ -329,10 +407,25 @@ def _cache_set(db_path: str, paper_id: int, pdf_abspath: str, excerpt: str) -> N
 def extract_pdf_text_full_cached(db_path: str, paper_id: int, abspath: str | None, ) -> tuple[str, bool]:
     if not abspath or not os.path.isfile(abspath):
         return "", False
-    ex = _cache_get(db_path, int(paper_id), abspath, max_age_days=45)
+    ex, _pages = _cache_get(db_path, int(paper_id), abspath, max_age_days=45)
     if ex is not None:
         return ex, True
     return "", False
+
+def extract_pdf_pages_cached(db_path: str, paper_id: int, abspath: str | None) -> tuple[list[dict], bool]:
+    """Return (pages, cached). pages = list[{"page":N,"text":...}], cached=True if from cache."""
+    if not abspath or not os.path.isfile(abspath):
+        return [], False
+    _ex, pages = _cache_get(db_path, int(paper_id), abspath, max_age_days=45)
+    if pages is not None:
+        return pages, True
+    # Cache miss for pages but maybe excerpt present without pages — recompute pages only.
+    if _ex is not None:
+        pages = extract_pdf_text_with_pages(abspath)
+        if pages:
+            _cache_set(db_path, int(paper_id), abspath, _ex, pages)
+        return pages, False
+    return [], False
 
 def _cache_delete(db_path: str, paper_id: int) -> None:
     if not db_path:
@@ -348,9 +441,9 @@ def _cache_delete(db_path: str, paper_id: int) -> None:
 def compute_and_cache_excerpt(db_path: str, paper_id: int, pdf_abspath: str) -> None:
     ex = extract_pdf_text_full(pdf_abspath)
     if ex.strip():
-        _cache_set(db_path, int(paper_id), pdf_abspath, ex)
+        pages = extract_pdf_text_with_pages(pdf_abspath)
+        _cache_set(db_path, int(paper_id), pdf_abspath, ex, pages if pages else None)
     else:
-
         _cache_delete(db_path, int(paper_id))
 
 def _ensure_reader_pdf_available(db: Any, paper: Any) -> str | None:
@@ -390,7 +483,7 @@ def _ensure_reader_pdf_available(db: Any, paper: Any) -> str | None:
         return None
     return None
 
-def build_reader_snap(paper: Any, *, pdf_text_for_references: str = "") -> dict[str, Any]:
+def build_reader_snap(paper: Any, *, pdf_text_for_references: str = "", pdf_pages: list[dict] | None = None) -> dict[str, Any]:
     refs_raw = getattr(paper, "references", None) or []
     refs: list[str] = []
     for r in refs_raw[:220]:
@@ -419,6 +512,8 @@ def build_reader_snap(paper: Any, *, pdf_text_for_references: str = "") -> dict[
     ptf = (pdf_text_for_references or "").strip()
     if len(ptf) >= 200:
         out["_pdf_merged_for_structure"] = ptf
+    if pdf_pages:
+        out["_pdf_pages"] = pdf_pages
     return out
 
 def format_paper_reader_block(
@@ -471,16 +566,24 @@ def format_paper_reader_block(
         )
     return "\n".join(lines)
 
-def build_reader_context_for_paper(db: Any, paper_id: int) -> tuple[Any | None, str, str]:
+def build_reader_context_for_paper(db: Any, paper_id: int) -> tuple[Any | None, str, str, bool, list[dict]]:
     p = db.get_paper_by_id(int(paper_id))
     if not p:
-        return None, "", ""
+        return None, "", "", False, []
     pdf_path = _ensure_reader_pdf_available(db, p)
     excerpt, is_cached = extract_pdf_text_full_cached(getattr(db, "db_path", ""), int(paper_id), pdf_path)
+    pages: list[dict] = []
+    if pdf_path:
+        pages, _pages_cached = extract_pdf_pages_cached(getattr(db, "db_path", ""), int(paper_id), pdf_path)
+        if not pages and is_cached and excerpt:
+            # excerpt was cached before pages column existed; recompute lazily.
+            pages = extract_pdf_text_with_pages(pdf_path)
     if pdf_path and not excerpt:
         excerpt = extract_pdf_text_full(pdf_path)
         if excerpt.strip():
-            _cache_set(getattr(db, "db_path", ""), int(paper_id), pdf_path, excerpt)
+            if not pages:
+                pages = extract_pdf_text_with_pages(pdf_path)
+            _cache_set(getattr(db, "db_path", ""), int(paper_id), pdf_path, excerpt, pages if pages else None)
     merged_for_refs = excerpt.strip()
     refs_raw = ""
     if not (getattr(p, "references", None) or []):
@@ -527,5 +630,13 @@ def build_reader_context_for_paper(db: Any, paper_id: int) -> tuple[Any | None, 
         references_section_raw=refs_raw,
         reader_artifact_block=reader_artifact_block,
     )
-    pdf_parsing = False  # 后台异步解析，不阻塞用户
-    return p, block, merged_for_refs, pdf_parsing
+    # Detect if PDF is still being parsed: if paper has a PDF path but no excerpt cached yet
+    pdf_parsing = False
+    try:
+        pdf_path = db.get_library_pdf_abspath(int(paper_id))
+        if pdf_path and os.path.isfile(pdf_path):
+            # Check if excerpt is empty or too short — means parsing hasn't completed
+            pdf_parsing = len((excerpt or "").strip()) < 200
+    except Exception:
+        pass
+    return p, block, merged_for_refs, pdf_parsing, pages

@@ -16,6 +16,7 @@ from .plan_helpers import (
     primary_venue,
     use_venue_proceedings_journal,
 )
+from .query_enhancement import build_enhanced_query, optimize_recall_strategy
 from .search_plan import ResolvedSearchPlan
 from .search_recipe import SearchRecipe
 
@@ -35,6 +36,9 @@ class RecallContext:
     tavily_keywords: list[str] = field(default_factory=list)
     canonical_titles: list[str] = field(default_factory=list)
     source_plan: dict[str, Any] = field(default_factory=dict)
+    # Enhanced query fields
+    enhanced_query: str = ""
+    recall_strategy: dict[str, Any] = field(default_factory=dict)
 
 
 def _has_cjk(text: str) -> bool:
@@ -125,6 +129,12 @@ def build_recall_context(plan: ResolvedSearchPlan) -> RecallContext:
     raw_msg = (plan.raw_user_message or plan.query or "").strip()
     effective_query, rank_query, merged_keywords, target_titles, authors = _resolve_query_terms(plan)
 
+    # Build enhanced query with term expansion
+    enhanced_query = build_enhanced_query(plan, include_expansions=True)
+
+    # Get optimized recall strategy
+    recall_strategy = optimize_recall_strategy(plan)
+
     ma = method_acronym_for(plan)
     if ma and plan.recipe == SearchRecipe.METHOD and not target_titles:
         merged_keywords = [ma]
@@ -182,12 +192,16 @@ def build_recall_context(plan: ResolvedSearchPlan) -> RecallContext:
         recall_sources=recall_sources,
         intent_source_message=raw_msg,
         pinned_arxiv_ids=pinned,
+        enhanced_query=enhanced_query,
+        recall_strategy=recall_strategy,
         source_plan={
             "sources": recall_sources,
             "effective_query": effective_query[:200],
             "rank_query": rank_query[:200],
             "ranking_profile": ranking_profile,
             "recipe": plan.recipe.value,
+            "enhanced_query": enhanced_query[:200],
+            "recall_cap": recall_strategy.get("recall_cap", 24),
         },
     )
 

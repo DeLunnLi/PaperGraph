@@ -17,6 +17,7 @@ from .recall_context import RecallContext, build_recall_context, enrich_recall_c
 from .recall_jobs import build_recall_jobs, dedupe_papers, execute_recall_jobs, merge_candidates
 from .relevance_guard import apply_relevance_guard
 from .search_plan import ResolvedSearchPlan
+from .semantic_scoring import rank_by_semantic_relevance
 
 
 @dataclass
@@ -169,6 +170,20 @@ async def rank_candidates(
         return ranked, ranking_metadata.get("ranking_method", "llm_rank"), ranking_metadata
     except TimeoutError:
         meta["ranking_timeout"] = True
+        # Use semantic scoring as fallback instead of simple recency
+        use_semantic = bool(ctx.enhanced_query or ctx.rank_query)
+        if use_semantic:
+            try:
+                scored = rank_by_semantic_relevance(
+                    candidates,
+                    ctx.enhanced_query or ctx.rank_query,
+                    keywords=ctx.merged_keywords,
+                    top_k=runtime.max_results,
+                )
+                ranked = [RankedPaper(paper=p, fine_score=score) for p, score in scored]
+                return ranked, "semantic_fallback_timeout", {"semantic_scores": [s for _, s in scored]}
+            except Exception:
+                pass
         from .paper_ranker import _papers_to_ranked_pool
 
         pool = _papers_to_ranked_pool(candidates, cap=runtime.recall_max, prefer_recency=prefer_rec)

@@ -1,1 +1,53 @@
 .DS_Store
+
+# Environment
+.env
+backend/.env
+!.env.example
+
+# Data & downloads
+backend/data/
+backend/downloads/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+
+# Traces
+backend/memory/traces/
+backend/traces/
+
+# MCP storage
+backend/data/mcp_arxiv_storage/

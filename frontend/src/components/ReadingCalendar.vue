@@ -156,104 +156,109 @@ onMounted(async () => {
 </script>
 <style scoped>
 .cal {
-  padding: 10px 10px 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 12px 12px 14px;
 }
 .cal__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 .cal__month {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.78);
+  font-weight: 600;
+  color: var(--pg-text);
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
   flex: 1 1 auto;
   text-align: center;
 }
 .cal__nav {
-  width: 26px;
-  height: 24px;
-  border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.75);
+  width: 24px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid var(--pg-border);
+  background: var(--pg-surface);
+  color: var(--pg-text-secondary);
   cursor: pointer;
   line-height: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transition: all 0.15s ease;
 }
 .cal__nav:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--pg-primary);
+  border-color: #c7c9f5;
+  background: var(--pg-primary-softer);
 }
 .cal__body {
   display: grid;
   grid-template-columns: repeat(7, 22px);
   grid-auto-rows: 22px;
-  gap: 6px;
+  gap: 5px;
   align-items: center;
   justify-content: center;
-  min-height: calc(22px * 7 + 6px * 6);
+  min-height: calc(22px * 7 + 5px * 6);
 }
 .cal__body--syncing {
-  opacity: 0.78;
+  opacity: 0.6;
   transition: opacity 0.2s ease;
 }
 .cal__dow {
   width: 22px;
   height: 22px;
-  font-size: 11px;
+  font-size: 10px;
+  font-weight: 500;
   line-height: 22px;
   text-align: center;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--pg-text-tertiary);
 }
 .cal__day {
   width: 22px;
   height: 22px;
-  border-radius: 8px;
+  border-radius: 6px;
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.06);
-  outline: 1px solid rgba(0, 0, 0, 0.14);
+  background: var(--pg-bg-soft);
 }
 .cal__day--empty {
   background: transparent;
-  outline: 1px solid transparent;
 }
 .cal__day-num {
-  font-size: 11px;
+  font-size: 10.5px;
   line-height: 1;
   font-variant-numeric: tabular-nums;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--pg-text-secondary);
   user-select: none;
 }
 .cal__day--lv0 .cal__day-num {
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--pg-text-tertiary);
 }
+/* 热力等级:浅靛 → 深靛,高级感克制 */
 .cal__day--lv1 {
-  background: rgba(22, 119, 255, 0.18);
+  background: #eef2ff;
 }
 .cal__day--lv2 {
-  background: rgba(22, 119, 255, 0.32);
+  background: #c7d2fe;
 }
 .cal__day--lv3 {
-  background: rgba(22, 119, 255, 0.52);
+  background: #818cf8;
+}
+.cal__day--lv3 .cal__day-num {
+  color: var(--pg-text-inverse);
 }
 .cal__day--lv4 {
-  background: rgba(22, 119, 255, 0.74);
+  background: var(--pg-primary);
 }
-.cal__day--lv3 .cal__day-num,
 .cal__day--lv4 .cal__day-num {
-  color: rgba(255, 255, 255, 0.92);
+  color: var(--pg-text-inverse);
 }
 .cal__day--today {
-  outline: 1px solid rgba(22, 119, 255, 0.7);
+  outline: 1.5px solid var(--pg-primary);
+  outline-offset: 1px;
 }
 </style>

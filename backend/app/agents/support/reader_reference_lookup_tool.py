@@ -1,14 +1,11 @@
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 from collections.abc import Callable
-
-from hello_agents.tools.base import Tool, ToolParameter
-from hello_agents.tools.response import ToolResponse
 
 from ...agents.search_agent import SearchIntent
 
@@ -20,6 +17,7 @@ READER_RELATED_FROM_EXTERNAL_QUERY = "external_query"
 READER_RELATED_FROM_REF_BLOCK = "ref_block"
 READER_RELATED_FROM_PRE_SEARCH = "pre_search"
 
+
 def _norm_doi(d: str | None) -> str:
     if not d:
         return ""
@@ -28,7 +26,8 @@ def _norm_doi(d: str | None) -> str:
         s = s.split("doi.org/", 1)[-1]
     s = s.replace("https://", "").replace("http://", "")
     s = re.sub(r"^doi:\s*", "", s)
-    return s.strip().rstrip(".,;)")
+    return s.strip().rstrip(".,;")
+
 
 def _norm_arxiv(a: str | None) -> str:
     if not a:
@@ -45,12 +44,14 @@ def _norm_arxiv(a: str | None) -> str:
             s = s[:vi]
     return s.strip()
 
+
 def strip_reader_reco_boilerplate(um: str) -> str:
     import re as _re
     s = (um or "").strip()
     for pat in (r"推荐.*?论文", r"找.*?(相关|类似|参考)", r"search.*?(related|similar)", r"find.*?papers"):
         s = _re.sub(pat, "", s, flags=_re.IGNORECASE).strip()
     return s
+
 
 def parse_reader_recommendation_intent(um: str) -> tuple[bool, int]:
     s = (um or "").strip().lower()
@@ -61,15 +62,18 @@ def parse_reader_recommendation_intent(um: str) -> tuple[bool, int]:
     n = int(m.group(1)) if m else (5 if want else 0)
     return want, max(1, min(n, 20))
 
+
 def user_message_may_need_reference_lookup(um: str) -> bool:
     s = (um or "").strip().lower()
     return any(k in s for k in ("参考", "引用", "reference", "bibliography", "related", "相关", "类似"))
+
 
 def reader_user_allows_external_paper_lookup(um: str) -> bool:
     s = (um or "").strip().lower()
     if any(k in s for k in ("仅参考文献", "只要引用", "only reference", "just bibliography")):
         return False
     return True
+
 
 def rerank_reader_pairs_by_anchor_refs_first(snap: dict, pairs: list, k: int = 5) -> list:
     title = str(snap.get("title") or "").strip().lower()
@@ -87,6 +91,7 @@ def rerank_reader_pairs_by_anchor_refs_first(snap: dict, pairs: list, k: int = 5
         return (bib_bonus, overlap)
     return sorted(pairs, key=_score, reverse=True)[:k]
 
+
 def prioritize_reader_related_pairs_refs_first(pairs: list) -> list:
     def _priority(pair):
         _, src = pair
@@ -94,6 +99,7 @@ def prioritize_reader_related_pairs_refs_first(pairs: list) -> list:
             return 0
         return 1
     return sorted(pairs, key=_priority)
+
 
 def paper_matches_reader_snap(snap: dict[str, Any], p: Any) -> bool:
     if not snap:
@@ -127,7 +133,9 @@ def paper_matches_reader_snap(snap: dict[str, Any], p: Any) -> bool:
             return True
     return False
 
-class ReaderReferenceLookupTool(Tool):
+
+class ReaderReferenceLookupTool:
+    """Reference lookup tool - no longer inherits from hello_agents.Tool."""
 
     def __init__(
         self,
@@ -135,60 +143,69 @@ class ReaderReferenceLookupTool(Tool):
         on_papers_found: Callable[[list[Any], str], None],
         get_user_message: Callable[[], str],
     ) -> None:
-        super().__init__(
-            name="reader_reference_lookup",
-            description=(
-                "从当前文献的参考文献中提取搜索查询，检索相关论文。"
-                "接受一条参考文献文本（或用户提示），调用 search_papers() 检索并返回可点击的论文结果。"
-            ),
-        )
         self._get_snap = get_snap
         self._on_papers_found = on_papers_found
         self._get_user_message = get_user_message
+        self.name = "reader_reference_lookup"
+        self.description = (
+            "从当前文献的参考文献中提取搜索查询，检索相关论文。"
+            "接受一条参考文献文本（或用户提示），调用 search_papers() 检索并返回可点击的论文结果。"
+        )
 
-    def get_parameters(self) -> list[ToolParameter]:
-        return [
-            ToolParameter(
-                name="max_results",
-                type="integer",
-                description="最多返回几条（1～80，默认 5）",
-                required=False,
-                default=5,
-            ),
-            ToolParameter(
-                name="reference_focus",
-                type="string",
-                description=(
-                    "可选。用户感兴趣的引用方向或文本片段，直接用作文本检索查询。"
-                ),
-                required=False,
-                default="",
-            ),
-        ]
+    def to_openai_schema(self) -> dict[str, Any]:
+        """Generate OpenAI function schema for this tool."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "max_results": {
+                            "type": "integer",
+                            "description": "最多返回几条（1～80，默认 5）",
+                        },
+                        "reference_focus": {
+                            "type": "string",
+                            "description": "可选。用户感兴趣的引用方向或文本片段，直接用作文本检索查询。",
+                        },
+                    },
+                },
+            },
+        }
 
-    def run(self, parameters: dict[str, Any]) -> ToolResponse:
+    def run_with_timing(self, parameters: dict[str, Any]) -> Any:
+        """Run tool and return a response object compatible with old ToolResponse format."""
+        start = time.time()
+        try:
+            result = self.run(parameters)
+            elapsed_ms = int((time.time() - start) * 1000)
+            return _ToolResult("SUCCESS", result, elapsed_ms)
+        except Exception as exc:
+            elapsed_ms = int((time.time() - start) * 1000)
+            logger.debug("reader_reference_lookup_failed", exc_info=exc)
+            return _ToolResult("ERROR", f"reader_reference_lookup：执行失败：{exc}", elapsed_ms, code="EXEC_FAILED")
+
+    def run(self, parameters: dict[str, Any]) -> str:
         snap = {}
         try:
             snap = self._get_snap() or {}
         except Exception as exc:
             logger.debug("reader_reference_lookup_get_snap_failed", exc_info=exc)
-            return ToolResponse.error("SNAP_FAILED", f"reader_reference_lookup: cannot read snap. {exc}")
+            return f"reader_reference_lookup: cannot read snap. {exc}"
 
         refs = [str(x).strip() for x in (snap.get("references") or []) if str(x).strip()]
         raw = (snap.get("references_section_raw") or "").strip()
         if not refs:
             if raw:
-                return ToolResponse.success(
-                    text=(
-                        "reader_reference_lookup: current paper has no parsed references list; "
-                        "the PDF references section text is available. "
-                        "Extract English titles, DOIs, or arXiv IDs from it and call reader_paper_lookup."
-                    ),
+                return (
+                    "reader_reference_lookup: current paper has no parsed references list; "
+                    "the PDF references section text is available. "
+                    "Extract English titles, DOIs, or arXiv IDs from it and call reader_paper_lookup."
                 )
-            return ToolResponse.success(
-                text=(
-                    "reader_reference_lookup: no references available (empty list, no PDF section text)."
-                ),
+            return (
+                "reader_reference_lookup: no references available (empty list, no PDF section text)."
             )
 
         try:
@@ -206,8 +223,8 @@ class ReaderReferenceLookupTool(Tool):
 
         query = (focus or um or (refs[0] if refs else "")).strip()[:300]
         if not query or len(query) < 4:
-            return ToolResponse.success(
-                text="reader_reference_lookup: no usable query text. Provide a title, DOI, or arXiv ID.",
+            return (
+                "reader_reference_lookup: no usable query text. Provide a title, DOI, or arXiv ID."
             )
 
         try:
@@ -217,7 +234,7 @@ class ReaderReferenceLookupTool(Tool):
             from ...services.retrieval.search_plan import ResolvedSearchPlan
         except Exception as exc:
             logger.warning("reader_reference_lookup_import_failed", exc_info=exc)
-            return ToolResponse.error("IMPORT_FAILED", f"import failed: {exc}")
+            return f"import failed: {exc}"
 
         searcher = get_searcher()
         intent = SearchIntent(
@@ -238,15 +255,13 @@ class ReaderReferenceLookupTool(Tool):
             )
         except Exception as exc:
             logger.debug("reader_reference_lookup_search_failed", exc_info=exc)
-            return ToolResponse.error("SEARCH_FAILED", f"search failed: {exc}")
+            return f"search failed: {exc}"
 
         collected = [litpaper_to_api_paper(rp.paper) for rp in (pip.ranked or [])[:mr]]
         if not collected:
-            return ToolResponse.success(
-                text=(
-                    f"reader_reference_lookup: no results for query [{query[:80]}]. "
-                    "Try a more specific English title, DOI, or arXiv ID."
-                ),
+            return (
+                f"reader_reference_lookup: no results for query [{query[:80]}]. "
+                "Try a more specific English title, DOI, or arXiv ID."
             )
 
         try:
@@ -262,7 +277,8 @@ class ReaderReferenceLookupTool(Tool):
             y = getattr(ap, "year", None) or "-"
             lines.append(f"{i}. {t} | year={y}")
         lines.append("Refer to items by number or short title above.")
-        return ToolResponse.success(text="\n".join(lines))
+        return "\n".join(lines)
+
 
 def score_reference_line_against_hint(ln: str, hint: str) -> float:
     import re as _re
@@ -276,8 +292,9 @@ def score_reference_line_against_hint(ln: str, hint: str) -> float:
         return 0.0
     return len(h_tokens & l_tokens) / max(len(h_tokens), len(l_tokens))
 
+
 def resolve_references_via_openalex(
-    snap: dict[str, Any], *, max_results: int = 5
+    snap: dict[str, Any], *, max_results: int = 5, user_hint: str | None = None
 ) -> list[Any]:
     refs = snap.get("references") or []
     if not refs:
@@ -288,6 +305,9 @@ def resolve_references_via_openalex(
     searcher = get_searcher()
     results: list[Any] = []
     seen: set[str] = set()
+    hint = (user_hint or "").strip()
+    if hint:
+        refs = sorted(refs, key=lambda r: score_reference_line_against_hint(str(r or ""), hint), reverse=True)
     for ref in refs[:max_results * 3]:
         q = str(ref or "").strip()[:200]
         if not q or q.lower() in seen:
@@ -309,3 +329,13 @@ def resolve_references_via_openalex(
         if len(results) >= max_results:
             break
     return results[:max_results]
+
+
+class _ToolResult:
+    """Simple result wrapper compatible with old ToolResponse interface."""
+
+    def __init__(self, status: str, text: str, elapsed_ms: int = 0, code: str | None = None) -> None:
+        self.status = status
+        self.text = text
+        self.elapsed_ms = elapsed_ms
+        self.error_info = {"code": code} if code else None

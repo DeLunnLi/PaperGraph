@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -24,9 +24,33 @@ from ...models.schemas import Paper
 from ...services.papers.papers_converters import litpapers_to_api_papers
 from ...services.retrieval.search_plan import ResolvedSearchPlan
 from ...services.retrieval.search_pipeline import run_search_pipeline_async
+from ...services.retrieval.deep_search_pipeline import run_deep_search_pipeline_async
 from ..tool_events import ToolCallTracker, sse_pack
+from ..deps import check_rate_limit
+from ...settings import get_settings
 
 router = APIRouter(prefix="/papers", tags=["智能搜索"])
+
+
+def _emit_deep_progress(tool_calls: list, event_type: str, payload: dict) -> None:
+    """Record deep search progress as a lightweight tool call entry."""
+    phase = payload.get("phase") or event_type
+    summary = event_type
+    if event_type == "deep:decompose":
+        n = len(payload.get("sub_queries") or [])
+        summary = f"分解为 {n} 个子问题" if n else "分解中…"
+    elif event_type == "deep:round":
+        r = payload.get("round", 0)
+        n = payload.get("n_subqueries", 0)
+        summary = f"第 {r + 1} 轮检索（{n} 个子问题并行）"
+    elif event_type == "deep:rrf":
+        summary = f"RRF 融合 {payload.get('fused_count', 0)} 篇"
+    elif event_type == "deep:rank":
+        summary = "LLM 精排中"
+    elif event_type == "deep:synthesis":
+        summary = "生成综述段落"
+    with track_tool_call(tool_calls, event_type, payload) as tc:
+        tc.result_summary = summary
 logger = logging.getLogger(__name__)
 
 _SSE_QUEUE_SIZE = 128
@@ -42,6 +66,7 @@ class SearchAgentMessage(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000, description="用户搜索需求")
     mode: str = Field(default="accuracy", description="accuracy=准确性优先, novelty=新颖性优先")
     use_tavily: bool = Field(default=False, description="是否使用 Tavily 预搜索")
+    deep_search: bool = Field(default=False, description="启用深度搜索: 子问题分解+迭代检索+RRF融合")
     history: List[Dict[str, str]] = Field(default_factory=list, description="对话历史")
 
 
@@ -141,9 +166,31 @@ async def _run_search_agent_core(
         tc.result_summary = f"sort={intent.sort}, venues={intent.venues}, yf={intent.year_from}, kw={intent.keywords}"
 
     plan = ResolvedSearchPlan.from_search_intent(intent)
+    if request.deep_search:
+        plan.deep_search = True
+        plan.max_iterations = min(3, max(0, int(get_settings().papergraph_deep_search_max_iterations)))
+
     with track_tool_call(tool_calls, "search_pipeline", {"query": intent.query or merged_query}) as tc:
         tc.result_summary = "intent→SearchPlan→pipeline"
         mr = int(getattr(plan, "max_results", None) or intent.max_results or 10)
+        if getattr(plan, "deep_search", False):
+            deep_result = await run_deep_search_pipeline_async(
+                searcher=searcher, plan=plan, max_results=mr,
+                llm=agent.llm,
+                progress_callback=lambda t, p: _emit_deep_progress(tool_calls, t, p),
+            )
+            tc.result_summary = f"deep_search: ranked={len(deep_result.ranked)} method={deep_result.ranking_method}"
+            papers = litpapers_to_api_papers(rp.paper for rp in (deep_result.ranked or []))
+            prefix = f"深度搜索完成：分解为 {len(deep_result.metadata.get('sub_queries', []))} 个子问题，RRF 融合 {deep_result.total_candidates} 篇候选，为您找到 {len(papers)} 篇论文。" if papers else "深度搜索未找到相关论文。"
+            body = deep_result.synthesis + ("\n\n---\n\n" if deep_result.synthesis else "") + _explanation_with_suggestions(agent, intent, papers, request.mode, prefix_plain=prefix)
+            return SearchAgentResponse(
+                success=True,
+                response=body,
+                search_params=_search_params_from_intent(intent, mode=request.mode, deep_search=True, sub_queries=deep_result.metadata.get("sub_queries", [])),
+                tool_calls=normalize_tool_calls(tool_calls),
+                papers=papers,
+                total=len(papers),
+            )
         pip = await run_search_pipeline_async(searcher=searcher, plan=plan, max_results=mr)
         tc.result_summary = f"ranked={len(pip.ranked or [])}"
 
@@ -203,9 +250,11 @@ async def _search_agent_impl(request: SearchAgentMessage, searcher: Any):
 
 @router.post("/search-agent/stream")
 async def search_agent_chat_stream(
+    fastapi_request: Request,
     request: SearchAgentMessage,
     searcher=Depends(get_searcher),
 ):
+    check_rate_limit(fastapi_request.client.host if fastapi_request.client else "unknown", max_requests=10)
     async def gen():
         send, recv = anyio.create_memory_object_stream(_SSE_QUEUE_SIZE)
         tracker = ToolCallTracker(sink=lambda ev: send.send_nowait(ev))

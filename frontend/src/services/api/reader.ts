@@ -1,6 +1,7 @@
 import { apiClient } from './client'
 import type { Paper } from '@/types'
 type PaperReaderChatTurn = { role: string; content: string }
+export type PaperReaderCitation = { marker: string; page: number; snippet?: string }
 const PAPER_READER_CHAT_REQUEST_MS = 240000
 export async function postPaperReaderOpening(paperId: number): Promise<{ success: boolean; opening: string; pdf_parsing?: boolean }> {
   const response = await apiClient.post('/api/ai/paper-reader/opening', { paper_id: paperId })
@@ -9,7 +10,7 @@ export async function postPaperReaderOpening(paperId: number): Promise<{ success
 export async function postPaperReaderChat(body: {
   paper_id: number; messages: PaperReaderChatTurn[]; user_message: string
 }): Promise<{
-  success: boolean; reply: string; pdf_parsing?: boolean; related_papers?: Paper[]; related_hints?: any[]; kg_edges?: any[]
+  success: boolean; reply: string; pdf_parsing?: boolean; related_papers?: Paper[]; related_hints?: any[]; kg_edges?: any[]; citations?: PaperReaderCitation[]
 }> {
   const response = await apiClient.post('/api/ai/paper-reader/chat', body, {
     timeout: PAPER_READER_CHAT_REQUEST_MS,

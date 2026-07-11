@@ -90,12 +90,11 @@ class MemoryStore:
 
     def _llm_is_duplicate(self, a: str, b: str) -> bool:
         try:
-            from ..llm.llm_service import get_llm, coerce_hello_agents_llm_output_to_str
+            from ..llm.llm_service import get_llm
             import json as _json
             llm = get_llm()
             prompt = f"Are these two research notes semantically the same topic? Answer JSON only: {{\"duplicate\":true/false}}\n1: {a[:200]}\n2: {b[:200]}"
-            raw = llm.invoke([{"role":"user","content":prompt}], temperature=0.0, max_tokens=30)
-            txt = coerce_hello_agents_llm_output_to_str(raw).strip()
+            txt = llm.chat([{"role":"user","content":prompt}], temperature=0.0, max_tokens=30).content.strip()
             d = _json.loads(txt) if txt.startswith("{") else {}
             return bool(d.get("duplicate", False))
         except Exception:
@@ -361,7 +360,7 @@ class MemoryStore:
         try:
             from ..llm.llm_service import get_llm
             llm = get_llm()
-            summary = llm.invoke([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400)
+            summary = llm.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400).content
             return str(summary or "").strip()
         except Exception:
             return ""

@@ -48,6 +48,7 @@ from ...services.daily.daily_service import (
 )
 from ...settings import get_settings
 from ..dependencies import get_database, get_db_path, get_searcher
+from ..deps import optional_user
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ def get_library(
     tags: str | None = Query(default=None, description="逗号分隔标签"),
     category: str | None = Query(default=None, description="领域筛选"),
     db=Depends(get_database),
+    user: dict = Depends(optional_user),
 ):
     return get_library_service(
         db=db,
@@ -109,6 +111,7 @@ def get_library(
         read_status=read_status,
         tags=tags,
         category=category,
+        user_id=user["user_id"],
     )
 
 @router.post("/save", response_model=SavePapersResponse)
@@ -184,6 +187,7 @@ async def get_paper_library_pdf(
     paper_id: int,
     request: Request,
     db_path=Depends(get_db_path),
+    user: dict = Depends(optional_user),
 ):
     return build_library_pdf_response_service(paper_id=paper_id, request=request, db_path=db_path, logger_obj=logger)
 

@@ -15,7 +15,6 @@ from ...settings import get_settings
 from ...utils.common import suppress_exceptions, suppress_exceptions_async
 from .daily_recommend_feedback import get_high_value_keywords_from_feedback, get_skipped_papers
 from .user_behavior_analytics import get_user_interest_profile_for_daily_recommend
-from ..llm.llm_service import coerce_hello_agents_llm_output_to_str
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +146,7 @@ def build_daily_arxiv_query(mem_kw: set[str], lib_kw: set[str] | list[str] | Non
 
 def _llm_build_arxiv_query(keywords: list[str], *, log: Any = None) -> str:
     try:
-        from ..llm.llm_service import get_llm, is_llm_configured, coerce_hello_agents_llm_output_to_str
+        from ..llm.llm_service import get_llm, is_llm_configured
 
         if not is_llm_configured():
             return ""
@@ -159,9 +158,7 @@ def _llm_build_arxiv_query(keywords: list[str], *, log: Any = None) -> str:
             f"查询："
         )
         llm = get_llm()
-        raw = coerce_hello_agents_llm_output_to_str(
-            llm.invoke([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=128)
-        )
+        raw = llm.chat([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=128).content
         q = raw.strip().strip('"').strip("'")[:200]
         return q if len(q) >= 4 else ""
     except Exception as e:
@@ -214,13 +211,12 @@ async def extract_memory_keywords_via_llm(raw_texts: list[str], log: Any) -> set
             f"{memory_block}\n\n"
             'Format: ["keyword1", ...]'
         )
-        raw = await run_in_threadpool(
-            llm.invoke,
+        raw = await llm.achat(
             [{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=400,
         )
-        txt = coerce_hello_agents_llm_output_to_str(raw).strip()
+        txt = raw.content.strip()
         try:
             parsed = json.loads(txt)
         except Exception:
@@ -358,8 +354,7 @@ def llm_arxiv_categories(agent: Any, user_keywords: list[str], all_categories: l
     cats_str = ", ".join(all_categories)
     prompt = f"用户研究兴趣: {kw_str}\narXiv分类: {cats_str}\n选出最相关的4-6个分类，只返回逗号分隔列表:"
     try:
-        raw = agent.llm.invoke([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=60)
-        result = coerce_hello_agents_llm_output_to_str(raw).strip()
+        result = agent.llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=60).content.strip()
         selected = [c.strip() for c in result.split(",") if c.strip() in all_categories]
         return selected[:6] if selected else all_categories[:4]
     except Exception:

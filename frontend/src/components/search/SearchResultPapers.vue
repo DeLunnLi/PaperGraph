@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref, computed, watch } from 'vue'
 import { FilePdfOutlined, SaveOutlined } from '@ant-design/icons-vue'
 import LatexInline from '@/components/LatexInline.vue'
 import type { Paper } from '@/types'
@@ -15,6 +16,31 @@ const emit = defineEmits<{
   saveAll: []
 }>()
 
+const sortBy = ref('default')
+
+const sortedPapers = computed(() => {
+  if (sortBy.value === 'default') return props.papers
+  const arr = [...props.papers]
+  if (sortBy.value === 'year') {
+    arr.sort((a, b) => (b.year ?? 0) - (a.year ?? 0))
+  } else if (sortBy.value === 'citations') {
+    arr.sort((a, b) => (b.citations ?? 0) - (a.citations ?? 0))
+  }
+  return arr
+})
+
+function onSortChange() {
+  // sortedPapers is computed, re-renders automatically
+}
+
+const displayCount = ref(8)
+const visiblePapers = computed(() => sortedPapers.value.slice(0, displayCount.value))
+const hasMore = computed(() => displayCount.value < sortedPapers.value.length)
+function loadMore() {
+  displayCount.value += 8
+}
+watch(() => props.papers, () => { displayCount.value = 8 })
+
 function abstractPreview(abs: string, length = 280): string {
   return clipTextAvoidBreakingMath(abs, length)
 }
@@ -24,11 +50,18 @@ function abstractPreview(abs: string, length = 280): string {
   <div v-if="papers.length > 0" class="papers-list">
     <div class="papers-header">
       <span>为你找到 {{ total }} 篇相关论文：</span>
-      <a-button type="link" size="small" @click="emit('saveAll')">
-        <SaveOutlined /> 保存全部
-      </a-button>
+      <div class="papers-header__right">
+        <a-select v-model:value="sortBy" size="small" style="width: 110px" @change="onSortChange">
+          <a-select-option value="default">默认排序</a-select-option>
+          <a-select-option value="year">按年份</a-select-option>
+          <a-select-option value="citations">按引用数</a-select-option>
+        </a-select>
+        <a-button type="link" size="small" @click="emit('saveAll')">
+          <SaveOutlined /> 保存全部
+        </a-button>
+      </div>
     </div>
-    <div v-for="(paper, pIndex) in papers" :key="pIndex" class="paper-item">
+    <div v-for="(paper, pIndex) in visiblePapers" :key="pIndex" class="paper-item">
       <div class="paper-number">{{ pIndex + 1 }}.</div>
       <div class="paper-content">
         <div class="paper-title-line">
@@ -45,19 +78,16 @@ function abstractPreview(abs: string, length = 280): string {
           </span>
         </div>
         <div class="paper-meta">
-          <span v-if="paper.authors?.length">
-            <strong>作者：</strong>{{ paper.authors.map(a => a.name).slice(0, 5).join(', ') }}
-            <span v-if="paper.authors.length > 5"> 等</span>
+          <span v-if="paper.authors?.length" class="paper-meta__authors">
+            {{ paper.authors.map(a => a.name).slice(0, 5).join(', ') }}<span v-if="paper.authors.length > 5"> 等</span>
           </span>
-        </div>
-        <div class="paper-source">
-          <strong>期刊/会议：</strong>
+          <span class="paper-meta__dot">·</span>
           <LatexInline
+            class="paper-meta__venue"
             :text="`${paper.journal || paper.venue || (paper.source ? resultSourceMeta(paper.source).label + ' 预印本' : '—')} · ${paper.year ?? '—'}`"
           />
         </div>
         <div v-if="paper.abstract" class="paper-abstract">
-          <strong>摘要：</strong>
           <LatexInline :text="abstractPreview(paper.abstract, 280)" />
         </div>
         <div class="paper-footer">
@@ -81,42 +111,67 @@ function abstractPreview(abs: string, length = 280): string {
         </div>
       </div>
     </div>
+    <div v-if="hasMore" class="papers-loadmore">
+      <a-button type="link" @click="loadMore">
+        加载更多（剩余 {{ sortedPapers.length - displayCount }} 篇）
+      </a-button>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .papers-list {
-  background: #f8fafc;
-  border-radius: 12px;
-  padding: 16px 20px;
-  border: 1px solid #e2e8f0;
+  background: var(--pg-surface);
+  border-radius: var(--pg-radius-lg);
+  padding: 8px 18px;
+  border: 1px solid var(--pg-border);
+  box-shadow: var(--pg-shadow-xs);
   margin-top: 12px;
+}
+.papers-loadmore {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+  border-top: 1px solid var(--pg-border-soft);
+  margin-top: 8px;
 }
 .papers-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  border-bottom: 1px solid #e2e8f0;
-  font-size: 14px;
-  color: #64748b;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
+  border-bottom: 1px solid var(--pg-border-soft);
+  font-size: 13.5px;
+  color: var(--pg-text-secondary);
+  margin-bottom: 4px;
+  padding: 12px 0;
+}
+.papers-header__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .paper-item {
   display: flex;
   gap: 12px;
   padding: 16px 0;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--pg-border-soft);
 }
 .paper-item:last-child {
   border-bottom: none;
 }
 .paper-number {
-  font-weight: 700;
-  color: #3b82f6;
-  font-size: 15px;
+  font-weight: 600;
+  color: var(--pg-primary);
+  font-size: 14px;
   flex-shrink: 0;
-  min-width: 24px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: var(--pg-radius-pill);
+  background: var(--pg-primary-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .paper-content {
   flex: 1;
@@ -125,27 +180,46 @@ function abstractPreview(abs: string, length = 280): string {
 .paper-title-line {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .paper-title-link {
-  font-weight: 600;
-  font-size: 15px;
-  color: #1e40af;
+  font-weight: 650;
+  font-size: 15.5px;
+  color: var(--pg-text);
+  line-height: 1.4;
 }
 .paper-title-text {
-  font-weight: 600;
-  font-size: 15px;
-  color: #1e293b;
+  font-weight: 650;
+  font-size: 15.5px;
+  color: var(--pg-text);
+  line-height: 1.4;
 }
-.paper-meta,
-.paper-source,
-.paper-abstract {
+.paper-title-link:hover {
+  color: var(--pg-primary-hover);
+}
+.paper-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
-  color: #475569;
+  color: var(--pg-text-tertiary);
   margin-bottom: 6px;
-  line-height: 1.55;
+  line-height: 1.5;
+}
+.paper-meta__authors {
+  color: var(--pg-text-secondary);
+}
+.paper-meta__dot {
+  opacity: 0.6;
+}
+.paper-abstract {
+  font-size: 13.5px;
+  color: var(--pg-text-secondary);
+  line-height: 1.62;
+  margin-bottom: 6px;
 }
 .paper-footer {
   display: flex;
@@ -160,13 +234,16 @@ function abstractPreview(abs: string, length = 280): string {
   gap: 6px;
   flex-wrap: wrap;
 }
+.paper-tags :deep(.ant-tag),
+.paper-badges :deep(.ant-tag) {
+  margin-inline-end: 0 !important;
+  border-radius: var(--pg-radius-pill);
+  font-size: 12px;
+}
 .paper-actions {
   display: flex;
   gap: 4px;
   align-items: center;
-}
-.paper-title-link:hover {
-  text-decoration: underline;
 }
 @media (max-width: 768px) {
   .paper-title-line {

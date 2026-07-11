@@ -1,0 +1,122 @@
+/* PaperGraph — 亮色高级 + 玻璃拟态主题
+ * 设计语言:大留白 · 衬线标题 · 细线分割 · 玻璃质感容器 · 深靛强调
+ * 参考:Stripe / Notion / Linear 的高级感 + backdrop-blur 玻璃卡
+ */
+:root {
+  /* 品牌强调 —— 深靛色系,克制不浮夸 */
+  --pg-primary: #1e1b4b;
+  --pg-primary-hover: #312e81;
+  --pg-primary-soft: #eef2ff;
+  --pg-primary-softer: #f5f6ff;
+  --pg-accent: #4338ca;
+  --pg-gradient: linear-gradient(135deg, #1e1b4b 0%, #4338ca 100%);
+
+  /* 背景 —— 亮色高级底,非纯白 */
+  --pg-bg: #fafafa;
+  --pg-bg-soft: #f6f6f8;
+  --pg-surface: #ffffff;
+  --pg-sider: rgba(255, 255, 255, 0.72);
+  --pg-bg-aurora: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.08), transparent),
+                  radial-gradient(ellipse 60% 50% at 100% 100%, rgba(67, 56, 202, 0.05), transparent);
+
+  /* 玻璃拟态容器 */
+  --pg-glass-bg: rgba(255, 255, 255, 0.55);
+  --pg-glass-bg-strong: rgba(255, 255, 255, 0.72);
+  --pg-sider-bg: linear-gradient(180deg, rgba(255,255,255,0.65) 0%, rgba(245,246,255,0.55) 100%);
+  --pg-glass-border: rgba(255, 255, 255, 0.7);
+  --pg-glass-blur: saturate(180%) blur(16px);
+  --pg-glass-blur-light: saturate(140%) blur(8px);
+
+  /* 文本 */
+  --pg-text: #18181b;
+  --pg-text-secondary: #52525b;
+  --pg-text-tertiary: #71717a;
+  --pg-text-inverse: #ffffff;
+  --pg-text-heading: #0c0a1d;
+
+  /* 边框 —— 细线分割,极淡 */
+  --pg-border: #ebebee;
+  --pg-border-soft: #f2f2f4;
+  --pg-divider: rgba(24, 24, 27, 0.06);
+
+  /* 圆角 */
+  --pg-radius-sm: 6px;
+  --pg-radius: 10px;
+  --pg-radius-lg: 14px;
+  --pg-radius-xl: 20px;
+  --pg-radius-pill: 999px;
+
+  /* 阴影 —— 柔和层次,不硬边 */
+  --pg-shadow-xs: 0 1px 2px rgba(12, 10, 29, 0.03);
+  --pg-shadow-sm: 0 1px 3px rgba(12, 10, 29, 0.04), 0 1px 2px rgba(12, 10, 29, 0.02);
+  --pg-shadow-md: 0 4px 20px rgba(12, 10, 29, 0.06);
+  --pg-shadow-lg: 0 12px 40px rgba(12, 10, 29, 0.08);
+  --pg-shadow-primary: 0 8px 24px rgba(67, 56, 202, 0.18);
+
+  /* 字体 —— 衬线标题 + 无衬线正文,学术感 */
+  --pg-font-serif: "Source Serif Pro", "Noto Serif SC", "Songti SC", Georgia,
+    "Times New Roman", serif;
+  --pg-font: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+
+  /* 间距 */
+  --pg-space-xs: 4px;
+  --pg-space-sm: 8px;
+  --pg-space-md: 12px;
+  --pg-space-lg: 16px;
+  --pg-space-xl: 24px;
+  --pg-space-2xl: 40px;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--pg-bg);
+  color: var(--pg-text);
+  font-family: var(--pg-font);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* 全局滚动条柔化 */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(82, 82, 91, 0.2);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(82, 82, 91, 0.38);
+}
+
+/* 玻璃拟态容器 —— 通用工具类 */
+.pg-glass {
+  background: var(--pg-glass-bg);
+  backdrop-filter: var(--pg-glass-blur);
+  -webkit-backdrop-filter: var(--pg-glass-blur);
+  border: 1px solid var(--pg-glass-border);
+  box-shadow: var(--pg-shadow-sm);
+}
+.pg-glass--strong {
+  background: var(--pg-glass-bg-strong);
+}
+.pg-card {
+  background: var(--pg-surface);
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius-lg);
+  box-shadow: var(--pg-shadow-xs);
+}

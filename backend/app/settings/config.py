@@ -65,6 +65,19 @@ class Settings(BaseSettings):
         description="PDF 等文件落盘目录，默认 backend/downloads/papers",
     )
 
+    mcp_arxiv_enabled: bool = Field(
+        default=False,
+        description="是否启用 arxiv-mcp-server 作为检索源（opt-in；spawn-per-call，约 0.5s 启动开销）",
+    )
+    mcp_arxiv_command: str = Field(
+        default="",
+        description="arxiv-mcp-server 可执行文件路径；留空则在当前 Python 环境的 bin 目录查找",
+    )
+    mcp_arxiv_storage_path: str = Field(
+        default="",
+        description="arxiv-mcp-server 论文本地存储目录；留空则用 data_dir/mcp_arxiv_storage",
+    )
+
     log_level: str = "INFO"
 
     daily_arxiv_cs_categories: str = Field(
@@ -137,6 +150,12 @@ class Settings(BaseSettings):
         description="进入精排前的最大候选篇数（多源召回上限）",
     )
     papergraph_fine_rank_candidates: int = Field(default=15, ge=5, le=40)
+    papergraph_deep_search_max_sub_queries: int = Field(default=4, ge=1, le=6, description="深度搜索子问题上限")
+    papergraph_deep_search_max_iterations: int = Field(default=2, ge=0, le=3, description="深度搜索迭代轮数上限")
+    papergraph_deep_search_recall_per_subquery: int = Field(default=12, ge=4, le=30, description="每个子问题召回数")
+    papergraph_deep_search_synthesis_enabled: bool = Field(default=True, description="深度搜索是否生成综述")
+    papergraph_deep_search_decompose_timeout_sec: float = Field(default=20.0, ge=5.0, le=60.0)
+    papergraph_deep_search_synthesis_timeout_sec: float = Field(default=45.0, ge=10.0, le=120.0)
     papergraph_search_http_max_attempts: int = Field(default=2, ge=1, le=5)
     papergraph_pipeline_parallel_presearch: bool = Field(default=True)
     papergraph_venue_hydrate_wall_sec: float = Field(

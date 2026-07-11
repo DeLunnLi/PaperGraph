@@ -5,7 +5,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import httpx, requests
+import httpx
+from requests import Session
+from requests.adapters import HTTPAdapter
 
 from ..paper import Paper
 from ...utils.async_sync import run_coroutine_sync
@@ -111,6 +113,7 @@ from .sources.openalex import (
     search_openalex as _search_openalex_src,
     _search_openalex_works_by_author_async,
 )
+from .sources.mcp import _search_mcp_src
 
 
 class PaperSearcher:
@@ -121,7 +124,11 @@ class PaperSearcher:
         self.email, self.api_key, self.download_dir = _email, api_key, download_dir
         os.makedirs(self.download_dir, exist_ok=True)
         self._rate = RateLimiter(fixed_delays={"arxiv": 0.1, "openalex": 0.15, "dblp": 0.35})
-        self._session = requests.Session()
+        # Configure session with connection pooling
+        self._session = Session()
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=50)
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
         self._async_client: Optional[httpx.AsyncClient] = None
         self._async_client_loop: Optional[asyncio.AbstractEventLoop] = None
         self.stats = {"arxiv_requests": 0, "dblp_requests": 0, "openalex_requests": 0,
@@ -208,9 +215,11 @@ class PaperSearcher:
                     await asyncio.sleep(4 + attempt * 4); continue
                 resp.raise_for_status()
                 return resp
-            except Exception:
-                if attempt < max_attempts - 1: await asyncio.sleep(4 + attempt * 4); continue
-                raise
+            except (httpx.HTTPStatusError, httpx.RequestError, httpx.TimeoutException) as exc:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(4 + attempt * 4)
+                    continue
+                raise RuntimeError(f"HTTP request failed after {max_attempts} attempts: {exc}") from exc
 
     def _post_process_results(self, all_results: List[Paper], query: str, *, max_results: int,
                               **kwargs: Any) -> List[Paper]:
@@ -296,6 +305,7 @@ class PaperSearcher:
             "dblp": float(kwargs.get("dblp_timeout_sec") or 32.0),
             "openalex": float(kwargs.get("openalex_timeout_sec") or kwargs.get("http_timeout_sec") or 45.0),
             "arxiv": float(kwargs.get("arxiv_timeout_sec") or kwargs.get("http_timeout_sec") or 30.0),
+            "mcp": float(kwargs.get("mcp_timeout_sec") or 45.0),
         }
 
         async def _fetch_src(src: str) -> List[Paper]:
@@ -313,6 +323,8 @@ class PaperSearcher:
                 return await _search_openalex_src(self, query, per_src_n, **kwargs)
             elif src == "dblp":
                 return await _search_dblp_src(self, query, per_src_n, **kwargs)
+            elif src == "mcp":
+                return await _search_mcp_src(self, query, per_src_n, **kwargs)
             else:
                 return []
 

@@ -7,13 +7,33 @@ export const apiClient = axios.create({
   timeout: 120000,
   headers: { 'Content-Type': 'application/json' },
 })
+
+// Inject JWT token on every request
+apiClient.interceptors.request.use((config) => {
+  const token = localStorage.getItem('pg_token')
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers['Authorization'] = `Bearer ${token}`
+  }
+  return config
+})
+
+// Auto-logout on 401 + error formatting
 apiClient.interceptors.response.use(
   (res) => res,
   (err: unknown) => {
     const ax = err as {
       code?: string; message?: string
-      response?: { data?: { detail?: unknown } }
+      response?: { status?: number; data?: { detail?: unknown } }
       config?: { url?: string }
+    }
+    // 401 → clear token, redirect to login
+    if (ax?.response?.status === 401) {
+      localStorage.removeItem('pg_token')
+      localStorage.removeItem('pg_username')
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
     }
     const msg0 = String(ax?.message ?? '')
     if (ax.code === 'ECONNABORTED' || /timeout of \d+ms exceeded/i.test(msg0)) {

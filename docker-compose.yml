@@ -1,0 +1,48 @@
+# PaperGraph — 一键 Docker 部署
+#
+# 使用方法:
+#   1. 在本目录创建 .env 文件,填入 LLM_API_KEY 等(参考 .env.example)
+#   2. docker compose up -d --build
+#   3. 访问 http://localhost:5173 (前端) / http://localhost:8000/health (后端)
+
+version: "3.8"
+
+services:
+  backend:
+    build: ./backend
+    container_name: papergraph-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - papergraph-data:/app/data
+      - papergraph-downloads:/app/downloads/papers
+    env_file:
+      - .env
+    environment:
+      - PAPERGRAPH_DATA_DIR=/app/data
+      - PAPERGRAPH_DOWNLOADS_DIR=/app/downloads/papers
+      - HOST=0.0.0.0
+      - PORT=8000
+      - PAPERGRAPH_UVICORN_RELOAD=0
+      - CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    build: ./frontend
+    container_name: papergraph-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  papergraph-data:
+  papergraph-downloads:

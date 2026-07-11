@@ -358,7 +358,7 @@ class LlmPaperRanker:
 
             fallback = sorted(list(papers or []), key=_pool_fallback_sort_key, reverse=True)
             if main_conference_proceedings_only and target_venue:
-                yf, yt = kwargs.get("year_from"), kwargs.get("year_to")
+                yf, yt = year_from, year_to
                 pin_y = int(yf) if yf is not None and yf == yt else None
                 fallback = [
                     rp

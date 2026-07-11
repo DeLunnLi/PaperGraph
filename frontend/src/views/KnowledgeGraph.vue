@@ -3,6 +3,7 @@
     <div class="kg-toolbar">
       <a-space wrap>
         <a-button type="primary" :loading="loading" @click="load">刷新图谱</a-button>
+        <a-button @click="exportPNG" :disabled="rawNodes.length === 0">导出 PNG</a-button>
         <a-input
           v-model:value="filterText"
           allow-clear
@@ -44,9 +45,9 @@
         <a-card size="small" :title="selectedEdge ? '边信息' : '节点信息'" :bordered="false">
           <div v-if="selected == null && selectedEdge == null" class="kg-empty">
             <template v-if="!loading && rawNodes.length === 0">
-              当前文献库中没有任何论文记录，因此图谱为空。请先到「文献检索」等页面将论文<strong>保存到文献库</strong>；保存后文献库会列出条目，知识图谱会显示论文节点，论文间关系由后台异步构建（新入库后边上可能仍较少）。
+              图谱还是空的。先去「文献搜索」保存几篇论文，知识图谱会自动构建论文间的关系网络。
             </template>
-            <template v-else>点击图中节点/边查看详情</template>
+            <template v-else>点击图中节点或边查看详情</template>
           </div>
           <div v-else-if="selectedEdge" class="kg-info">
             <div class="kg-info__title">{{ selectedEdge.sourceLabel }} → {{ selectedEdge.targetLabel }}</div>
@@ -82,7 +83,7 @@
             <div v-if="selected!.year != null" class="kg-info__kv"><strong>year</strong>：{{ selected!.year }}</div>
             <div v-if="selected!.category" class="kg-info__kv"><strong>category</strong>：{{ selected!.category }}</div>
             <template v-if="selected!.type === 'paper' && selected!.paper_id">
-              <div v-if="paperDetailLoading" class="kg-info__kv" style="color:#8c8c8c">加载论文详情中…</div>
+              <div v-if="paperDetailLoading" class="kg-info__kg-info__kv" style="color: var(--pg-text-tertiary);">加载论文详情中…</div>
               <template v-else-if="paperDetail">
                 <div v-if="paperDetail.authors?.length" class="kg-info__kv"><strong>authors</strong>：{{ paperDetail.authors.map((a: any) => a.name).join(', ') }}</div>
                 <div v-if="paperDetail.journal" class="kg-info__kv"><strong>{{ paperDetail.venue_type === 'conference' ? 'conference' : paperDetail.venue_type === 'preprint' ? 'preprint' : 'journal' }}</strong>：{{ paperDetail.journal }}</div>
@@ -169,6 +170,43 @@ const filteredEdges = computed(() => {
   return rawEdges.value.filter((e) => s.has(e.source) && s.has(e.target))
 })
 let cleanup: (() => void) | null = null
+const exportPNG = () => {
+  const wrap = svgWrap.value
+  if (!wrap) return
+  const svg = wrap.querySelector('svg')
+  if (!svg) {
+    message.warning('图谱尚未渲染')
+    return
+  }
+  try {
+    const svgData = new XMLSerializer().serializeToString(svg)
+    const canvas = document.createElement('canvas')
+    const rect = svg.getBoundingClientRect()
+    canvas.width = rect.width * 2
+    canvas.height = rect.height * 2
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    const img = new Image()
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      canvas.toBlob((blob) => {
+        if (!blob) return
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `knowledge_graph_${new Date().toISOString().slice(0, 10)}.png`
+        a.click()
+        URL.revokeObjectURL(url)
+        message.success('图谱已导出为 PNG')
+      })
+    }
+    img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)))
+  } catch (e) {
+    message.error('导出失败')
+  }
+}
 const openPaper = (id: number) => {
   const href = router.resolve({ path: `/library/read/${id}`, query: { standalone: '1' } }).href
   window.open(href, '_blank', 'noopener,noreferrer')
@@ -264,10 +302,10 @@ watch(selected, (node) => {
   }
 })
 function colorFor(t: string) {
-  if (t === 'paper') return '#1677ff'
-  if (t === 'author') return '#52c41a'
-  if (t === 'keyword') return '#722ed1'
-  return '#8c8c8c'
+  if (t === 'paper') return '#6366f1'
+  if (t === 'author') return '#14b8a6'
+  if (t === 'keyword') return '#8b5cf6'
+  return 'var(--pg-text-tertiary)'
 }
 function render() {
   if (!svgWrap.value) return
@@ -283,7 +321,7 @@ function render() {
     .append('svg')
     .attr('width', width)
     .attr('height', height)
-    .style('background', '#fff')
+    .style('background', 'transparent')
     .on('click', () => {
       selected.value = null
       selectedEdge.value = null
@@ -327,7 +365,7 @@ function render() {
     .force('collide', d3.forceCollide().radius((d: any) => 6 + Math.sqrt(d.weight ?? 1) * 2))
   const link = g
     .append('g')
-    .attr('stroke', 'rgba(0,0,0,0.15)')
+    .attr('stroke', 'var(--pg-divider)')
     .selectAll('line')
     .data(links)
     .join('line')
@@ -374,7 +412,7 @@ function render() {
     .join('circle')
     .attr('r', (d: any) => 5 + Math.sqrt(d.weight ?? 1) * 1.5)
     .attr('fill', (d: any) => colorFor(d.type))
-    .attr('stroke', '#fff')
+    .attr('stroke', 'var(--pg-surface)')
     .attr('stroke-width', 1.5)
     .call(
       d3
@@ -445,58 +483,93 @@ onBeforeUnmount(() => {
 .kg-page {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 .kg-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--pg-surface);
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius-lg);
+  box-shadow: var(--pg-shadow-xs);
+}
+.kg-meta {
+  display: flex;
+  gap: 6px;
+}
+.kg-meta :deep(.ant-tag) {
+  margin-inline-end: 0;
+  border-radius: var(--pg-radius-pill);
 }
 .kg-body {
   display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 12px;
+  grid-template-columns: 1fr clamp(260px, 25vw, 340px);
+  gap: 14px;
   min-height: 70vh;
 }
 .kg-canvas {
-  border: 1px solid #f0f0f0;
-  border-radius: 10px;
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius-lg);
   overflow: hidden;
   min-height: 70vh;
   position: relative;
+  background: var(--pg-surface);
+  box-shadow: var(--pg-shadow-xs);
 }
 .kg-side {
   min-height: 70vh;
 }
+.kg-side :deep(.ant-card) {
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius-lg);
+  box-shadow: var(--pg-shadow-xs);
+}
+.kg-side :deep(.ant-card-head) {
+  border-bottom: 1px solid var(--pg-border-soft);
+  min-height: 44px;
+}
 .kg-empty {
-  color: rgba(0,0,0,0.45);
-  line-height: 1.55;
+  color: var(--pg-text-tertiary);
+  line-height: 1.6;
   font-size: 13px;
 }
 .kg-info__title {
   font-weight: 700;
   margin-bottom: 8px;
+  color: var(--pg-text);
+  line-height: 1.4;
 }
 .kg-abstract {
   font-size: 12px;
-  line-height: 1.5;
-  color: rgba(0,0,0,0.65);
+  line-height: 1.55;
+  color: var(--pg-text-secondary);
   max-height: 200px;
   overflow-y: auto;
   margin-top: 4px;
 }
 .kg-info__kv {
-  margin: 4px 0;
+  margin: 5px 0;
   font-size: 13px;
+  color: var(--pg-text-secondary);
+  line-height: 1.5;
+}
+.kg-info__kv strong {
+  color: var(--pg-text);
+  font-weight: 600;
 }
 .kg-evidence {
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: rgba(0,0,0,0.04);
+  padding: 10px 12px;
+  border-radius: var(--pg-radius);
+  background: var(--pg-bg-soft);
+  border: 1px solid var(--pg-border-soft);
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.45;
-  color: rgba(0,0,0,0.85);
+  line-height: 1.5;
+  color: var(--pg-text);
   margin-top: 6px;
 }
 .kg-hover-tip {
@@ -504,24 +577,24 @@ onBeforeUnmount(() => {
   z-index: 5;
   pointer-events: none;
   max-width: 420px;
-  background: rgba(255,255,255,0.96);
-  border: 1px solid rgba(0,0,0,0.12);
-  border-radius: 10px;
-  box-shadow: 0 10px 26px rgba(0,0,0,0.12);
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius);
+  box-shadow: var(--pg-shadow-lg);
   padding: 10px 12px;
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(8px);
 }
 .kg-hover-tip__title {
   font-weight: 700;
   font-size: 13px;
   line-height: 1.35;
-  color: rgba(0,0,0,0.88);
+  color: var(--pg-text);
   word-break: break-word;
   margin-bottom: 4px;
 }
 .kg-hover-tip__meta {
   font-size: 12px;
-  color: rgba(0,0,0,0.55);
+  color: var(--pg-text-tertiary);
   line-height: 1.3;
   word-break: break-word;
 }
@@ -531,6 +604,14 @@ onBeforeUnmount(() => {
   }
   .kg-side {
   min-height: auto;
+  }
+}
+@media (max-width: 640px) {
+  .kg-toolbar {
+    padding: 10px 12px;
+  }
+  .kg-canvas {
+    min-height: 50vh;
   }
 }
 </style>

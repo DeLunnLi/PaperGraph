@@ -1,126 +1,22 @@
 
 import logging
 import os
-from functools import wraps
 from typing import Any
-from collections.abc import Callable
 
-from hello_agents import HelloAgentsLLM
+from .client import LLMClient, ChatResult
 from ...settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-def normalize_openai_compatible_chat_messages(messages: Any) -> Any:
-    if not isinstance(messages, list):
-        return messages
-    out: list[Any] = []
-    for m in messages:
-        if not isinstance(m, dict):
-            out.append(m)
-            continue
-        role = str(m.get("role") or "").strip().lower()
-        content = m.get("content")
-        if role == "summary":
-            text = content if isinstance(content, str) else ("" if content is None else str(content))
-            out.append({"role": "user", "content": ("[前文摘要]\n" + text).strip()})
-            continue
-        if role == "developer":
-            text = content if isinstance(content, str) else ("" if content is None else str(content))
-            nm = dict(m)
-            nm["role"] = "system"
-            nm["content"] = text
-            out.append(nm)
-            continue
-        out.append(m)
-    return out
+# ----------------------------------------------------------------------
+# 历史背景：原本此处有两个 monkey-patch ——
+#   (a) _patch_hello_agents_llm_openai_chat_roles  角色归一化（summary/developer）
+#   (b) _patch_deepseek_disable_thinking           DeepSeek thinking 禁用
+# 现已由 LLMClient._normalize_messages / LLMClient._merge_extra 收敛，不再打补丁。
+# ----------------------------------------------------------------------
 
-def _patch_hello_agents_llm_openai_chat_roles() -> None:
-    marker = "_papergraph_openai_role_normalize_applied"
-    if getattr(HelloAgentsLLM, marker, False):
-        return
+_llm_instance: LLMClient | None = None
 
-    def _wrap(orig: Callable[..., Any]) -> Callable[..., Any]:
-        @wraps(orig)
-        def inner(self: Any, *args: Any, **kwargs: Any) -> Any:
-            if args and isinstance(args[0], list):
-                args = (normalize_openai_compatible_chat_messages(args[0]),) + tuple(args[1:])
-            elif isinstance(kwargs.get("messages"), list):
-                kwargs = dict(kwargs)
-                kwargs["messages"] = normalize_openai_compatible_chat_messages(kwargs["messages"])
-            return orig(self, *args, **kwargs)
-
-        return inner
-
-    HelloAgentsLLM.invoke = _wrap(HelloAgentsLLM.invoke)
-    if hasattr(HelloAgentsLLM, "invoke_with_tools"):
-        HelloAgentsLLM.invoke_with_tools = _wrap(HelloAgentsLLM.invoke_with_tools)
-    for _async_name in ("ainvoke", "async_invoke"):
-        if hasattr(HelloAgentsLLM, _async_name):
-            setattr(HelloAgentsLLM, _async_name, _wrap(getattr(HelloAgentsLLM, _async_name)))
-    setattr(HelloAgentsLLM, marker, True)
-    logger.debug("HelloAgentsLLM: patched invoke* for OpenAI-compatible message roles (summary→user)")
-
-_patch_hello_agents_llm_openai_chat_roles()
-
-def _patch_deepseek_disable_thinking() -> None:
-    marker = "_papergraph_deepseek_thinking_disabled"
-    if getattr(HelloAgentsLLM, marker, False):
-        return
-
-    import re as _re
-
-    def _is_deepseek(llm_self: Any) -> bool:
-        base = str(getattr(getattr(llm_self, "_adapter", None), "base_url", "") or "")
-        return bool(_re.search(r"deepseek", base, _re.I))
-
-    def _wrap(orig: Callable[..., Any]) -> Callable[..., Any]:
-        @wraps(orig)
-        def inner(self: Any, *args: Any, **kwargs: Any) -> Any:
-            if _is_deepseek(self):
-                kwargs = dict(kwargs)
-                extra = dict(kwargs.get("extra_body") or {})
-                if "thinking" not in extra:
-                    extra["thinking"] = {"type": "disabled"}
-                kwargs["extra_body"] = extra
-            return orig(self, *args, **kwargs)
-
-        return inner
-
-    HelloAgentsLLM.invoke = _wrap(HelloAgentsLLM.invoke)
-    if hasattr(HelloAgentsLLM, "invoke_with_tools"):
-        HelloAgentsLLM.invoke_with_tools = _wrap(HelloAgentsLLM.invoke_with_tools)
-    for _async_name in ("ainvoke", "async_invoke"):
-        if hasattr(HelloAgentsLLM, _async_name):
-            setattr(HelloAgentsLLM, _async_name, _wrap(getattr(HelloAgentsLLM, _async_name)))
-    setattr(HelloAgentsLLM, marker, True)
-    logger.debug("HelloAgentsLLM: patched invoke* to disable thinking mode for DeepSeek")
-
-_patch_deepseek_disable_thinking()
-
-_llm_instance: HelloAgentsLLM | None = None
-
-def coerce_hello_agents_llm_output_to_str(out: Any) -> str:
-    if out is None:
-        return ""
-    if isinstance(out, str):
-        return out
-    for attr in ("content", "text"):
-        v = getattr(out, attr, None)
-        if isinstance(v, str):
-            return v
-    msg = getattr(out, "message", None)
-    if msg is not None:
-        c = getattr(msg, "content", None)
-        if isinstance(c, str):
-            return c
-    choices = getattr(out, "choices", None)
-    if isinstance(choices, list) and choices:
-        m = getattr(choices[0], "message", None)
-        if m is not None:
-            c = getattr(m, "content", None)
-            if isinstance(c, str):
-                return c
-    return str(out)
 
 def _maybe_disable_proxy_for_llm(base_url: str) -> None:
     url = (base_url or "").strip()
@@ -202,7 +98,7 @@ def _sync_env_from_settings() -> None:
     if not os.getenv("LLM_MODEL_ID") and not os.getenv("OPENAI_MODEL") and s.openai_model:
         os.environ["LLM_MODEL_ID"] = s.openai_model
 
-def get_llm() -> HelloAgentsLLM:
+def get_llm() -> LLMClient:
     global _llm_instance
     if _llm_instance is None:
 
@@ -225,6 +121,12 @@ def get_llm() -> HelloAgentsLLM:
 
         _maybe_disable_proxy_for_llm(base_url)
 
+        # 与原 HelloAgentsLLM 行为一致：支持 LLM_TIMEOUT env，默认 60s。
+        try:
+            timeout = int(os.getenv("LLM_TIMEOUT", "60"))
+        except ValueError:
+            timeout = 60
+
         kw = {}
         if model:
             kw["model"] = model
@@ -232,14 +134,14 @@ def get_llm() -> HelloAgentsLLM:
             kw["api_key"] = api_key
         if base_url:
             kw["base_url"] = base_url
+        kw["timeout"] = timeout
 
         logger.info("🔧 正在初始化 LLM...")
         logger.info("   Model: %s", model or "default")
         logger.info("   Base URL: %s", base_url or "default")
 
-        _llm_instance = HelloAgentsLLM(**kw)
+        _llm_instance = LLMClient(**kw)
         logger.info("✅ LLM 已初始化")
         logger.info("   实际模型: %s", getattr(_llm_instance, "model", "") or "unknown")
-
         logger.info("   Provider: %s", getattr(_llm_instance, "provider", None) or "unknown")
     return _llm_instance

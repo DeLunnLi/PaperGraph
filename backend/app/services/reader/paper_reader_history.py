@@ -9,9 +9,17 @@ from ...utils.common import exec_sql
 
 def ensure_tables(db_path: str) -> None:
     exec_sql(db_path,
-        "CREATE TABLE IF NOT EXISTS paper_reader_turns(id INTEGER PRIMARY KEY AUTOINCREMENT,paper_id INTEGER NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS paper_reader_turns(id INTEGER PRIMARY KEY AUTOINCREMENT,paper_id INTEGER NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL,metadata TEXT)",
         "CREATE INDEX IF NOT EXISTS idx_paper_reader_turns_paper ON paper_reader_turns(paper_id,created_at)",
     )
+    # Migration: add metadata column if missing
+    try:
+        with _conn(db_path) as conn:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(paper_reader_turns)").fetchall()]
+            if "metadata" not in cols:
+                conn.execute("ALTER TABLE paper_reader_turns ADD COLUMN metadata TEXT")
+    except Exception:
+        pass
 
 @contextmanager
 def _conn(db_path: str, *, row_factory=None):
@@ -24,7 +32,7 @@ def _conn(db_path: str, *, row_factory=None):
     finally:
         conn.close()
 
-def append_turn(db_path: str, *, paper_id: int, role: str, content: str) -> None:
+def append_turn(db_path: str, *, paper_id: int, role: str, content: str, metadata: str | None = None) -> None:
     ensure_tables(db_path)
     role2 = (role or "").strip().lower()
     if role2 not in ("user", "assistant"):
@@ -35,8 +43,8 @@ def append_turn(db_path: str, *, paper_id: int, role: str, content: str) -> None
     now = int(time.time())
     with _conn(db_path) as conn:
         conn.execute(
-            "INSERT INTO paper_reader_turns(paper_id,role,content,created_at) VALUES(?,?,?,?)",
-            (int(paper_id), role2, text, now),
+            "INSERT INTO paper_reader_turns(paper_id,role,content,created_at,metadata) VALUES(?,?,?,?,?)",
+            (int(paper_id), role2, text, now, metadata),
         )
 
 def prepend_turn(
@@ -78,8 +86,17 @@ def ensure_opening_turn(db_path: str, *, paper_id: int, opening_text: str) -> No
     r0 = (first.get("role") or "").strip().lower()
     c0 = (first.get("content") or "").strip()
     if r0 == "assistant" and c0 == op:
-        return
+        return  # Already up to date
     if r0 == "assistant":
+        # Opening content changed (e.g. re-generated) — update the first turn
+        try:
+            with _conn(db_path) as conn:
+                conn.execute(
+                    "UPDATE paper_reader_turns SET content=? WHERE paper_id=? AND role='assistant' ORDER BY created_at ASC LIMIT 1",
+                    (op, int(paper_id)),
+                )
+        except Exception:
+            pass
         return
     if r0 == "user":
         try:
@@ -89,13 +106,19 @@ def ensure_opening_turn(db_path: str, *, paper_id: int, opening_text: str) -> No
         prepend_turn(db_path, paper_id=int(paper_id), role="assistant", content=op, before_created_at=ts0)
         return
 
-def list_turns(db_path: str, *, paper_id: int, limit: int = 200) -> list[dict[str, str | None]]:
+def list_turns(db_path: str, *, paper_id: int, limit: int = 200, user_id: int | None = None) -> list[dict[str, str | None]]:
     ensure_tables(db_path)
     with _conn(db_path, row_factory=sqlite3.Row) as conn:
-        rows = conn.execute(
-            "SELECT role,content,created_at FROM paper_reader_turns WHERE paper_id=? ORDER BY created_at ASC,id ASC LIMIT ?",
-            (int(paper_id), int(limit)),
-        ).fetchall()
+        if user_id is not None:
+            rows = conn.execute(
+                "SELECT role,content,created_at FROM paper_reader_turns WHERE paper_id=? AND user_id=? ORDER BY created_at ASC,id ASC LIMIT ?",
+                (int(paper_id), int(user_id), int(limit)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT role,content,created_at FROM paper_reader_turns WHERE paper_id=? ORDER BY created_at ASC,id ASC LIMIT ?",
+                (int(paper_id), int(limit)),
+            ).fetchall()
         out: list[dict[str, str | None]] = []
         for r in rows:
             out.append({

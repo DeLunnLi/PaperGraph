@@ -2,7 +2,7 @@ import { backendLocalhostUrl } from '@/config/ports'
 import { apiClient, API_BASE_URL } from './client'
 import type { Paper } from '@/types'
 interface SearchAgentRequest {
-  message: string; mode?: 'accuracy' | 'novelty'; use_tavily?: boolean
+  message: string; mode?: 'accuracy' | 'novelty'; use_tavily?: boolean; deep_search?: boolean
   history?: Array<{ role: string; content: string }>
 }
 interface ToolCall {
@@ -41,6 +41,12 @@ export type SearchAgentStreamEvent =
   | { type: 'final'; ts_ms?: number; elapsed_ms?: number; success?: boolean }
   | { type: 'error'; ts_ms?: number; message?: string }
   | { type: 'final_result'; ts_ms?: number; result: SearchAgentResponse }
+  | { type: 'deep:decompose'; ts_ms?: number; phase?: string; sub_queries?: string[]; round?: number }
+  | { type: 'deep:round'; ts_ms?: number; phase?: string; round?: number; total_rounds?: number; n_subqueries?: number }
+  | { type: 'deep:expand'; ts_ms?: number; new_subqueries?: string[]; round?: number }
+  | { type: 'deep:rrf'; ts_ms?: number; phase?: string; fused_count?: number }
+  | { type: 'deep:rank'; ts_ms?: number; phase?: string; candidate_count?: number }
+  | { type: 'deep:synthesis'; ts_ms?: number; phase?: string }
 export async function searchAgentChatStream(
   request: SearchAgentRequest,
   onEvent: (ev: SearchAgentStreamEvent) => void,

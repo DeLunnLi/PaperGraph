@@ -10,6 +10,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from ..settings import configure_logging, get_settings, print_config, validate_config
 from ..services.graph.kg_relations import get_kg_metrics
 from .routes import paper_routes, paper_reader_routes, search_routes
+from .routes import export as export_routes
+from .routes import memory as memory_routes
+from .routes import auth as auth_routes
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -35,6 +38,12 @@ async def lifespan(app: FastAPI):
 
     app.state.last_meaningful_activity_monotonic = None
     daily_refresh_task: asyncio.Task | None = None
+
+    # Run DB migrations (add user_id columns for multi-user isolation)
+    from ..services.auth.user_migration import migrate_add_user_id
+    import os
+    _db_path = os.path.join(settings.data_dir, "papers.db")
+    migrate_add_user_id(_db_path)
 
     print_config()
 
@@ -90,6 +99,9 @@ app.add_middleware(_MeaningfulActivityMiddleware)
 app.include_router(paper_routes.router, prefix="/api")
 app.include_router(paper_reader_routes.router, prefix="/api")
 app.include_router(search_routes.router, prefix="/api")
+app.include_router(export_routes.router, prefix="/api")
+app.include_router(memory_routes.router, prefix="/api")
+app.include_router(auth_routes.router, prefix="/api")
 
 @app.get("/")
 async def root():

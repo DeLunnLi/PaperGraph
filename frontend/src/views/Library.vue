@@ -40,6 +40,27 @@
           <template #extra>
             <a-space wrap>
               <a-tag color="blue">共 {{ pagination.total }} 篇</a-tag>
+              <a-dropdown @click.stop>
+                <a-button size="small" :loading="exporting">
+                  <ExportOutlined /> 导出知识
+                </a-button>
+                <template #overlay>
+                  <a-menu @click="onExportKnowledge">
+                    <a-menu-item key="all">全部（论文+对话+记忆+图谱）</a-menu-item>
+                    <a-menu-divider />
+                    <a-menu-item key="papers">仅论文库</a-menu-item>
+                    <a-menu-item key="reader">仅阅读对话</a-menu-item>
+                    <a-menu-item key="memory">仅记忆</a-menu-item>
+                    <a-menu-item key="graph">仅知识图谱</a-menu-item>
+                  </a-menu>
+                </template>
+              </a-dropdown>
+              <a-button size="small" :disabled="selectedRowKeys.length === 0" @click="exportBibTeX">
+                BibTeX
+              </a-button>
+              <a-button size="small" danger :disabled="selectedRowKeys.length === 0" :loading="batchDeleting" @click="batchDelete">
+                删除 ({{ selectedRowKeys.length }})
+              </a-button>
               <a-button :loading="loading" @click="load">刷新</a-button>
             </a-space>
           </template>
@@ -48,6 +69,7 @@
               v-model:value="searchQuery"
               placeholder="搜索标题、作者、DOI…"
               allow-clear
+              :loading="loading"
               class="library-toolbar__search"
               @search="onSearchSubmit"
             />
@@ -58,6 +80,7 @@
             :data-source="papers"
             :loading="loading"
             :pagination="pagination"
+            :row-selection="{ selectedRowKeys, onChange: onSelectChange }"
             @change="onTableChange"
             :custom-row="customRow"
             :row-key="(r: Paper) => (r.id != null ? String(r.id) : `${r.title}-${r.doi || ''}`)"
@@ -110,7 +133,9 @@
 import { ref, onMounted, computed, watch, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
+import { ExportOutlined } from '@ant-design/icons-vue'
 import { getLibrary, getLibraryCategoryFolders, deletePaper } from '@/services/api'
+import apiClient from '@/services/api/client'
 import type { LibraryCategoryFolder, Paper } from '@/types'
 const router = useRouter()
 const papers = ref<Paper[]>([])
@@ -120,6 +145,33 @@ const selectedKey = ref('__all__')
 const openKeys = ref<string[]>([])
 const loading = ref(false)
 const searchQuery = ref('')
+const selectedRowKeys = ref<string[]>([])
+const batchDeleting = ref(false)
+const exporting = ref(false)
+const onExportKnowledge = async ({ key }: { key: string }) => {
+  exporting.value = true
+  try {
+    const resp = await apiClient.get(`/api/export/json`, {
+      params: { scope: key },
+      responseType: 'blob',
+      timeout: 60000,
+    })
+    const blob = new Blob([resp.data], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const disposition = resp.headers['content-disposition'] || ''
+    const match = disposition.match(/filename="?([^"]+)"?/)
+    a.download = match ? match[1] : `papergraph_export_${key}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    message.success('知识库已导出')
+  } catch (e: unknown) {
+    message.error((e as Error).message || '导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 const selectedCategoryLabel = computed(() => {
   const sk = selectedKey.value
@@ -142,7 +194,7 @@ const pagination = ref({
 const columns = [
   { title: '标题', dataIndex: 'title', key: 'title', width: '28%', align: 'left' as const },
   { title: '作者', key: 'authors', width: '16%', align: 'left' as const },
-  { title: '年份', key: 'year', width: '7%', align: 'center' as const },
+  { title: '年份', key: 'year', width: '7%', align: 'center' as const, sorter: (a: any, b: any) => (a.year ?? 0) - (b.year ?? 0) },
   { title: '出版', key: 'journal_or_source', width: '14%', align: 'center' as const },
   { title: '领域', key: 'category', width: '24%', align: 'left' as const, ellipsis: true },
   { title: '操作', key: 'actions', width: '10%', align: 'center' as const },
@@ -246,6 +298,83 @@ const onDelete = (record: Paper) => {
     },
   })
 }
+const onSelectChange = (keys: string[]) => {
+  selectedRowKeys.value = keys
+}
+const batchDelete = () => {
+  if (selectedRowKeys.value.length === 0) return
+  Modal.confirm({
+    title: `确认删除选中的 ${selectedRowKeys.value.length} 篇文献？`,
+    content: '删除后无法恢复。',
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: async () => {
+      batchDeleting.value = true
+      let ok = 0
+      let fail = 0
+      try {
+        for (const key of selectedRowKeys.value) {
+          const id = parseInt(key, 10)
+          if (Number.isFinite(id) && id > 0) {
+            try {
+              await deletePaper(id)
+              ok++
+            } catch {
+              fail++
+            }
+          }
+        }
+        message.success(`已删除 ${ok} 篇${fail > 0 ? `，${fail} 篇失败` : ''}`)
+        selectedRowKeys.value = []
+        await loadFolders()
+        await load()
+      } catch (e: unknown) {
+        message.error((e as Error).message || '批量删除失败')
+      } finally {
+        batchDeleting.value = false
+      }
+    },
+  })
+}
+function escapeBibTeX(s: string): string {
+  return String(s || '').replace(/([&%$#_{}~^\\])/g, '\\$1')
+}
+function paperToBibTeX(p: Paper): string {
+  const authors = (p.authors || []).map((a) => a.name).filter(Boolean).join(' and ')
+  const year = p.year ?? ''
+  const title = escapeBibTeX(p.title || 'Untitled')
+  const journal = escapeBibTeX(String(p.journal || p.venue || ''))
+  const doi = p.doi || ''
+  const arxiv = p.arxiv_id || ''
+  const key = `${(p.authors?.[0]?.name || 'unknown').split(' ').pop()?.toLowerCase() || 'unknown'}${year}${title.slice(0, 3).toLowerCase()}`
+  const lines = [`@article{${key},`]
+  if (authors) lines.push(`  author = {${escapeBibTeX(authors)}},`)
+  if (title) lines.push(`  title = {${title}},`)
+  if (journal) lines.push(`  journal = {${journal}},`)
+  if (year) lines.push(`  year = {${year}},`)
+  if (doi) lines.push(`  doi = {${doi}},`)
+  if (arxiv) lines.push(`  eprint = {${arxiv}},`)
+  if (p.source_url) lines.push(`  url = {${p.source_url}},`)
+  lines.push('}')
+  return lines.join('\n')
+}
+const exportBibTeX = () => {
+  const selected = papers.value.filter((p) => p.id != null && selectedRowKeys.value.includes(String(p.id)))
+  if (selected.length === 0) {
+    message.warning('请先选择要导出的文献')
+    return
+  }
+  const bib = selected.map(paperToBibTeX).join('\n\n')
+  const blob = new Blob([bib], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `papergraph_library_${new Date().toISOString().slice(0, 10)}.bib`
+  a.click()
+  URL.revokeObjectURL(url)
+  message.success(`已导出 ${selected.length} 篇文献为 BibTeX`)
+}
 onMounted(async () => {
   await loadFolders()
   await load()
@@ -259,16 +388,18 @@ onBeforeUnmount(() => {
 </script>
 <style scoped>
 .library-page {
-  max-width: 1200px;
+  max-width: min(1200px, 100%);
   margin: 0 auto;
   width: 100%;
 }
 .library-card {
-  border-radius: 12px;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+  border-radius: var(--pg-radius-lg);
+  box-shadow: var(--pg-shadow-xs);
+  border: 1px solid var(--pg-border);
 }
 .library-card :deep(.ant-card-head) {
-  border-bottom: 1px solid rgba(5,5,5,0.06);
+  border-bottom: 1px solid var(--pg-border-soft);
+  min-height: 56px;
 }
 .library-card__title {
   display: flex;
@@ -277,8 +408,11 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 .library-card__title-text {
-  font-size: 16px;
+  font-family: var(--pg-font-serif);
+  font-size: 17px;
   font-weight: 600;
+  color: var(--pg-text-heading);
+  letter-spacing: 0.01em;
 }
 .library-toolbar {
   display: flex;
@@ -301,25 +435,28 @@ onBeforeUnmount(() => {
 .library-sider {
   flex: 0 0 200px;
   max-width: 200px;
-  border-radius: 8px;
-  border: 1px solid #f0f0f0;
+  border-radius: var(--pg-radius-lg);
+  border: 1px solid var(--pg-border);
+  background: var(--pg-surface);
+  box-shadow: var(--pg-shadow-xs);
   height: fit-content;
-  padding-top: 8px;
+  padding-top: 10px;
 }
 .library-sider__title {
   font-weight: 600;
-  padding: 0 12px 8px;
-  font-size: 14px;
+  padding: 0 14px 8px;
+  font-size: 13px;
+  color: var(--pg-text);
 }
 .library-sider__root {
   font-size: 12px;
-  color: rgba(0,0,0,0.45);
-  padding: 0 12px 8px;
+  color: var(--pg-text-tertiary);
+  padding: 0 14px 8px;
   line-height: 1.4;
   word-break: break-all;
 }
 .library-sider__count {
-  color: rgba(0,0,0,0.45);
+  color: var(--pg-text-tertiary);
   font-size: 12px;
 }
 .library-sider__child-label {
@@ -339,20 +476,34 @@ onBeforeUnmount(() => {
 }
 .library-table :deep(.ant-table-thead > tr > th) {
   font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--pg-text-tertiary);
+  background: var(--pg-bg-soft) !important;
+  border-bottom: 1px solid var(--pg-border) !important;
+  padding: 12px 16px !important;
 }
 .library-table :deep(.ant-table-tbody > tr > td) {
   vertical-align: middle;
+  padding: 14px 16px !important;
+  border-bottom: 1px solid var(--pg-border-soft) !important;
+  transition: background 0.15s ease;
+}
+.library-table :deep(.ant-table-tbody > tr) {
+  transition: background 0.15s ease;
 }
 .lib-year {
   white-space: nowrap;
+  color: var(--pg-text-secondary);
 }
 .lib-venue {
   font-size: 12px;
-  color: #555;
+  color: var(--pg-text-secondary);
   white-space: nowrap;
 }
 .library-table :deep(.ant-table-tbody > tr:hover > td) {
-  background: #fafafa;
+  background: var(--pg-primary-softer) !important;
 }
 .lib-title-wrap {
   display: flex;
@@ -365,18 +516,24 @@ onBeforeUnmount(() => {
   overflow-x: auto;
 }
 .lib-title-text {
-  font-weight: 500;
+  font-weight: 600;
   text-align: left;
   white-space: nowrap;
+  color: var(--pg-text-heading);
+  font-size: 14px;
+}
+.lib-title-text:hover {
+  color: var(--pg-primary-hover);
 }
 .lib-title-ext {
-  font-size: 12px;
+  font-size: 11px;
   white-space: nowrap;
+  color: var(--pg-text-tertiary);
 }
 .lib-authors-cell {
   display: block;
   font-size: 13px;
-  color: rgba(0,0,0,0.75);
+  color: var(--pg-text-secondary);
   white-space: nowrap;
   overflow-x: auto;
   line-height: 1.45;
@@ -401,6 +558,14 @@ onBeforeUnmount(() => {
   .library-toolbar__search {
   max-width: none;
   width: 100%;
+  }
+}
+@media (max-width: 640px) {
+  .library-card :deep(.ant-table) {
+  font-size: 12px;
+  }
+  .lib-title-text {
+  font-size: 13px;
   }
 }
 </style>

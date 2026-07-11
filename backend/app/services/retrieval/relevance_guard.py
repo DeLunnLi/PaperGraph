@@ -1,4 +1,7 @@
-"""Score-based relevance guard before LLM rank (only when candidate pool is large)."""
+"""Score-based relevance guard before LLM rank (only when candidate pool is large).
+
+Hybrid approach combining rule-based and semantic scoring for better accuracy.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +10,7 @@ from ...core.search.paper_searcher import PaperSearcher, _has_any_author
 from ...utils.author_query_match import normalize_author_names
 from .method_acronym import is_method_acronym_token, title_matches_method_acronym
 from .search_plan import ResolvedSearchPlan
+from .semantic_scoring import calculate_semantic_relevance
 
 _DEFAULT_THRESHOLD = 40
 _MIN_KEEP = 8
@@ -18,6 +22,9 @@ _SCORE_KEYWORD = 2
 _SCORE_YEAR = 1
 _SCORE_METHOD_ACRONYM = 6
 
+# Semantic score threshold (0.0 - 1.0)
+_SEMANTIC_THRESHOLD = 0.15
+
 
 def apply_relevance_guard(
     candidates: list[LitPaper],
@@ -26,7 +33,10 @@ def apply_relevance_guard(
     guard_threshold: int = _DEFAULT_THRESHOLD,
     min_keep: int = _MIN_KEEP,
 ) -> tuple[list[LitPaper], bool]:
-    """候选过多时按相关性打分软过滤；过滤后过少则回退原列表。"""
+    """候选过多时按相关性打分软过滤；过滤后过少则回退原列表。
+
+    Uses hybrid scoring: rule-based + semantic relevance for better accuracy.
+    """
     if len(candidates) <= guard_threshold:
         return candidates, False
 
@@ -43,9 +53,13 @@ def apply_relevance_guard(
     if not method_acronym and len(keywords) == 1 and is_method_acronym_token(keywords[0]):
         method_acronym = keywords[0]
 
+    # Build effective query for semantic scoring
+    effective_query = plan.query or " ".join(keywords)
+
     kept: list[LitPaper] = []
     for p in candidates:
-        score = _relevance_score(
+        # Rule-based score
+        rule_score = _relevance_score(
             p,
             target_titles=target_titles,
             keywords=keywords,
@@ -55,13 +69,29 @@ def apply_relevance_guard(
             year_to=yt,
             method_acronym=method_acronym,
         )
-        if _passes_guard_threshold(
-            score,
+
+        # Semantic score for papers that pass basic rule threshold
+        semantic_score = 0.0
+        if rule_score >= _SCORE_KEYWORD:
+            semantic_score = calculate_semantic_relevance(
+                p,
+                effective_query,
+                keywords=keywords,
+                boost_authors=plan.authors,
+                boost_venue=venues[0] if venues else None,
+            )
+
+        # Combined decision
+        passes_rule = _passes_guard_threshold(
+            rule_score,
             plan=plan,
             has_target_titles=bool(target_titles),
             has_strong_constraints=bool(venues or author_phrases or yf is not None),
             method_acronym=method_acronym,
-        ):
+        )
+
+        # Either passes rule threshold OR has good semantic score
+        if passes_rule or semantic_score >= _SEMANTIC_THRESHOLD:
             kept.append(p)
 
     if len(kept) < min_keep:

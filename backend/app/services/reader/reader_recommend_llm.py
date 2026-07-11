@@ -10,7 +10,7 @@ from ...agents.support.reader_reference_lookup_tool import (
     prioritize_reader_related_pairs_refs_first,
 )
 from ...utils import parse_llm_json, truncate_text
-from ..llm.llm_service import coerce_hello_agents_llm_output_to_str, get_llm, is_llm_configured
+from ..llm.llm_service import get_llm, is_llm_configured
 from .paper_reader_context import preprocess_pdf_text_for_reference_blob
 
 logger = logging.getLogger(__name__)
@@ -45,13 +45,12 @@ def extract_title_queries_from_ref_blob_llm(
     )
     try:
         llm = get_llm()
-        raw = llm.invoke(
+        text = llm.chat(
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ]
-        )
-        text = coerce_hello_agents_llm_output_to_str(raw).strip()
+        ).content.strip()
     except Exception as exc:
         logger.debug("extract_title_queries_llm_invoke_failed", exc_info=exc)
         return []
@@ -175,13 +174,12 @@ def rerank_reader_recommend_pairs_by_llm(
     keep_n: int | None = None
     try:
         llm = get_llm()
-        raw = llm.invoke(
+        text = llm.chat(
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ]
-        )
-        text = coerce_hello_agents_llm_output_to_str(raw).strip()
+        ).content.strip()
         data = parse_llm_json(text)
         if isinstance(data, dict):
             if isinstance(data.get("order"), list):

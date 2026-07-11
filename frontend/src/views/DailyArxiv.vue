@@ -64,7 +64,10 @@
           <a-button size="small" type="primary" :loading="refreshing" @click="reloadDaily(true)">重新拉取</a-button>
         </template>
       </a-alert>
-      <a-card v-if="searchResults.length > 0" :bordered="false" class="daily-results-card" title="推荐列表">
+      <a-card v-if="searchResults.length > 0" :bordered="false" class="daily-results-card">
+        <template #title>
+          <span class="daily-results-card__title">推荐列表</span>
+        </template>
         <template #extra>
           <span class="daily-results-card__hint">含个性化与当日精选，可保存到文献库</span>
         </template>
@@ -239,7 +242,9 @@ async function reloadDaily(forceRefresh: boolean) {
   const previousSignature = dailyListSignature(searchResults.value)
   if (forceRefresh) skippedIds.value = new Set()
   try {
-    const r = await getDailyPapers(forceRefresh ? { force_refresh: true } : {})
+    const params: Record<string, any> = {}
+    if (forceRefresh) params.force_refresh = true
+    const r = await getDailyPapers(params)
     if (!r?.success) throw new Error(r?.message || '加载失败')
     if (forceRefresh && !dailyPayloadHasPapers(r) && searchResults.value.length > 0) {
       skippedIds.value = previousSkipped
@@ -383,21 +388,20 @@ const onPaperClick = async (paper: Paper) => {
 </script>
 <style scoped>
 .daily-page {
-  max-width: 1100px;
+  max-width: min(1100px, 100%);
   margin: 0 auto;
   width: 100%;
   flex: 1 1 auto;
-  background: #fff;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
 }
 .daily-toolbar {
-  padding: 16px 18px;
-  background: linear-gradient(160deg, #fafbfc 0%, #f3f5f7 55%, #f7f8fa 100%);
-  border: 1px solid rgba(5,5,5,0.08);
-  border-radius: 12px;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  padding: 18px 20px;
+  background: var(--pg-surface);
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius-lg);
+  box-shadow: var(--pg-shadow-xs);
   margin-bottom: 16px;
 }
 .daily-toolbar__row {
@@ -416,7 +420,7 @@ const onPaperClick = async (paper: Paper) => {
   margin: 0;
   font-size: 14px;
   line-height: 1.45;
-  color: rgba(0,0,0,0.82);
+  color: var(--pg-text);
   word-break: break-word;
   display: flex;
   flex-wrap: wrap;
@@ -431,7 +435,7 @@ const onPaperClick = async (paper: Paper) => {
   line-height: 1.35;
   display: inline-flex;
   align-items: center;
-  border-radius: 6px;
+  border-radius: var(--pg-radius-pill);
 }
 .daily-toolbar__head-core {
   display: inline-flex;
@@ -443,30 +447,30 @@ const onPaperClick = async (paper: Paper) => {
 .daily-toolbar__head-kw {
   flex-shrink: 0;
   font-weight: 600;
-  color: #1677ff;
+  color: var(--pg-primary);
 }
 .daily-toolbar__head-stats {
   font-weight: 500;
   font-size: 13px;
-  color: rgba(0,0,0,0.58);
+  color: var(--pg-text-secondary);
 }
 .daily-toolbar__head-strategy-more {
   margin: 8px 0 0;
   padding: 0;
   font-size: 13px;
   line-height: 1.6;
-  color: rgba(0,0,0,0.72);
+  color: var(--pg-text-secondary);
   white-space: pre-line;
 }
 .daily-toolbar__section {
-  border-top: 1px solid rgba(5,5,5,0.07);
+  border-top: 1px solid var(--pg-border-soft);
   margin-top: 14px;
   padding-top: 14px;
 }
 .daily-toolbar__section-head {
   font-size: 12px;
   font-weight: 600;
-  color: rgba(0,0,0,0.48);
+  color: var(--pg-text-tertiary);
   margin-bottom: 8px;
 }
 .daily-toolbar__section--split-kw {
@@ -476,9 +480,9 @@ const onPaperClick = async (paper: Paper) => {
   justify-content: space-between;
   gap: 12px 20px;
   padding: 12px 14px;
-  border-radius: 10px;
-  background: rgba(255,255,255,0.72);
-  border: 1px solid rgba(5,5,5,0.07);
+  border-radius: var(--pg-radius);
+  background: var(--pg-bg-soft);
+  border: 1px solid var(--pg-border-soft);
 }
 .daily-toolbar__section--split-kw:has(.daily-toolbar__kw-panel:only-child) {
   justify-content: flex-start;
@@ -501,7 +505,7 @@ const onPaperClick = async (paper: Paper) => {
   flex: 0 0 auto;
   font-size: 13px;
   font-weight: 600;
-  color: rgba(0,0,0,0.78);
+  color: var(--pg-text);
   white-space: nowrap;
   line-height: 1.45;
 }
@@ -565,7 +569,7 @@ const onPaperClick = async (paper: Paper) => {
 }
 .daily-page__loading-text {
   font-size: 15px;
-  color: rgba(0,0,0,0.65);
+  color: var(--pg-text-secondary);
   line-height: 1.4;
   user-select: none;
 }
@@ -573,10 +577,18 @@ const onPaperClick = async (paper: Paper) => {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  --ant-color-fill-alter: #fff;
-  --ant-color-fill-secondary: #fff;
-  --ant-color-fill-content: #fff;
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius-lg);
+  background: var(--pg-surface);
+  box-shadow: var(--pg-shadow-xs);
   margin-top: 0;
+}
+.daily-results-card__title {
+  font-family: var(--pg-font-serif);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--pg-text-heading);
+  letter-spacing: 0.01em;
 }
 .daily-results-card :deep(.ant-card) {
   flex: 1 1 auto;
@@ -595,13 +607,14 @@ const onPaperClick = async (paper: Paper) => {
   flex: 1 1 auto;
 }
 .daily-results-card :deep(.ant-card-head) {
-  border-bottom: 1px solid rgba(5,5,5,0.06);
+  border-bottom: 1px solid var(--pg-border-soft);
 }
 .daily-results-card :deep(.daily-paper-list.ant-list .ant-list-item) {
   container-type: inline-size;
   container-name: daily-paper-row;
   align-items: flex-start;
-  padding: 14px 0 !important;
+  padding: 0 !important;
+  border-bottom: none !important;
 }
 .daily-results-card :deep(.daily-paper-list .ant-list-item-action) {
   margin-inline-start: 16px !important;
@@ -625,7 +638,7 @@ const onPaperClick = async (paper: Paper) => {
 }
 .daily-results-card__hint {
   font-size: 12px;
-  color: rgba(0,0,0,0.45);
+  color: var(--pg-text-tertiary);
   max-width: 280px;
   text-align: right;
   line-height: 1.4;
@@ -658,9 +671,10 @@ const onPaperClick = async (paper: Paper) => {
 .daily-paper-list .ant-list-item,
 .daily-paper-list .ant-list-item-meta,
 .daily-paper-list .ant-list-item-meta-content) {
-  background-color: #fff !important;
+  background-color: transparent !important;
   background-image: none !important;
   transition: none !important;
+  border-bottom: none !important;
 }
 .daily-results-card :deep(.daily-paper-list .ant-list-item:hover,
 .daily-paper-list .ant-list-item:focus,
@@ -668,15 +682,15 @@ const onPaperClick = async (paper: Paper) => {
 .daily-paper-list .ant-list-item:active,
 .daily-paper-list .ant-list-item-meta:hover,
 .daily-paper-list .ant-list-item-meta-content:hover) {
-  background-color: #fff !important;
+  background-color: transparent !important;
 }
 .daily-results-card :deep(.daily-paper-list .ant-list-item-meta-title:hover) {
   background-color: transparent !important;
 }
 .daily-results-card :deep(.daily-paper-list .ant-pagination) {
-  background-color: #fff !important;
+  background-color: transparent !important;
 }
-.daily-results-card :deep(.daily-paper-list .ant-list-item:last-child) {
-  border-bottom: none;
+.daily-results-card :deep(.daily-paper-list .ant-list-item) {
+  margin-bottom: 10px;
 }
 </style>

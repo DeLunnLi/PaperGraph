@@ -38,6 +38,9 @@ class ResolvedSearchPlan:
     max_results: int = 10
     recipe: SearchRecipe = SearchRecipe.GENERAL
     method_acronym: str | None = None
+    deep_search: bool = False
+    sub_queries: list[str] = field(default_factory=list)
+    max_iterations: int = 2
 
     @classmethod
     def from_search_intent(cls, intent) -> "ResolvedSearchPlan":

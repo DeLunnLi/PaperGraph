@@ -16,14 +16,22 @@ _REF_HEADER = re.compile(
 _CHAPTER_LINE = re.compile(
     r"(?m)^(?:\s|#)*(?:(?P<num>\d+(?:\.\d+){0,2})\.?\s+)?(?P<h>"
     r"Abstract|ABSTRACT|Introduction|INTRODUCTION|Related\s+Work|RELATED\s+WORK|"
-    r"Background|BACKGROUND|Preliminar(?:y|ies)|Problem\s+Formulation|"
-    r"Methodology|Method|Methods|Model|Models|Approach|Architecture|Framework|"
-    r"Experiment(?:s)?|EXPERIMENTS|Implementation|Evaluation|Results?|RESULTS|Analysis|ANALYSIS|"
-    r"Discussion|DISCUSSION|Ablation|Ablations|Comparison|Comparisons|"
-    r"Conclusion|CONCLUSIONS?|Limitations?|LIMITATIONS|Future\s+Work|Broader\s+Impact|"
+    r"Background|BACKGROUND|Preliminar(?:y|ies)|Problem\s+(?:Formulation|Statement)|"
+    r"Methodology|Method|Methods|Materials\s+and\s+Methods|Model|Models|Approach|Architecture|Framework|"
+    r"Experiment(?:s)?|EXPERIMENTS|Experiment(?:al)?\s+(?:Setup|Settings|Results)|"
+    r"Implementation|Implementation\s+Details|Evaluation|Results?|RESULTS|"
+    r"Analysis|ANALYSIS|Data\s+Analysis|Findings|"
+    r"Discussion|DISCUSSION|Ablation|Ablations|Ablation\s+Studies?|"
+    r"Comparison|Comparisons|Comparative\s+(?:Study|Analysis|Evaluation)|"
+    r"Conclusion|CONCLUSIONS?|Concluding\s+Remarks|Limitations?|LIMITATIONS|"
+    r"Future\s+Work|Broader\s+Impact|Reproducibility|"
     r"Appendix|APPENDIX|Supplementary|Acknowledg(?:e)?ments?|ACKNOWLEDG|"
     r"摘要|引言|简介|预备|问题表述|相关工作|背景|方法|模型|架构|框架|"
-    r"实验|实现|评估|结果|分析|讨论|消融|对比|结论|局限|未来工作|附录|补充|致谢"
+    r"实验|实现|评估|结果|分析|讨论|消融|对比|结论|局限|未来工作|附录|补充|致谢|"
+    r"数据集|训练|推理|评测|消融实验|相关工作|文献综述|开题|"
+    r"Notation|Setup|System\s+Overview|System\s+Design|Proposed\s+Method|"
+    r"Algorithm|Algorithms|Theoretical\s+(?:Analysis|Guarantees)|Proof|"
+    r"Rationale|Research\s+(?:Questions|Gap)|Contributions?"
     r")(?:\s*[.:：#])?\s*$",
     re.I,
 )

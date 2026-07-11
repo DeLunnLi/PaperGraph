@@ -12,6 +12,7 @@ class PaperSource(str, Enum):
     OPENALEX = "openalex"
     DBLP = "dblp"
     TAVILY = "tavily"
+    MCP = "mcp"
     UNKNOWN = "unknown"
 
 class ReadStatus(str, Enum):
@@ -192,6 +193,8 @@ class PaperReaderChatResponse(BaseAPIResponse):
     related_hints: list[dict[str, Any]] = Field(default_factory=list)
 
     kg_edges: list[dict[str, Any]] = Field(default_factory=list)
+
+    citations: list[dict[str, Any]] = Field(default_factory=list)
 
 class PaperReaderHistoryItem(BaseModel):
     role: str

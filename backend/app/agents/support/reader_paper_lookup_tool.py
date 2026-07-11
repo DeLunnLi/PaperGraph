@@ -3,11 +3,9 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 from collections.abc import Callable
-
-from hello_agents.tools.base import Tool, ToolParameter
-from hello_agents.tools.response import ToolResponse
 
 from .reader_reference_lookup_tool import (
     READER_RECOMMEND_MAX_RESULTS, READER_RELATED_FROM_EXTERNAL_QUERY, READER_RELATED_FROM_REF_BLOCK,
@@ -16,6 +14,7 @@ from .reader_reference_lookup_tool import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 def _normalize_ref_blob_for_match(blob: str) -> str:
     u = (blob or "").lower()
@@ -26,6 +25,7 @@ def _normalize_ref_blob_for_match(blob: str) -> str:
             break
         u = u2
     return u
+
 
 def ground_score_paper_vs_reference_blob(ap: Any, ref_blob: str) -> float:
     raw = _normalize_ref_blob_for_match(ref_blob)
@@ -60,7 +60,9 @@ def ground_score_paper_vs_reference_blob(ap: Any, ref_blob: str) -> float:
     ratio = hits / max(1, len(toks))
     return min(1.0, 0.28 + 0.72 * ratio)
 
-class ReaderPaperLookupTool(Tool):
+
+class ReaderPaperLookupTool:
+    """Paper lookup tool - no longer inherits from hello_agents.Tool."""
 
     def __init__(
         self,
@@ -68,79 +70,90 @@ class ReaderPaperLookupTool(Tool):
         *,
         get_snap: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
-        super().__init__(
-            name="reader_paper_lookup",
-            description=(
-                "两类用法：(1) 用户粘贴的库外英文题名/DOI/arXiv：from_pdf_references_section=false，"
-                "按 query 在 OpenAlex 快速检索（1～80 条）。"
-                "(2) 仅有「参考文献区 PDF 原文摘录」、无库表列表时：from_pdf_references_section=true；"
-                "优先使用本轮 ``reader_pdf_structure`` 写入的粗分 ``entries`` 选条；若未调用该工具则退回摘录内粗分。"
-                "再按 query 与题录行匹配排序，对最相关若干条做多源解析。"
-                "若已有库表 references 且用户要求按列表解析，优先 reader_reference_lookup。"
-            ),
-        )
         self._on_papers_found = on_papers_found
         self._get_snap = get_snap
+        self.name = "reader_paper_lookup"
+        self.description = (
+            "两类用法：(1) 用户粘贴的库外英文题名/DOI/arXiv：from_pdf_references_section=false，"
+            "按 query 在 OpenAlex 快速检索（1～80 条）。"
+            "(2) 仅有「参考文献区 PDF 原文摘录」、无库表列表时：from_pdf_references_section=true；"
+            "优先使用本轮 ``reader_pdf_structure`` 写入的粗分 ``entries`` 选条；若未调用该工具则退回摘录内粗分。"
+            "再按 query 与题录行匹配排序，对最相关若干条做多源解析。"
+            "若已有库表 references 且用户要求按列表解析，优先 reader_reference_lookup。"
+        )
 
-    def get_parameters(self) -> list[ToolParameter]:
-        return [
-            ToolParameter(
-                name="query",
-                type="string",
-                description=(
-                    "from_pdf=false：OpenAlex 检索串（题名片段、作者+年、DOI/arXiv）。"
-                    "from_pdf=true：与用户问题相关的**提示串**（摘录中的英文题名片段、DOI、arXiv、或作者姓+年份），"
-                    "用于在粗分后的参考文献行里排序选条；勿只用两三个泛词。"
-                ),
-                required=True,
-            ),
-            ToolParameter(
-                name="max_results",
-                type="integer",
-                description="最多返回几条（1～80，默认 3）",
-                required=False,
-                default=3,
-            ),
-            ToolParameter(
-                name="from_pdf_references_section",
-                type="boolean",
-                description=(
-                    "true：当前依赖「参考文献区 PDF 原文摘录」；服务端粗分条后按 query 与题录行匹配，再逐条多源解析。"
-                    "false：库外粘贴题名等，直接 OpenAlex。"
-                ),
-                required=False,
-                default=False,
-            ),
-        ]
+    def to_openai_schema(self) -> dict[str, Any]:
+        """Generate OpenAI function schema for this tool."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "from_pdf=false：OpenAlex 检索串（题名片段、作者+年、DOI/arXiv）。"
+                                "from_pdf=true：与用户问题相关的**提示串**（摘录中的英文题名片段、DOI、arXiv、或作者姓+年份），"
+                                "用于在粗分后的参考文献行里排序选条；勿只用两三个泛词。"
+                            ),
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "最多返回几条（1～80，默认 3）",
+                        },
+                        "from_pdf_references_section": {
+                            "type": "boolean",
+                            "description": (
+                                "true：当前依赖「参考文献区 PDF 原文摘录」；服务端粗分条后按 query 与题录行匹配，再逐条多源解析。"
+                                "false：库外粘贴题名等，直接 OpenAlex。"
+                            ),
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
 
-    def _run_from_pdf_ref_blob(self, q: str, mr: int) -> ToolResponse:
+    def run_with_timing(self, parameters: dict[str, Any]) -> Any:
+        """Run tool and return a response object compatible with old ToolResponse format."""
+        start = time.time()
+        try:
+            result = self.run(parameters)
+            elapsed_ms = int((time.time() - start) * 1000)
+            return _ToolResult("SUCCESS", result, elapsed_ms)
+        except Exception as exc:
+            elapsed_ms = int((time.time() - start) * 1000)
+            logger.debug("reader_paper_lookup_failed", exc_info=exc)
+            return _ToolResult("ERROR", f"reader_paper_lookup：执行失败：{exc}", elapsed_ms, code="EXEC_FAILED")
+
+    def _run_from_pdf_ref_blob(self, q: str, mr: int) -> str:
         if not callable(self._get_snap):
-            return ToolResponse.error(
-                "NO_SNAPSHOT",
-                "reader_paper_lookup：from_pdf 模式需要阅读上下文快照，当前不可用。",
+            return (
+                "reader_paper_lookup：from_pdf 模式需要阅读上下文快照，当前不可用。"
             )
         try:
             snap = dict(self._get_snap() or {})
         except Exception as exc:
             logger.debug("reader_paper_lookup_snap_failed", exc_info=exc)
-            return ToolResponse.error("SNAP_FAILED", f"reader_paper_lookup：读取快照失败：{exc}")
+            return f"reader_paper_lookup：读取快照失败：{exc}"
 
         ref_blob = str(snap.get("references_section_raw") or "").strip()
         rs_pre = snap.get("references_from_structure")
         has_struct_entries = isinstance(rs_pre, list) and bool(rs_pre)
         if len(ref_blob) < 80 and not has_struct_entries:
-            return ToolResponse.success(
-                text=(
-                    "reader_paper_lookup：当前无足够长的「参考文献区 PDF 摘录」，且本轮尚未通过 reader_pdf_structure 得到 entries。"
-                    "请先调用 reader_pdf_structure，或确认已打开带 PDF 的文献；也可改用库外题名（from_pdf_references_section=false）。"
-                ),
+            return (
+                "reader_paper_lookup：当前无足够长的「参考文献区 PDF 摘录」，且本轮尚未通过 reader_pdf_structure 得到 entries。"
+                "请先调用 reader_pdf_structure，或确认已打开带 PDF 的文献；也可改用库外题名（from_pdf_references_section=false）。"
             )
 
         try:
             from ...services.reader.paper_reader_context import reference_strings_for_resolve_fallback
         except Exception as exc:
             logger.warning("reader_paper_lookup_ref_fallback_import_failed", exc_info=exc)
-            return ToolResponse.error("IMPORT_FAILED", f"reader_paper_lookup：摘录分条模块不可用。{exc}")
+            return f"reader_paper_lookup：摘录分条模块不可用。{exc}"
 
         lines: list[str] = []
         rs = snap.get("references_from_structure")
@@ -149,11 +162,9 @@ class ReaderPaperLookupTool(Tool):
         if not lines:
             lines = reference_strings_for_resolve_fallback(ref_blob)
         if not lines:
-            return ToolResponse.success(
-                text=(
-                    "reader_paper_lookup：无法得到参考文献粗分条目（可先调 reader_pdf_structure，"
-                    "或提示用户给出 DOI / 标准英文题名走库外检索）。"
-                ),
+            return (
+                "reader_paper_lookup：无法得到参考文献粗分条目（可先调 reader_pdf_structure，"
+                "或提示用户给出 DOI / 标准英文题名走库外检索）。"
             )
 
         ref_for_ground = ref_blob
@@ -171,14 +182,12 @@ class ReaderPaperLookupTool(Tool):
             )
         except Exception as exc:
             logger.debug("reader_paper_lookup_resolve_failed", exc_info=exc)
-            return ToolResponse.error("RESOLVE_FAILED", f"reader_paper_lookup：按摘录解析失败：{exc}")
+            return f"reader_paper_lookup：按摘录解析失败：{exc}"
 
         if not api_papers:
-            return ToolResponse.success(
-                text=(
-                    "reader_paper_lookup：按 PDF 摘录分条解析后无通过锚定校验的命中。"
-                    "请把 query 换成摘录中与目标文献更贴近的英文题名片段、DOI 或 arXiv。"
-                ),
+            return (
+                "reader_paper_lookup：按 PDF 摘录分条解析后无通过锚定校验的命中。"
+                "请把 query 换成摘录中与目标文献更贴近的英文题名片段、DOI 或 arXiv。"
             )
 
         try:
@@ -195,13 +204,13 @@ class ReaderPaperLookupTool(Tool):
             ax = getattr(ap, "arxiv_id", None) or "—"
             doi = getattr(ap, "doi", None) or "—"
             out_lines.append(f"{i}. {t} | year={y} | arxiv={ax} | doi={doi}")
-        return ToolResponse.success(text="\n".join(out_lines))
+        return "\n".join(out_lines)
 
-    def run(self, parameters: dict[str, Any]) -> ToolResponse:
+    def run(self, parameters: dict[str, Any]) -> str:
         q = str(parameters.get("query") or parameters.get("input") or "").strip()
         q = re.sub(r"\s+", " ", q)[:160]
         if len(q) < 4:
-            return ToolResponse.error("INVALID_PARAM", "reader_paper_lookup：query 过短（至少 4 个字符）。")
+            return "reader_paper_lookup：query 过短（至少 4 个字符）。"
 
         try:
             mr = int(parameters.get("max_results") or 3)
@@ -225,7 +234,7 @@ class ReaderPaperLookupTool(Tool):
             from ...services.papers.papers_converters import litpaper_to_api_paper
         except Exception as exc:
             logger.warning("reader_paper_lookup_import_failed", exc_info=exc)
-            return ToolResponse.error("IMPORT_FAILED", f"reader_paper_lookup：检索模块不可用。{exc}")
+            return f"reader_paper_lookup：检索模块不可用。{exc}"
 
         _REF_ARXIV = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|\barXiv:\s*)([\w.]+)", re.I)
         _REF_ARXIV_ID_LOOSE = re.compile(r"(?:^|[^\w])arxiv\s*:?\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b", re.I)
@@ -313,11 +322,9 @@ class ReaderPaperLookupTool(Tool):
         api_papers = api_papers[:mr]
 
         if not api_papers:
-            return ToolResponse.success(
-                text=(
-                    f"reader_paper_lookup：未命中条目（query={q[:80]}）。"
-                    "可换更标准的英文题名或作者+年份重试。"
-                ),
+            return (
+                f"reader_paper_lookup：未命中条目（query={q[:80]}）。"
+                "可换更标准的英文题名或作者+年份重试。"
             )
 
         try:
@@ -333,4 +340,14 @@ class ReaderPaperLookupTool(Tool):
             doi = getattr(ap, "doi", None) or "—"
             lines.append(f"{i}. {t} | year={y} | arxiv={ax} | doi={doi}")
         lines.append("以上条目为库外检索结果；用户若只要参考文献区内的论文，应使用 from_pdf_references_section=true。")
-        return ToolResponse.success(text="\n".join(lines))
+        return "\n".join(lines)
+
+
+class _ToolResult:
+    """Simple result wrapper compatible with old ToolResponse interface."""
+
+    def __init__(self, status: str, text: str, elapsed_ms: int = 0, code: str | None = None) -> None:
+        self.status = status
+        self.text = text
+        self.elapsed_ms = elapsed_ms
+        self.error_info = {"code": code} if code else None

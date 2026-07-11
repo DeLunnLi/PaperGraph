@@ -5,10 +5,7 @@ import json
 import logging
 from typing import Any
 
-from hello_agents import SimpleAgent
-
 from ..utils import parse_llm_json
-from ..services.llm.agent_config import papergraph_agent_config
 from .base import BaseAgent
 from .prompts.knowledge_graph import REL_PROMPT
 
@@ -18,7 +15,7 @@ class KnowledgeGraphAgent(BaseAgent):
     def __init__(
         self,
         *,
-        agent: SimpleAgent | None = None,
+        agent: Any | None = None,
         min_score: float = 0.55,
         max_edges: int = 12,
         chunk_size: int = 20,
@@ -27,12 +24,9 @@ class KnowledgeGraphAgent(BaseAgent):
         self.min_score = min_score
         self.max_edges = max_edges
         self.chunk_size = chunk_size
-        self._agent = agent or SimpleAgent(
-            name="papergraph_kg_rel",
-            llm=self.llm,
-            system_prompt=REL_PROMPT,
-            config=papergraph_agent_config(),
-        )
+        # agent 参数保留向后兼容；KG 现用无状态 llm.chat（不再持有 SimpleAgent 单例，
+        # 避免跨 chunk _history 累积污染）。
+        self._agent = agent
 
     def _candidate_id(self, paper: dict[str, Any]) -> int | None:
         for key in ("paper_id", "id", "target_paper_id"):
@@ -85,6 +79,13 @@ class KnowledgeGraphAgent(BaseAgent):
     def _chunks(self, items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         return [items[i : i + self.chunk_size] for i in range(0, len(items), self.chunk_size)]
 
+    def _llm_chat(self, user_prompt: str) -> str:
+        """无状态单轮 LLM 调用（替代 self._agent.run）。"""
+        return self.llm.chat([
+            {"role": "system", "content": REL_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]).content
+
     def infer_edges(
         self, *, new_paper: dict[str, Any], candidates: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], str | None]:
@@ -107,7 +108,7 @@ class KnowledgeGraphAgent(BaseAgent):
         for chunk in self._chunks(compact_candidates):
             payload = {"new_paper": compact_new, "candidates": chunk}
             try:
-                raw = self._agent.run(json.dumps(payload, ensure_ascii=False))
+                raw = self._llm_chat(json.dumps(payload, ensure_ascii=False))
             except Exception as exc:
                 logger.exception("kg_llm_run_failed")
                 raise RuntimeError("kg_llm_run_failed") from exc

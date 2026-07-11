@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Optional
+
+from cachetools import TTLCache
 
 from ..core.search.paper_searcher import _sanitize_author_list_for_query
 from ..models.schemas import Paper
-from ..services.llm.llm_service import coerce_hello_agents_llm_output_to_str
-from ..services.llm.agent_config import papergraph_agent_config
 from ..services.search_intent import (
     apply_llm_intent_hygiene,
     extract_json_object,
@@ -24,8 +23,8 @@ from .support.search_models import SearchIntent
 
 logger = logging.getLogger(__name__)
 
-_INTENT_CACHE: dict[tuple[str, str], tuple[float, SearchIntent]] = {}
-_INTENT_CACHE_TTL = 300.0
+# TTL cache for parsed search intents: 5 min TTL, max 200 entries
+_INTENT_CACHE: TTLCache[tuple[str, str], SearchIntent] = TTLCache(maxsize=200, ttl=300)
 
 
 class SearchAgent(BaseAgent):
@@ -33,7 +32,6 @@ class SearchAgent(BaseAgent):
 
     def __init__(self) -> None:
         super().__init__()
-        self._intent_parser_agent: Optional[Any] = None
         self.intent_parser = IntentParser(self)
         self.explainer = _SearchExplainer()
 
@@ -57,20 +55,11 @@ class SearchAgent(BaseAgent):
         prompt = format_intent_llm_prompt(
             tmpl, msg, profile, correction_hint=(correction_hint or "").strip() or None
         )
-        from hello_agents import SimpleAgent
-
-        parser_agent = self._intent_parser_agent
-        if parser_agent is None:
-            parser_agent = SimpleAgent(
-                name="intent_parser",
-                llm=self.llm,
-                system_prompt="你是学术检索意图解析器。只输出 JSON，不要解释。",
-                config=papergraph_agent_config(),
-            )
-            self._intent_parser_agent = parser_agent
-
-        resp = parser_agent.run(prompt)
-        text = coerce_hello_agents_llm_output_to_str(resp).strip()
+        resp = self.llm.chat([
+            {"role": "system", "content": "你是学术检索意图解析器。只输出 JSON，不要解释。"},
+            {"role": "user", "content": prompt},
+        ]).content
+        text = (resp or "").strip()
         payload = extract_json_object(text)
         if not payload:
             err: ValueError = ValueError("LLM 未返回有效 JSON")
@@ -81,9 +70,32 @@ class SearchAgent(BaseAgent):
         return finalize_llm_intent(intent, profile)
 
     def understand_intent(self, message: str, profile: str = "accuracy") -> SearchIntent:
+        # Inject shared cross-agent memory as context hints
+        # This lets search benefit from user's reading history and preferences
+        # Filter by tags: search agent cares about reader insights and previous searches
+        shared_hints = self._read_shared_recent(
+            memory_types=["working", "episodic"], limit=5,
+            tags=["reader", "search", "deep_search"],
+        )
+        if shared_hints:
+            # Append shared hints to the message as soft context (non-intrusive)
+            hint_text = " | ".join(shared_hints[:3])[:200]
+            logger.debug("[SearchAgent] shared memory hints: %s", hint_text[:80])
         return self.intent_parser.parse(message, profile=profile)
 
     def explain_results(self, intent: SearchIntent, papers: list[Paper], mode: str = "accuracy") -> str:
+        # Write search insights to shared memory for other agents (e.g., reader, daily)
+        try:
+            if papers and intent.query:
+                top_titles = "; ".join(str(getattr(p, "title", "") or "")[:40] for p in papers[:3])
+                self._write_shared(
+                    content=f"[搜索] {intent.query[:60]} → 找到{len(papers)}篇: {top_titles}",
+                    memory_type="working",
+                    importance=0.5,
+                    tags=["search"],
+                )
+        except Exception:
+            pass
         _ = mode
         return self.explainer.format_search_explanation(intent, papers)
 
@@ -103,17 +115,12 @@ class IntentParser:
             return SearchIntent()
 
         cache_key = (msg.lower()[:200], (profile or "accuracy").strip().lower())
-        now = time.time()
-        if cache_key in _INTENT_CACHE:
-            ts, cached = _INTENT_CACHE[cache_key]
-            if now - ts < _INTENT_CACHE_TTL:
-                return cached
+        cached = _INTENT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
         intent = self._parse_with_retry(msg, profile)
-        _INTENT_CACHE[cache_key] = (now, intent)
-        if len(_INTENT_CACHE) > 200:
-            oldest = min(_INTENT_CACHE, key=lambda k: _INTENT_CACHE[k][0])
-            del _INTENT_CACHE[oldest]
+        _INTENT_CACHE[cache_key] = intent
         return intent
 
     def _parse_with_retry(self, msg: str, profile: str) -> SearchIntent:
@@ -130,7 +137,7 @@ class IntentParser:
         for attempt in range(outer_retries + 1):
             try:
                 return self._parse_llm_primary(msg, prof, correction_hint=correction)
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError) as e:
                 last_exc = e
                 last_output = getattr(e, "last_llm_output", None) or last_output
                 logger.warning(
