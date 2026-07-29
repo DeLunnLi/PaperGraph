@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
 
     app.state.last_meaningful_activity_monotonic = None
     daily_refresh_task: asyncio.Task | None = None
+    trace_cleanup_task: asyncio.Task | None = None
 
     # Run DB migrations (add user_id columns for multi-user isolation)
     from ..services.auth.user_migration import migrate_add_user_id
@@ -61,6 +62,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("每日论文后台自动刷新任务未启动: %s", exc)
 
+    try:
+        from ..services.llm.trace_cleanup import spawn_trace_cleanup_task
+
+        trace_cleanup_task = spawn_trace_cleanup_task(app)
+    except Exception as exc:
+        logger.warning("trace 清理后台任务未启动: %s", exc)
+
     logger.info("%s", "=" * 60)
 
     yield
@@ -75,6 +83,14 @@ async def lifespan(app: FastAPI):
             pass
         except Exception:
             logger.debug("每日论文后台任务结束异常", exc_info=True)
+    if trace_cleanup_task is not None:
+        trace_cleanup_task.cancel()
+        try:
+            await trace_cleanup_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("trace 清理后台任务结束异常", exc_info=True)
     logger.info("%s", "=" * 60)
 
 app = FastAPI(
@@ -133,7 +149,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
     return JSONResponse(
         status_code=500,
-        content={"success": False, "message": str(exc)},
+        content={"success": False, "message": "服务器内部错误，请稍后重试"},
     )
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import { backendLocalhostUrl } from '@/config/ports'
-import { apiClient, API_BASE_URL } from './client'
+import { apiBaseUrl } from './client'
+import { clearAuthAndRedirect, getToken } from './auth'
 import type { Paper } from '@/types'
 interface SearchAgentRequest {
   message: string; mode?: 'accuracy' | 'novelty'; use_tavily?: boolean; deep_search?: boolean
@@ -47,20 +48,54 @@ export type SearchAgentStreamEvent =
   | { type: 'deep:rrf'; ts_ms?: number; phase?: string; fused_count?: number }
   | { type: 'deep:rank'; ts_ms?: number; phase?: string; candidate_count?: number }
   | { type: 'deep:synthesis'; ts_ms?: number; phase?: string }
+
+export class SearchAgentCancelledError extends Error {
+  constructor(message = 'search_agent_cancelled') {
+    super(message)
+    this.name = 'SearchAgentCancelledError'
+  }
+}
+
+interface SearchAgentStreamOptions {
+  signal?: AbortSignal
+}
 export async function searchAgentChatStream(
   request: SearchAgentRequest,
   onEvent: (ev: SearchAgentStreamEvent) => void,
+  options: SearchAgentStreamOptions = {},
 ): Promise<SearchAgentResponse> {
-  const base = (apiClient.defaults.baseURL || API_BASE_URL).replace(/\/$/, '')
+  const base = apiBaseUrl()
   const url = `${base}/api/papers/search-agent/stream`
   const ctrl = new AbortController()
   const timer = window.setTimeout(() => ctrl.abort(), SEARCH_AGENT_REQUEST_MS)
+  let abortedByCaller = false
+  let detachAbortListener: (() => void) | null = null
+
+  if (options.signal) {
+    if (options.signal.aborted) {
+      abortedByCaller = true
+      ctrl.abort()
+    } else {
+      const onAbort = () => {
+        abortedByCaller = true
+        ctrl.abort()
+      }
+      options.signal.addEventListener('abort', onAbort, { once: true })
+      detachAbortListener = () => options.signal?.removeEventListener('abort', onAbort)
+    }
+  }
   try {
+    const token = getToken()
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) headers['Authorization'] = `Bearer ${token}`
     const resp = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request), signal: ctrl.signal,
+      method: 'POST', headers, body: JSON.stringify(request), signal: ctrl.signal,
     })
     if (!resp.ok) {
+      if (resp.status === 401) {
+        clearAuthAndRedirect()
+        throw new Error('登录已过期，请重新登录')
+      }
       const errBody = await resp.text().catch(() => '')
       throw new Error(streamHttpErrorMessage(resp.status, errBody))
     }
@@ -121,10 +156,14 @@ export async function searchAgentChatStream(
     throw new Error('检索流已结束但未收到最终结果，请重试；若频繁出现请查看后端是否重启或超时。')
   } catch (e: unknown) {
     if (e instanceof Error && e.name === 'AbortError') {
+      if (abortedByCaller) {
+        throw new SearchAgentCancelledError()
+      }
       throw new Error('检索已取消或超时（约 7 分钟），请缩短查询或稍后重试。')
     }
     throw e
   } finally {
     window.clearTimeout(timer)
+    detachAbortListener?.()
   }
 }

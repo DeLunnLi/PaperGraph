@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from ...core.paper import Paper as LitPaper
@@ -298,15 +298,18 @@ async def run_deep_search_pipeline_async(
         if is_llm_configured() and llm:
             try:
                 ranker = LlmPaperRanker(recall_max=24, fine_top_k=mr)
-                ranked, rank_meta = ranker.rank(
-                    top_for_rank, plan.query or user_query, top_k=mr,
+                # ranker.rank 是同步的（内部 run_agent_task 用 ThreadPoolExecutor），
+                # 在 async 管线里裸调会阻塞 event loop —— 用 to_thread 卸载到线程池。
+                ranked, rank_meta = await asyncio.to_thread(
+                    ranker.rank,
+                    top_for_rank, plan.query or user_query, mr,
                     ranking_profile=plan.ranking_profile,
                     target_venue=(plan.venues[0] if plan.venues else None),
                     main_conference_proceedings_only=plan.main_conference_proceedings_only,
                     year_from=plan.year_from,
                     year_to=plan.year_to,
                 )
-                ranking_method = "rrf_llm"
+                ranking_method = rank_meta.get("ranking_method", "rrf_llm")
             except Exception:
                 logger.warning("deep_search: LLM rank failed, using RRF order")
                 ranked = [

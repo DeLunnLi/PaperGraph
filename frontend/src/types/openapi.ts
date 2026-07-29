@@ -73,7 +73,7 @@ export interface components {
             llm_classified: number;
             message?: string | null;
         },
-        PaperSource: "pubmed" | "arxiv" | "crossref" | "semantic_scholar" | "openalex" | "dblp" | "tavily" | "unknown";
+        PaperSource: "pubmed" | "arxiv" | "crossref" | "semantic_scholar" | "openalex" | "dblp" | "tavily" | "mcp" | "local" | "unknown";
         ReadStatus: "unread" | "reading" | "read";
     }
 }

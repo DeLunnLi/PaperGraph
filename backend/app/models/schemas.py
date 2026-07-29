@@ -13,6 +13,8 @@ class PaperSource(str, Enum):
     DBLP = "dblp"
     TAVILY = "tavily"
     MCP = "mcp"
+    CROSSREF = "crossref"
+    LOCAL = "local"
     UNKNOWN = "unknown"
 
 class ReadStatus(str, Enum):
@@ -105,6 +107,15 @@ class SavePapersResponse(BaseAPIResponse):
     pdf_downloaded: int = 0
     llm_classified: int = 0
 
+class LocalPdfImportResponse(BaseAPIResponse):
+    paper: Paper
+    added: bool
+    pdf_attached: bool
+    metadata_source: str = "pdf"
+    detected_doi: str | None = None
+    detected_arxiv_id: str | None = None
+    page_count: int = 0
+
 class DailyPaperPickHint(BaseModel):
     identity_key: str = Field(description="身份键，如 arxiv:2401.0001")
     pick_kind: str = Field(description="personalized | general")
@@ -135,6 +146,8 @@ class DailyPapersResponse(BaseAPIResponse):
     general_theme_keywords: list[str] = Field(default_factory=list, description="精选列表主题标签")
     personalized_pick_hints: list[DailyPaperPickHint] = Field(default_factory=list)
     general_pick_hints: list[DailyPaperPickHint] = Field(default_factory=list)
+    stale_cache: bool = Field(default=False, description="是否为最近一次可用的过期缓存")
+    refresh_failed: bool = Field(default=False, description="本次刷新是否失败")
 
 class UpdatePaperRequest(BaseModel):
     notes: str | None = None

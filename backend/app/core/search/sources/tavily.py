@@ -35,7 +35,8 @@ async def _llm_filter_relevant(
 
         if not is_llm_configured():
             return papers[:limit]
-    except Exception:
+    except Exception as exc:
+        logger.debug("[tavily] _llm_filter_relevant init failed: %s", exc, exc_info=False)
         return papers[:limit]
 
     titles = [f"[{i}] {p['title']}" for i, p in enumerate(papers)]
@@ -59,7 +60,8 @@ async def _llm_filter_relevant(
                 default={"relevant": list(range(min(limit, len(papers))))},
             )
         )
-    except Exception:
+    except Exception as exc:
+        logger.debug("[tavily] _llm_filter_relevant run failed: %s", exc, exc_info=False)
         return papers[:limit]
     indices = data.get("relevant") if isinstance(data, dict) else list(range(len(papers)))
     if not isinstance(indices, list):
@@ -112,7 +114,8 @@ async def _llm_extract_papers_from_raw(
 
         if not is_llm_configured():
             return []
-    except Exception:
+    except Exception as exc:
+        logger.debug("[tavily] fetch_abstracts init failed: %s", exc, exc_info=False)
         return []
 
     cleaned = re.sub(r"<[^>]+>", " ", raw_text or "")
@@ -144,7 +147,8 @@ async def _llm_extract_papers_from_raw(
                 default={"papers": []},
             )
         )
-    except Exception:
+    except Exception as exc:
+        logger.debug("[tavily] fetch_abstracts run failed: %s", exc, exc_info=False)
         return []
     arr = data.get("papers") if isinstance(data, dict) else []
     if not isinstance(arr, list):

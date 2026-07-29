@@ -31,7 +31,12 @@ _VENUE_ALIASES: dict[str, tuple[str, ...]] = {
     "aaai": ("aaai", "association for the advancement of artificial intelligence"),
     "ijcai": ("ijcai", "international joint conference on artificial intelligence"),
     "kdd": ("kdd", "knowledge discovery and data mining"),
-    "sigir": ("sigir", "information retrieval"),
+    "sigir": (
+        "sigir",
+        "international acm sigir conference",
+        "acm sigir conference",
+        "conference on research and development in information retrieval",
+    ),
 }
 
 
@@ -53,10 +58,16 @@ def _contains_venue_alias(text: str, venue: str | None) -> bool:
         a = alias.lower()
         if len(a) < 2:
             continue
+        # 缩写必须按 token 匹配，避免 ACL 命中“clinical”、KDD 命中
+        # 任意长串；正式会议名才允许普通子串匹配。
+        if re.fullmatch(r"[a-z0-9]+", a) and len(a) <= 8:
+            if re.search(rf"(?<![a-z0-9]){re.escape(a)}(?![a-z0-9])", low):
+                return True
+            continue
         if a in low:
             return True
         ac = re.sub(r"[^a-z0-9]", "", a)
-        if ac and ac in compact:
+        if len(ac) >= 12 and ac in compact:
             return True
     return False
 

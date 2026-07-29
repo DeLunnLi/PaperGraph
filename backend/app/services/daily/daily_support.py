@@ -13,6 +13,7 @@ from ...agents import get_search_agent
 from ...core.search import _arxiv_canonical_from_paper
 from ...settings import get_settings
 from ...utils.common import suppress_exceptions, suppress_exceptions_async
+from ..llm.agent_runtime import stateless_llm_chat
 from .daily_recommend_feedback import get_high_value_keywords_from_feedback, get_skipped_papers
 from .user_behavior_analytics import get_user_interest_profile_for_daily_recommend
 
@@ -26,8 +27,7 @@ _ARXIV_QUERY_NOISE = frozenset({
 })
 _OPENALEX_FALLBACK_QUERY = "machine learning neural network transformer deep learning"
 
-_user_profile_cache: tuple[Any, ...] | None = None
-_user_profile_cache_ts: float = 0.0
+_user_profile_cache: dict[int, tuple[float, tuple[Any, ...]]] = {}
 _USER_PROFILE_CACHE_TTL = 7200
 
 
@@ -132,7 +132,7 @@ def build_daily_arxiv_query(mem_kw: set[str], lib_kw: set[str] | list[str] | Non
         ]
         keywords = clean[:12]
         if not keywords:
-            return ""
+            return _OPENALEX_FALLBACK_QUERY
 
         if len(keywords) >= 3:
             llm_query = _llm_build_arxiv_query(keywords, log=log)
@@ -158,7 +158,7 @@ def _llm_build_arxiv_query(keywords: list[str], *, log: Any = None) -> str:
             f"查询："
         )
         llm = get_llm()
-        raw = llm.chat([{"role": "user", "content": prompt}], temperature=0.1, max_tokens=128).content
+        raw = stateless_llm_chat(llm, None, prompt, temperature=0.1, max_tokens=128)
         q = raw.strip().strip('"').strip("'")[:200]
         return q if len(q) >= 4 else ""
     except Exception as e:
@@ -211,7 +211,7 @@ async def extract_memory_keywords_via_llm(raw_texts: list[str], log: Any) -> set
             f"{memory_block}\n\n"
             'Format: ["keyword1", ...]'
         )
-        raw = await llm.achat(
+        raw = await llm.ainvoke(
             [{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=400,
@@ -275,17 +275,17 @@ async def load_memory_keywords(*, db_path: str, lib_ids: list[int], log: Any) ->
 
 
 @suppress_exceptions_async(default_return=set())
-async def load_feedback_keywords(*, db_path: str, mem_kw: set[str]) -> set[str]:
+async def load_feedback_keywords(*, db_path: str, user_id: int, mem_kw: set[str]) -> set[str]:
     feedback_keywords = await run_in_threadpool(
-        get_high_value_keywords_from_feedback, db_path, days=21, top_n=15
+        get_high_value_keywords_from_feedback, db_path, user_id=user_id, days=21, top_n=15
     )
     mem_kw.update(feedback_keywords)
     return mem_kw
 
 
-async def load_profile_keywords(*, db_path: str, mem_kw: set[str], log: Any) -> set[str]:
+async def load_profile_keywords(*, db_path: str, user_id: int, mem_kw: set[str], log: Any) -> set[str]:
     try:
-        user_profile = await run_in_threadpool(get_user_interest_profile_for_daily_recommend, db_path)
+        user_profile = await run_in_threadpool(get_user_interest_profile_for_daily_recommend, db_path, user_id)
         mem_kw.update(kw.lower() for kw, weight in user_profile.top_keywords[:25] if weight >= 1.0)
     except Exception as e:
         log.debug("数据库行为画像提取失败: %s", e)
@@ -295,50 +295,49 @@ async def load_profile_keywords(*, db_path: str, mem_kw: set[str], log: Any) -> 
 async def load_user_context(
     *,
     db_path: str,
+    user_id: int,
     lib_ids: list[int],
     log: Any,
     include_shown_exclusions: bool = True,
 ) -> tuple[set[str], int, list[str], set[str]]:
     mem_kw = await load_memory_keywords(db_path=db_path, lib_ids=lib_ids, log=log)
-    await load_feedback_keywords(db_path=db_path, mem_kw=mem_kw)
-    await load_profile_keywords(db_path=db_path, mem_kw=mem_kw, log=log)
+    await load_feedback_keywords(db_path=db_path, user_id=user_id, mem_kw=mem_kw)
+    await load_profile_keywords(db_path=db_path, user_id=user_id, mem_kw=mem_kw, log=log)
     skipped_papers = await _safe_load_keywords(
-        run_in_threadpool(get_skipped_papers, db_path, days=14, include_shown=include_shown_exclusions)
+        run_in_threadpool(get_skipped_papers, db_path, user_id=user_id, days=14, include_shown=include_shown_exclusions)
     )
     mem_kw_list, mem_kw_n = prepare_memory_keywords(mem_kw)
     return mem_kw, mem_kw_n, mem_kw_list, skipped_papers
 
 
-def invalidate_user_profile_cache() -> None:
-    global _user_profile_cache, _user_profile_cache_ts
-    _user_profile_cache = None
-    _user_profile_cache_ts = 0.0
+def invalidate_user_profile_cache(user_id: int | None = None) -> None:
+    if user_id is None:
+        _user_profile_cache.clear()
+    else:
+        _user_profile_cache.pop(int(user_id), None)
 
 
 async def get_or_load_user_context(
     *,
     db_path: str,
+    user_id: int,
     lib_ids: list[int],
     log: Any,
     force_reload: bool = False,
     include_shown_exclusions: bool = True,
 ) -> tuple[set[str], int, list[str], set[str]]:
-    global _user_profile_cache, _user_profile_cache_ts
     now = time.time()
-    if (
-        not force_reload
-        and _user_profile_cache is not None
-        and (now - _user_profile_cache_ts) < _USER_PROFILE_CACHE_TTL
-    ):
-        return _user_profile_cache
+    cached = _user_profile_cache.get(int(user_id))
+    if not force_reload and cached is not None and (now - cached[0]) < _USER_PROFILE_CACHE_TTL:
+        return cached[1]
     result = await load_user_context(
         db_path=db_path,
+        user_id=user_id,
         lib_ids=lib_ids,
         log=log,
         include_shown_exclusions=include_shown_exclusions,
     )
-    _user_profile_cache = result
-    _user_profile_cache_ts = now
+    _user_profile_cache[int(user_id)] = (now, result)
     return result
 
 
@@ -354,7 +353,7 @@ def llm_arxiv_categories(agent: Any, user_keywords: list[str], all_categories: l
     cats_str = ", ".join(all_categories)
     prompt = f"用户研究兴趣: {kw_str}\narXiv分类: {cats_str}\n选出最相关的4-6个分类，只返回逗号分隔列表:"
     try:
-        result = agent.llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=60).content.strip()
+        result = stateless_llm_chat(agent.llm, None, prompt, temperature=0.0, max_tokens=60).strip()
         selected = [c.strip() for c in result.split(",") if c.strip() in all_categories]
         return selected[:6] if selected else all_categories[:4]
     except Exception:
@@ -398,17 +397,15 @@ async def fetch_arxiv_candidates(
     arxiv_results: list[Any] = []
     seen_titles: set[str] = set()
     n_fail = 0
-    # Widen the date window only when recent arXiv results are too sparse.
-    days_tiers = [1, 3, 7] if days_back <= 7 else [days_back]
-    if days_back > 7:
-        days_tiers = [days_back, 14, 30]
-    else:
-        days_tiers = [d for d in [1, 3, 7] if d >= min(days_back, 7)] or [1, 3, 7]
+    # arXiv does not publish on weekends; keep at least a three-day window and
+    # widen once more when the recent pool is sparse.
+    days_tiers = [max(3, days_back), 7] if days_back <= 7 else [days_back, 14, 30]
+    days_tiers = list(dict.fromkeys(days_tiers))
     for dbk in days_tiers:
         if len(arxiv_results) >= 60:
             break
         for cat in cats:
-            if len(arxiv_results) >= 60 or n_fail >= 3:
+            if len(arxiv_results) >= 60 or n_fail >= max(5, len(cats)):
                 break
             try:
                 batch = await searcher.search_arxiv_async(
@@ -439,7 +436,7 @@ async def fetch_openalex_daily_fallback(
     import datetime as _dt
 
     try:
-        q = build_daily_arxiv_query(mem_kw, lib_kw, log=log)
+        q = await run_in_threadpool(build_daily_arxiv_query, mem_kw, lib_kw, log=log)
         if len(q) < 4:
             bits = [
                 t for t in prepare_memory_keywords(mem_kw, limit=12, short_first=True)[0]
@@ -475,7 +472,7 @@ async def fetch_external_candidates(
     log: Any,
     exclude_sigs: set[str] | None = None,
 ) -> tuple[list[Any], dict[str, int], str]:
-    arxiv_query = build_daily_arxiv_query(mem_kw, lib_kw, log=log)
+    arxiv_query = await run_in_threadpool(build_daily_arxiv_query, mem_kw, lib_kw, log=log)
     arxiv_results, arx_n = await fetch_arxiv_candidates(
         searcher=searcher,
         arxiv_query=arxiv_query,
@@ -499,9 +496,26 @@ async def fetch_external_candidates(
         )
         append_unique_by_title(arxiv_results, rescue)
 
+    arxiv_count = len(arxiv_results)
+    openalex_count = 0
+    if arxiv_count < 12:
+        log.warning("每日论文：arXiv 结果不足(%s)，触发 OpenAlex 兜底", arxiv_count)
+        openalex_hits = await fetch_openalex_daily_fallback(
+            searcher=searcher,
+            mem_kw=mem_kw,
+            lib_kw=lib_kw,
+            log=log,
+            max_results=max(40, 80 - arxiv_count),
+        )
+        before = len(arxiv_results)
+        append_unique_by_title(arxiv_results, openalex_hits)
+        openalex_count = len(arxiv_results) - before
+
     arxiv_results.sort(
         key=lambda p: (int(getattr(p, "year", 0) or 0), int(getattr(p, "citations", 0) or 0)),
         reverse=True,
     )
     arxiv_results = arxiv_results[:96]
-    return arxiv_results, {"arxiv": len(arxiv_results)}, arxiv_query
+    retained_openalex = min(openalex_count, max(0, len(arxiv_results) - min(arxiv_count, len(arxiv_results))))
+    retained_arxiv = len(arxiv_results) - retained_openalex
+    return arxiv_results, {"arxiv": retained_arxiv, "openalex": retained_openalex}, arxiv_query

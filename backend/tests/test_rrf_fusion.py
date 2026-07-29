@@ -70,6 +70,16 @@ def test_rrf_dedup_same_paper_different_lists():
     assert fused[0][1] > fused[1][1]  # A > B
 
 
+def test_rrf_deduplicates_records_by_pmid_without_doi():
+    pubmed = Paper(title="Clinical Trial", pmid="123456")
+    europe_pmc = Paper(title="Clinical Trial (indexed)", pmid="123456")
+
+    fused = rrf_fuse([[pubmed], [europe_pmc]], k=60)
+
+    assert len(fused) == 1
+    assert fused[0][1] == 2 / 61
+
+
 def test_rrf_empty_lists():
     assert rrf_fuse([]) == []
     assert rrf_fuse([[], []]) == []

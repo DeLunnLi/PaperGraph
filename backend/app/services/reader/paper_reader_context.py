@@ -8,104 +8,21 @@ import time
 from typing import Any
 
 def extract_pdf_text_full(abspath: str | None) -> str:
-    """Extract full PDF text. Uses enhanced extractor with OCR + dedup, falls back to original."""
-    try:
-        from .pdf_extract import extract_pdf_text_enhanced
-        result = extract_pdf_text_enhanced(abspath)
-        if result and len(result) >= 200:
-            return result
-    except Exception:
-        pass
-    # Fallback to original logic
-    if not abspath or not os.path.isfile(abspath):
-        return ""
-    best = ""
-    try:
-        import pymupdf4llm
-        best = (pymupdf4llm.to_markdown(abspath) or "").strip()
-    except Exception:
-        pass
-    try:
-        import fitz
-        doc = fitz.open(abspath)
-        pages: list[str] = []
-        for page in doc:
-            t = page.get_text("text")
-            if t:
-                pages.append(t.strip())
-        doc.close()
-        fitz_text = "\n\n".join(pages).strip()
-        if not best or (len(best) < 500 and len(fitz_text) > len(best) * 3):
-            best = fitz_text
-    except Exception:
-        pass
-    if len(best) < 200:
-        try:
-            import fitz
-            doc = fitz.open(abspath)
-            blocks: list[str] = []
-            for page in doc:
-                for block in page.get_text("blocks") or []:
-                    if len(block) >= 5 and block[4].strip():
-                        blocks.append(str(block[4]).strip())
-            doc.close()
-            block_text = "\n".join(blocks).strip()
-            if len(block_text) > len(best):
-                best = block_text
-        except Exception:
-            pass
-    return best
+    """Extract full PDF text via the enhanced extractor (pymupdf4llm → fitz → OCR, with dedup)."""
+    from .pdf_extract import extract_pdf_text_enhanced
+
+    return extract_pdf_text_enhanced(abspath) or ""
 
 
 def extract_pdf_text_with_pages(abspath: str | None) -> list[dict]:
     """Extract PDF text as per-page dicts with 1-based page numbers.
 
-    Uses enhanced extractor with OCR + header/footer dedup, falls back to original.
+    Delegates to the enhanced extractor (pymupdf4llm page_chunks → fitz, with OCR
+    and header/footer dedup).
     """
-    try:
-        from .pdf_extract import extract_pdf_pages_enhanced
-        result = extract_pdf_pages_enhanced(abspath)
-        if result:
-            return result
-    except Exception:
-        pass
-    # Fallback to original logic
-    if not abspath or not os.path.isfile(abspath):
-        return []
-    out: list[dict] = []
-    try:
-        import pymupdf4llm
-        chunks = pymupdf4llm.to_markdown(abspath, page_chunks=True)
-        if isinstance(chunks, list) and chunks:
-            for item in chunks:
-                if not isinstance(item, dict):
-                    continue
-                text = str(item.get("text") or "").strip()
-                if not text:
-                    continue
-                meta = item.get("metadata") or {}
-                try:
-                    page = int(meta.get("page_number") or 0)
-                except (TypeError, ValueError):
-                    page = 0
-                if page <= 0:
-                    continue
-                out.append({"page": page, "text": text})
-            if out:
-                return out
-    except Exception:
-        pass
-    try:
-        import fitz
-        doc = fitz.open(abspath)
-        for i, page in enumerate(doc):
-            t = (page.get_text("text") or "").strip()
-            if t:
-                out.append({"page": i + 1, "text": t})
-        doc.close()
-    except Exception:
-        pass
-    return out
+    from .pdf_extract import extract_pdf_pages_enhanced
+
+    return extract_pdf_pages_enhanced(abspath)
 
 
 def extract_pdf_tables_markdown(abspath: str | None) -> str:
@@ -446,13 +363,13 @@ def compute_and_cache_excerpt(db_path: str, paper_id: int, pdf_abspath: str) -> 
     else:
         _cache_delete(db_path, int(paper_id))
 
-def _ensure_reader_pdf_available(db: Any, paper: Any) -> str | None:
+def _ensure_reader_pdf_available(db: Any, paper: Any, user_id: int | None = None) -> str | None:
     """阅读页兜底：库内无 PDF 但有 arXiv/pdf_url 时，现取现存一份供上下文解析。"""
     pid = getattr(paper, "id", None)
     if pid is None:
         return None
     try:
-        existing = db.get_library_pdf_abspath(int(pid))
+        existing = db.get_library_pdf_abspath(int(pid), user_id=user_id)
         if existing:
             return existing
     except Exception:
@@ -474,10 +391,14 @@ def _ensure_reader_pdf_available(db: Any, paper: Any) -> str | None:
 
         mail = (getattr(get_settings(), "ncbi_email", "") or "").strip()
         if os.path.isfile(dest) and os.path.getsize(dest) >= 256:
-            db.set_local_pdf_path(int(pid), relpath)
+            if user_id is None:
+                return None
+            db.set_local_pdf_path(int(pid), relpath, user_id=user_id)
             return dest
         if resolve_paper_pdf_url(paper, email=mail) and download_paper_pdf_to_path(paper, dest, email=mail):
-            db.set_local_pdf_path(int(pid), relpath)
+            if user_id is None:
+                return None
+            db.set_local_pdf_path(int(pid), relpath, user_id=user_id)
             return dest
     except Exception:
         return None
@@ -566,11 +487,11 @@ def format_paper_reader_block(
         )
     return "\n".join(lines)
 
-def build_reader_context_for_paper(db: Any, paper_id: int) -> tuple[Any | None, str, str, bool, list[dict]]:
-    p = db.get_paper_by_id(int(paper_id))
+def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None = None) -> tuple[Any | None, str, str, bool, list[dict]]:
+    p = db.get_paper_by_id(int(paper_id), user_id=user_id)
     if not p:
         return None, "", "", False, []
-    pdf_path = _ensure_reader_pdf_available(db, p)
+    pdf_path = _ensure_reader_pdf_available(db, p, user_id=user_id)
     excerpt, is_cached = extract_pdf_text_full_cached(getattr(db, "db_path", ""), int(paper_id), pdf_path)
     pages: list[dict] = []
     if pdf_path:
@@ -633,7 +554,7 @@ def build_reader_context_for_paper(db: Any, paper_id: int) -> tuple[Any | None, 
     # Detect if PDF is still being parsed: if paper has a PDF path but no excerpt cached yet
     pdf_parsing = False
     try:
-        pdf_path = db.get_library_pdf_abspath(int(paper_id))
+        pdf_path = db.get_library_pdf_abspath(int(paper_id), user_id=user_id)
         if pdf_path and os.path.isfile(pdf_path):
             # Check if excerpt is empty or too short — means parsing hasn't completed
             pdf_parsing = len((excerpt or "").strip()) < 200

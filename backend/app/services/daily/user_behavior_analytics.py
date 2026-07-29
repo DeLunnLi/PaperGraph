@@ -26,8 +26,9 @@ class UserInterestProfile:
 
 class UserBehaviorAnalytics:
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, user_id: int) -> None:
         self.db_path = db_path
+        self.user_id = int(user_id)
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -62,8 +63,8 @@ class UserBehaviorAnalytics:
     ) -> list[tuple[int, float]]:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT paper_id,SUM(duration_sec) AS total_duration FROM paper_reading_sessions WHERE day_key>=date('now',?) AND duration_sec>=? GROUP BY paper_id ORDER BY total_duration DESC LIMIT ?",
-                (f"-{days} days", min_duration, top_n),
+                "SELECT paper_id,SUM(duration_sec) AS total_duration FROM paper_reading_sessions WHERE user_id=? AND day_key>=date('now',?) AND duration_sec>=? GROUP BY paper_id ORDER BY total_duration DESC LIMIT ?",
+                (self.user_id, f"-{days} days", min_duration, top_n),
             )
             return [(int(r["paper_id"]), float(r["total_duration"])) for r in cur.fetchall()]
 
@@ -72,8 +73,8 @@ class UserBehaviorAnalytics:
     ) -> list[tuple[int, int]]:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT paper_id,COUNT(*) AS session_count FROM paper_reading_sessions WHERE day_key>=date('now',?) GROUP BY paper_id HAVING COUNT(*)>=? ORDER BY session_count DESC LIMIT ?",
-                (f"-{days} days", min_sessions, top_n),
+                "SELECT paper_id,COUNT(*) AS session_count FROM paper_reading_sessions WHERE user_id=? AND day_key>=date('now',?) GROUP BY paper_id HAVING COUNT(*)>=? ORDER BY session_count DESC LIMIT ?",
+                (self.user_id, f"-{days} days", min_sessions, top_n),
             )
             return [(int(r["paper_id"]), int(r["session_count"])) for r in cur.fetchall()]
 
@@ -82,8 +83,8 @@ class UserBehaviorAnalytics:
     ) -> list[tuple[int, str]]:
         with self._cursor() as cur:
             cur.execute(
-                "SELECT id,category FROM papers WHERE created_at>=strftime('%s','now',?) ORDER BY created_at DESC LIMIT ?",
-                (f"-{days} days", top_n),
+                "SELECT id,category FROM papers WHERE user_id=? AND created_at>=strftime('%s','now',?) ORDER BY created_at DESC LIMIT ?",
+                (self.user_id, f"-{days} days", top_n),
             )
             return [(int(r["id"]), str(r["category"] or "")) for r in cur.fetchall()]
 
@@ -94,7 +95,7 @@ class UserBehaviorAnalytics:
             return Counter()
         with self._cursor() as cur:
             in_clause, params = build_in_clause("id", paper_ids)
-            cur.execute(f"SELECT title,abstract,keywords FROM papers WHERE {in_clause}", params)
+            cur.execute(f"SELECT title,abstract,keywords FROM papers WHERE user_id=? AND {in_clause}", [self.user_id, *params])
             all_kw: list[str] = []
             for row in cur.fetchall():
                 all_kw.extend(self.extract_keywords_from_text(str(row["title"] or "")))
@@ -110,7 +111,7 @@ class UserBehaviorAnalytics:
             return Counter()
         with self._cursor() as cur:
             in_clause, params = build_in_clause("id", paper_ids)
-            cur.execute(f"SELECT title,category,journal FROM papers WHERE {in_clause}", params)
+            cur.execute(f"SELECT title,category,journal FROM papers WHERE user_id=? AND {in_clause}", [self.user_id, *params])
             subdomains = self._extract_subdomains_from_rows(cur.fetchall())
         return subdomains
 
@@ -131,7 +132,7 @@ class UserBehaviorAnalytics:
         from .daily_recommend_feedback import get_high_value_keywords_from_feedback
 
         try:
-            keywords_set = get_high_value_keywords_from_feedback(self.db_path, days=days, top_n=30)
+            keywords_set = get_high_value_keywords_from_feedback(self.db_path, user_id=self.user_id, days=days, top_n=30)
             return Counter({kw: 2.0 for kw in keywords_set})
         except Exception:
             return Counter()
@@ -210,8 +211,8 @@ class UserBehaviorAnalytics:
             topics = self._extract_subdomains_from_rows(cur.fetchall())
         return [t for t, _ in topics.most_common(5)]
 
-def get_user_interest_profile_for_daily_recommend(db_path: str) -> UserInterestProfile:
-    analytics = UserBehaviorAnalytics(db_path)
+def get_user_interest_profile_for_daily_recommend(db_path: str, user_id: int) -> UserInterestProfile:
+    analytics = UserBehaviorAnalytics(db_path, user_id=user_id)
     return analytics.get_user_interest_profile(
         reading_days=30,
         saved_days=60,

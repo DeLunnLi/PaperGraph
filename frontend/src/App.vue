@@ -5,6 +5,7 @@
     </div>
     <a-layout v-else class="app-layout">
       <a-layout-sider
+        v-if="!isMobile"
         v-model:collapsed="collapsed"
         class="app-sider"
         :trigger="null"
@@ -47,10 +48,22 @@
       </a-layout-sider>
       <a-layout class="app-main">
         <a-layout-header class="app-header">
+          <div class="app-header__brand" aria-label="知脉 PaperGraph">
+            <div class="app-header__brand-mark">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+                <circle cx="6" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/>
+                <circle cx="18" cy="6" r="3" stroke="currentColor" stroke-width="1.6"/>
+                <circle cx="18" cy="18" r="3" stroke="currentColor" stroke-width="1.6"/>
+                <path d="M8.5 11L15.5 7M8.5 13L15.5 17" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <span>知脉</span>
+          </div>
           <div class="app-header__crumb">
             <span class="app-header__dot"></span>
             <span class="app-header__title">{{ pageTitle }}</span>
           </div>
+          <span class="app-header__subtitle">{{ pageSubtitle }}</span>
         </a-layout-header>
         <a-layout-content class="app-content" :class="{ 'app-content--no-scroll': contentNoScroll }">
           <div class="app-content__inner" :class="{ 'app-content__inner--no-scroll': contentNoScroll }">
@@ -63,6 +76,20 @@
             </router-view>
           </div>
         </a-layout-content>
+        <nav v-if="isMobile" class="mobile-nav" aria-label="主导航">
+          <button
+            v-for="item in mobileNavItems"
+            :key="item.key"
+            type="button"
+            class="mobile-nav__item"
+            :class="{ 'mobile-nav__item--active': selectedKeys.includes(item.key) }"
+            :aria-current="selectedKeys.includes(item.key) ? 'page' : undefined"
+            @click="router.push(`/${item.key}`)"
+          >
+            <component :is="item.icon" class="mobile-nav__icon" />
+            <span>{{ item.label }}</span>
+          </button>
+        </nav>
       </a-layout>
     </a-layout>
   </a-config-provider>
@@ -91,12 +118,18 @@ const siderWidth = computed(() => {
 const isMobile = computed(() => windowWidth.value < 768)
 const isStandalone = computed(() => {
   const n = String(route.name || '').toLowerCase()
-  return n === 'library-read' && String(route.query?.standalone || '') === '1'
+  return n === 'login' || (n === 'library-read' && String(route.query?.standalone || '') === '1')
 })
 const contentNoScroll = computed(() => {
   const n = String(route.name || '').toLowerCase()
-  return n === 'search'
+  return n === 'search' || n === 'library-read'
 })
+const mobileNavItems = [
+  { key: 'search', label: '搜索', icon: RobotOutlined },
+  { key: 'daily', label: '每日', icon: CalendarOutlined },
+  { key: 'library', label: '文献库', icon: BookOutlined },
+  { key: 'graph', label: '图谱', icon: ShareAltOutlined },
+]
 const pageTitle = computed(() => {
   const titles: Record<string, string> = {
     search: '文献搜索',
@@ -108,17 +141,31 @@ const pageTitle = computed(() => {
   const name = (route.name as string)?.toLowerCase() || ''
   return titles[name] || '知脉'
 })
+const pageSubtitle = computed(() => {
+  const subtitles: Record<string, string> = {
+    search: '发现值得阅读的研究',
+    daily: '为你筛选今日新论文',
+    library: '沉淀、整理与回顾知识',
+    'library-read': '精读论文并记录思考',
+    graph: '探索文献之间的关联',
+  }
+  return subtitles[String(route.name || '').toLowerCase()] || ''
+})
 const themeConfig = {
   algorithm: antdTheme.defaultAlgorithm,
   token: {
-    colorPrimary: '#4338ca',
-    colorLink: '#4338ca',
-    colorInfo: '#4338ca',
+    colorPrimary: '#5b5ce2',
+    colorLink: '#5658d8',
+    colorInfo: '#6366e8',
     colorBgLayout: 'var(--pg-bg)',
-    borderRadius: 8,
+    borderRadius: 10,
+    borderRadiusLG: 16,
     fontFamily:
       '-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif',
     fontSize: 14,
+    controlHeight: 38,
+    controlHeightSM: 30,
+    controlHeightLG: 46,
     colorText: '#18181b',
     colorTextSecondary: '#52525b',
     colorBorder: '#ebebee',
@@ -132,9 +179,9 @@ const themeConfig = {
     },
     Menu: {
       itemBg: 'transparent',
-      itemSelectedBg: '#eef2ff',
-      itemSelectedColor: '#312e81',
-      itemHoverBg: '#f5f6ff',
+      itemSelectedBg: '#f0f1ff',
+      itemSelectedColor: '#4f46d8',
+      itemHoverBg: '#f7f7ff',
       itemColor: '#52525b',
       itemHoverColor: '#18181b',
       itemBorderRadius: 8,
@@ -165,7 +212,10 @@ const onResize = () => {
   if (window.innerWidth < 1024 && !collapsed.value) collapsed.value = true
   if (window.innerWidth >= 1280 && collapsed.value) collapsed.value = false
 }
-onMounted(() => window.addEventListener('resize', onResize))
+onMounted(() => {
+  onResize()
+  window.addEventListener('resize', onResize)
+})
 onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 </script>
 <style scoped>
@@ -198,7 +248,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 14px 12px 0;
+  padding: 18px 14px 0;
 }
 .app-menu {
   flex: 1 1 auto;
@@ -215,8 +265,8 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   border-radius: var(--pg-radius);
   font-weight: 500;
   font-size: 14px;
-  height: 40px;
-  line-height: 40px;
+  height: 44px;
+  line-height: 44px;
   transition: all 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
   position: relative;
 }
@@ -261,18 +311,44 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   background: rgba(255, 255, 255, 0.7);
   backdrop-filter: var(--pg-glass-blur-light);
   -webkit-backdrop-filter: var(--pg-glass-blur-light);
-  padding: 0 32px;
+  padding: 0 clamp(20px, 3vw, 40px);
   flex: 0 0 auto;
-  height: 56px;
-  line-height: 56px;
-  border-bottom: 1px solid var(--pg-divider);
+  height: 62px;
+  line-height: 62px;
+  border-bottom: 1px solid rgba(67, 56, 202, 0.08);
+  box-shadow: 0 1px 0 rgba(255,255,255,.8), 0 8px 24px rgba(12, 10, 29, 0.025);
   display: flex;
   align-items: center;
+}
+.app-header__brand {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  color: var(--pg-text-heading);
+  font-family: var(--pg-font-serif);
+  font-weight: 700;
+}
+.app-header__brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--pg-accent);
+  background: var(--pg-primary-soft);
+  border: 1px solid #dfe3ff;
 }
 .app-header__crumb {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.app-header__subtitle {
+  margin-left: 14px;
+  padding-left: 14px;
+  border-left: 1px solid var(--pg-border);
+  color: var(--pg-text-tertiary);
+  font-size: 12px;
 }
 .app-header__title {
   margin: 0;
@@ -293,7 +369,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: clamp(16px, 3vw, 28px) clamp(16px, 3vw, 32px) clamp(20px, 3vw, 36px);
+  padding: clamp(20px, 3vw, 34px) clamp(18px, 3.5vw, 44px) clamp(28px, 4vw, 48px);
   display: flex;
   flex-direction: column;
   background: transparent;
@@ -353,12 +429,13 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   height: 34px;
   flex-shrink: 0;
   border-radius: 10px;
-  background: var(--pg-gradient);
-  color: #fff;
+  background: var(--pg-primary-soft);
+  color: var(--pg-accent);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+  border: 1px solid #dfe3ff;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.1);
 }
 .logo__text {
   font-family: var(--pg-font-serif);
@@ -377,6 +454,56 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   letter-spacing: 0.08em;
   text-transform: uppercase;
   margin-top: 2px;
+}
+.mobile-nav {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  flex: 0 0 calc(62px + env(safe-area-inset-bottom));
+  padding: 6px 8px env(safe-area-inset-bottom);
+  background: rgba(255, 255, 255, 0.9);
+  border-top: 1px solid var(--pg-border);
+  backdrop-filter: var(--pg-glass-blur-light);
+  -webkit-backdrop-filter: var(--pg-glass-blur-light);
+  z-index: 20;
+}
+.mobile-nav__item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--pg-text-tertiary);
+  font: inherit;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.mobile-nav__item--active {
+  color: var(--pg-accent);
+  background: var(--pg-primary-soft);
+  font-weight: 600;
+}
+.mobile-nav__icon {
+  font-size: 18px;
+}
+@media (max-width: 767px) {
+  .app-header {
+    height: 52px;
+    line-height: 52px;
+    padding: 0 16px;
+    justify-content: space-between;
+  }
+  .app-header__brand { display: flex; }
+  .app-header__dot,
+  .app-header__subtitle { display: none; }
+  .app-header__title { font-family: var(--pg-font); font-size: 14px; }
+  .app-content {
+    padding: 14px 12px 18px;
+  }
+  .app-content.app-content--no-scroll { padding: 0; }
 }
 .pg-fade-enter-active,
 .pg-fade-leave-active {

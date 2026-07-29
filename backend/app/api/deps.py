@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import Depends, Header, HTTPException
 
-from ..services.auth.user_service import get_user_from_token, get_or_create_default_user
+from ..services.auth.user_service import get_user_from_token
 
 
 async def require_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -38,27 +38,11 @@ async def require_user(authorization: str | None = Header(default=None)) -> dict
 
 
 async def optional_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-    """Like require_user but returns a default user instead of raising 401.
+    """Backward-compatible alias for strict authentication.
 
-    Used for endpoints that should work in single-user mode (no auth configured)
-    but also support multi-user isolation when auth is enabled.
+    Anonymous/default-user fallback is intentionally disabled to prevent data leaks.
     """
-    if not authorization:
-        # No token → use default user (backwards compat)
-        uid = get_or_create_default_user()
-        return {"user_id": uid, "username": "default"}
-
-    token = authorization
-    if token.lower().startswith("bearer "):
-        token = token[7:].strip()
-
-    user = get_user_from_token(token)
-    if not user:
-        # Invalid token → also fall back to default user (don't block)
-        uid = get_or_create_default_user()
-        return {"user_id": uid, "username": "default"}
-
-    return user
+    return await require_user(authorization)
 
 
 # Simple in-memory rate limiter (no Redis needed)

@@ -1,5 +1,17 @@
+import DOMPurify from 'dompurify'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
+
+const SANITIZE_CONFIG = {
+  USE_PROFILES: { html: true, mathMl: true },
+  ALLOW_UNKNOWN_PROTOCOLS: false,
+  FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'style'],
+  FORBID_ATTR: ['style'],
+} as const
+
+function sanitizeHtml(html: string): string {
+  return DOMPurify.sanitize(html, SANITIZE_CONFIG)
+}
 export function clipTextAvoidBreakingMath(s: string, max: number): string {
   if (!s || s.length <= max) return s
   let cut = max
@@ -33,7 +45,7 @@ export function renderMarkdownWithLatex(text: string): string {
   })
   let html = renderMarkdown(withPlaceholders)
   for (let i = 0; i < katexHtml.length; i++) { html = html.split(`[[[LATEXPH${i}]]]`).join(katexHtml[i]) }
-  return html
+  return sanitizeHtml(html)
 }
 export function repairTabSeparatedPseudoTables(text: string): string {
   const raw = String(text || '').replace(/\r\n/g, '\n')
@@ -116,5 +128,5 @@ export function renderMarkdown(text: string): string {
     if (trimmed.startsWith('<h') || trimmed.startsWith('<ul') || trimmed.startsWith('<ol') || trimmed.startsWith('<pre') || trimmed.startsWith('<li') || trimmed === '<hr>' || trimmed.startsWith('<hr ')) return trimmed
     return `<p>${trimmed.replace(/\n/g, '<br>')}</p>`
   }).filter(p => p && p !== '<p><br></p>' && p !== '<p></p>').join('\n')
-  return html
+  return sanitizeHtml(html)
 }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import time
@@ -11,11 +12,16 @@ from typing import Any
 import os
 from .sqlite_document_store_compat import SQLiteDocumentStore
 
+logger = logging.getLogger(__name__)
+
+
 def _memory_db_path() -> str:
     from ...settings import get_settings
     root = get_settings().data_dir
     os.makedirs(root, exist_ok=True)
-    return os.path.join(root, "papers.db")
+    # Agent coordination memory uses synthetic identities (papergraph:agent:*),
+    # so it must not share the application DB whose memories.user_id references users.id.
+    return os.path.join(root, "agent_memory.db")
 
 def _agent_user_id(agent_name: str) -> str:
     return f"papergraph:agent:{str(agent_name or 'unknown').strip()[:48]}"

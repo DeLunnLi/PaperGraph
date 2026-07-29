@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .plan_helpers import effective_max_results, is_pinned_single_year
+from .plan_helpers import effective_max_results
 from .search_plan import ResolvedSearchPlan
 
 
@@ -22,7 +22,7 @@ class SearchRuntimeConfig:
     http_timeout_sec: float
     http_max_attempts: int
     openalex_timeout_sec: float
-    dblp_timeout_sec: float | None = None
+    dblp_timeout_sec: float
 
     @classmethod
     def from_settings(
@@ -44,10 +44,6 @@ class SearchRuntimeConfig:
         recall_wall = max(
             10.0, min(180.0, float(getattr(settings, "papergraph_search_recall_wall_sec", 42.0)))
         )
-        venue = (plan.venues[0] if plan.venues else None) or None
-        if is_pinned_single_year(plan) and venue:
-            recall_wall = max(recall_wall, 75.0)
-
         rank_wall = max(
             10.0, min(120.0, float(getattr(settings, "papergraph_fine_rank_pipeline_wall_sec", 25.0)))
         )
@@ -71,11 +67,8 @@ class SearchRuntimeConfig:
             http_max_attempts = 2
         http_max_attempts = max(1, min(3, http_max_attempts))
 
-        openalex_timeout = 18.0
-        dblp_timeout: float | None = None
-        if is_pinned_single_year(plan) and venue:
-            dblp_timeout = 55.0
-            openalex_timeout = 45.0
+        openalex_timeout = http_timeout
+        dblp_timeout = http_timeout
 
         return cls(
             max_results=mr,
@@ -99,6 +92,5 @@ class SearchRuntimeConfig:
             "http_max_attempts": self.http_max_attempts,
             "openalex_timeout_sec": self.openalex_timeout_sec,
         }
-        if self.dblp_timeout_sec is not None:
-            out["dblp_timeout_sec"] = self.dblp_timeout_sec
+        out["dblp_timeout_sec"] = self.dblp_timeout_sec
         return out

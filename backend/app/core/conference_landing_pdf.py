@@ -1,7 +1,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -25,6 +27,65 @@ _GENERIC_CONTENT_PDF = re.compile(
     r'content\s*=\s*["\']([^"\']+?\.pdf)["\']',
     re.I,
 )
+
+_MAX_REDIRECTS = 5
+
+
+def is_safe_public_http_url(url: str) -> bool:
+    """Return whether a URL targets a non-private, non-reserved HTTP(S) host.
+
+    Blocks RFC-1918, loopback, link-local, and IPv6 unique-local addresses.
+    DNS resolution is checked to prevent DNS-rebinding SSRF; if resolution fails
+    the URL is rejected.
+    """
+    try:
+        parsed = urlparse((url or "").strip())
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+            return False
+        hostname = parsed.hostname
+        # Quick-reject known private/loopback hostnames
+        if hostname.lower() in ("localhost", "localhost.localdomain"):
+            return False
+        # Try DNS resolution
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        try:
+            addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            return False
+        if not addresses:
+            return False
+        for entry in addresses:
+            ip = ipaddress.ip_address(entry[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+            # Block IPv6 unique-local (fc00::/7) – is_private covers this in Python 3.x
+            if isinstance(ip, ipaddress.IPv6Address) and not ip.is_global:
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def safe_public_get(url: str, **kwargs) -> requests.Response:
+    """GET a public URL while validating every redirect target."""
+    current = (url or "").strip()
+    for redirect_count in range(_MAX_REDIRECTS + 1):
+        if not is_safe_public_http_url(current):
+            raise requests.RequestException("unsafe outbound URL")
+        response = requests.get(current, allow_redirects=False, **kwargs)
+        if response.is_redirect or response.is_permanent_redirect:
+            location = response.headers.get("Location")
+            response.close()
+            if not location or redirect_count >= _MAX_REDIRECTS:
+                raise requests.TooManyRedirects("redirect limit exceeded")
+            current = urljoin(current, location)
+            continue
+        if not is_safe_public_http_url(response.url):
+            response.close()
+            raise requests.RequestException("unsafe final URL")
+        return response
+    raise requests.TooManyRedirects("redirect limit exceeded")
+
 
 _OJS_VIEW_OR_DL = re.compile(
     r'(?:href|data-href)\s*=\s*(["\'])([^"\']*?/article/(?:view|download)/\d+/\d+[^"\']*)\1',
@@ -61,7 +122,7 @@ def fetch_pdf_url_from_html_page(
     max_bytes: int = 800_000,
 ) -> str | None:
     u0 = (url or "").strip()
-    if not u0.lower().startswith(("http://", "https://")):
+    if not is_safe_public_http_url(u0):
         return None
 
     mail = (email or "").strip()
@@ -69,7 +130,7 @@ def fetch_pdf_url_from_html_page(
     headers = {"User-Agent": ua}
 
     try:
-        with requests.get(u0, timeout=timeout, headers=headers, stream=True) as r:
+        with safe_public_get(u0, timeout=timeout, headers=headers, stream=True) as r:
             if r.status_code != 200:
                 return None
             buf = bytearray()
@@ -87,7 +148,7 @@ def fetch_pdf_url_from_html_page(
 
     def _add_url(raw_url: str) -> None:
         s = raw_url.strip().split("?", 1)[0]
-        if not s.lower().endswith(".pdf"):
+        if not s.lower().endswith(".pdf") or not is_safe_public_http_url(s):
             return
         low = s.lower()
         if low not in seen:
@@ -133,6 +194,8 @@ def fetch_pdf_url_from_html_page(
                     abs_u = abs_u.replace("/article/view/", "/article/download/", 1)
                 low = abs_u.lower()
                 if "citationstylelanguage" in low or low in seen:
+                    continue
+                if not is_safe_public_http_url(abs_u):
                     continue
                 seen.add(low)
                 found.append(abs_u)

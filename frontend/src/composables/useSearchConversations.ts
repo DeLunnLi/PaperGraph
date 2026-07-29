@@ -25,8 +25,15 @@ export function useSearchConversations<TMessage>({
   const conversations = ref<SearchConversation<TMessage>[]>([])
   const currentConversationId = ref<string | null>(null)
   const PERSIST_DEBOUNCE_MS = 900
+  const CONVERSATION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+  const STATE_TTL_MS = 24 * 60 * 60 * 1000
+  const MAX_CONVERSATIONS = 50
   let conversationsPersistTimer: ReturnType<typeof setTimeout> | null = null
   let statePersistTimer: ReturnType<typeof setTimeout> | null = null
+
+  function cloneMessages(value: TMessage[]): TMessage[] {
+    return JSON.parse(JSON.stringify(value)) as TMessage[]
+  }
   function generateId(): string {
     return Date.now().toString(36) + Math.random().toString(36).slice(2)
   }
@@ -36,7 +43,11 @@ export function useSearchConversations<TMessage>({
       conversationsPersistTimer = null
     }
     try {
-      localStorage.setItem(conversationsStorageKey, JSON.stringify(conversations.value))
+      const recent = conversations.value
+        .filter((item) => Date.now() - Number(item.timestamp || 0) < CONVERSATION_TTL_MS)
+        .slice(0, MAX_CONVERSATIONS)
+      conversations.value = recent
+      localStorage.setItem(conversationsStorageKey, JSON.stringify(recent))
     } catch (e) {
       console.error('Failed to save conversations:', e)
     }
@@ -52,7 +63,14 @@ export function useSearchConversations<TMessage>({
   function loadConversations() {
     try {
       const saved = localStorage.getItem(conversationsStorageKey)
-      if (saved) conversations.value = JSON.parse(saved)
+      if (saved) {
+        const parsed = JSON.parse(saved) as SearchConversation<TMessage>[]
+        conversations.value = Array.isArray(parsed)
+          ? parsed
+              .filter((item) => item && Date.now() - Number(item.timestamp || 0) < CONVERSATION_TTL_MS)
+              .slice(0, MAX_CONVERSATIONS)
+          : []
+      }
     } catch (e) {
       console.error('Failed to load conversations:', e)
       conversations.value = []
@@ -94,10 +112,21 @@ export function useSearchConversations<TMessage>({
         currentConversationId?: string | null
         timestamp?: number
       }
-      if (!state.timestamp || Date.now() - state.timestamp >= 24 * 60 * 60 * 1000) return
-      clearState()
+      if (!state.timestamp || Date.now() - state.timestamp >= STATE_TTL_MS) {
+        clearState()
+        return
+      }
+
+      const restoredMessages = Array.isArray(state.messages) ? cloneMessages(state.messages) : []
+      messages.value = restoredMessages
+      hasSearched.value = Boolean(state.hasSearched) && restoredMessages.length > 0
+      currentConversationId.value = hasSearched.value && typeof state.currentConversationId === 'string' && state.currentConversationId
+        ? state.currentConversationId
+        : null
+      userInput.value = ''
     } catch (e) {
       console.error('Failed to load search state:', e)
+      clearState()
     }
   }
   function clearState() {
@@ -114,13 +143,16 @@ export function useSearchConversations<TMessage>({
     const next: SearchConversation<TMessage> = {
       id: convId,
       title: titleFromMessages(messages.value),
-      messages: JSON.parse(JSON.stringify(messages.value)),
+      messages: cloneMessages(messages.value),
       timestamp: Date.now(),
       messageCount: messages.value.length,
     }
     const existingIndex = conversations.value.findIndex((c) => c.id === convId)
     if (existingIndex >= 0) conversations.value.splice(existingIndex, 1, next)
     else conversations.value.unshift(next)
+    if (conversations.value.length > MAX_CONVERSATIONS) {
+      conversations.value.splice(MAX_CONVERSATIONS)
+    }
     saveConversations()
   }
   function ensureCurrentConversationId(): string {
@@ -131,7 +163,7 @@ export function useSearchConversations<TMessage>({
     const conversation = conversations.value.find((c) => c.id === id)
     if (!conversation) return
     saveCurrentConversation()
-    messages.value = [...conversation.messages]
+    messages.value = cloneMessages(conversation.messages)
     hasSearched.value = true
     currentConversationId.value = id
     saveState()

@@ -54,11 +54,14 @@ class PaperReaderService:
             lines.append(f"{label}：{content}")
         return "\n\n".join(lines)
 
-    async def _build_reader_context(self, paper_id: int, user_message: str = "") -> tuple[Any, str, str, list[dict]]:
+    async def _build_reader_context(self, paper_id: int, user_id: int, user_message: str = "") -> tuple[Any, str, str, list[dict]]:
         from ..memory.memory_store import MemoryStore
         from .paper_reader_context import build_reader_context_for_paper
 
-        paper, base_ctx, pdf_ref_text, pdf_parsing, pdf_pages = await run_in_threadpool(build_reader_context_for_paper, self._db, paper_id)
+        paper = await run_in_threadpool(self._db.get_paper_by_id, paper_id, user_id)
+        if not paper:
+            raise HTTPException(status_code=404, detail="文献不存在")
+        paper, base_ctx, pdf_ref_text, pdf_parsing, pdf_pages = await run_in_threadpool(build_reader_context_for_paper, self._db, paper_id, user_id)
         if not paper:
             raise HTTPException(status_code=404, detail="文献不存在")
 
@@ -70,35 +73,37 @@ class PaperReaderService:
         ctx = (base_ctx + ("\n\n" + mem if mem else "")).strip()
         return paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages
 
-    def _schedule_pdf_excerpt(self, paper_id: int, ctx: str, background_tasks: BackgroundTasks) -> None:
+    def _schedule_pdf_excerpt(self, paper_id: int, user_id: int, ctx: str, background_tasks: BackgroundTasks) -> None:
         from .paper_reader_context import compute_and_cache_excerpt
 
         try:
-            pdf_path = self._db.get_library_pdf_abspath(paper_id)
+            pdf_path = self._db.get_library_pdf_abspath(paper_id, user_id=user_id)
             if pdf_path and "【PDF 正文摘录" not in ctx:
                 background_tasks.add_task(compute_and_cache_excerpt, self._db.db_path, paper_id, pdf_path)
         except Exception as exc:
             logger.debug("paper_reader.schedule_pdf_excerpt_failed", extra={"paper_id": paper_id}, exc_info=exc)
 
     @suppress_exceptions_async(default_return=None, log_level="warning", log_message="paper_reader.ensure_opening_turn_failed")
-    async def _ensure_opening_turn_safe(self, *, paper_id: int, opening_text: str) -> None:
+    async def _ensure_opening_turn_safe(self, *, paper_id: int, user_id: int, opening_text: str) -> None:
         from .paper_reader_history import ensure_opening_turn
 
         await run_in_threadpool(
             ensure_opening_turn,
             self._db.db_path,
             paper_id=int(paper_id),
+            user_id=int(user_id),
             opening_text=opening_text,
         )
 
     @suppress_exceptions_async(default_return=None, log_level="warning", log_message="paper_reader.append_history_failed")
-    async def _append_history(self, *, paper_id: int, user_message: str, reply: str, metadata: str | None = None) -> None:
+    async def _append_history(self, *, paper_id: int, user_id: int, user_message: str, reply: str, metadata: str | None = None) -> None:
         from .paper_reader_history import append_turn
 
         await run_in_threadpool(
             append_turn,
             self._db.db_path,
             paper_id=int(paper_id),
+            user_id=int(user_id),
             role="user",
             content=user_message,
         )
@@ -106,6 +111,7 @@ class PaperReaderService:
             append_turn,
             self._db.db_path,
             paper_id=int(paper_id),
+            user_id=int(user_id),
             role="assistant",
             content=reply,
             metadata=metadata,
@@ -119,27 +125,27 @@ class PaperReaderService:
             user_message=user_message, assistant_reply=reply,
         )
 
-    async def get_opening(self, *, paper_id: int, background_tasks: BackgroundTasks) -> dict:
+    async def get_opening(self, *, paper_id: int, user_id: int, background_tasks: BackgroundTasks) -> dict:
         from .reader_opening_cache import get_cached_opening, set_cached_opening
 
         from .paper_reader_context import build_reader_snap
 
-        paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages = await self._build_reader_context(paper_id)
+        paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages = await self._build_reader_context(paper_id, user_id)
 
         reader_snap = build_reader_snap(paper, pdf_text_for_references=pdf_ref_text, pdf_pages=pdf_pages)
         try:
-            pdf_path = self._db.get_library_pdf_abspath(paper_id)
+            pdf_path = self._db.get_library_pdf_abspath(paper_id, user_id=user_id)
             if pdf_path:
                 reader_snap["_pdf_abspath"] = pdf_path
         except Exception:
             pass
         if pdf_parsing:
-            self._schedule_pdf_excerpt(paper_id, ctx, background_tasks)
+            self._schedule_pdf_excerpt(paper_id, user_id, ctx, background_tasks)
 
         cached, fresh = await run_in_threadpool(get_cached_opening, self._db.db_path, paper_id, 72)
         if cached and fresh:
             op = cached.strip()
-            await self._ensure_opening_turn_safe(paper_id=paper_id, opening_text=op)
+            await self._ensure_opening_turn_safe(paper_id=paper_id, user_id=user_id, opening_text=op)
             return {"opening": op, "pdf_parsing": pdf_parsing}
 
         if cached and not fresh:
@@ -161,7 +167,7 @@ class PaperReaderService:
 
                 background_tasks.add_task(_refresh)
             op = cached.strip()
-            await self._ensure_opening_turn_safe(paper_id=paper_id, opening_text=op)
+            await self._ensure_opening_turn_safe(paper_id=paper_id, user_id=user_id, opening_text=op)
             return {"opening": op, "pdf_parsing": pdf_parsing}
 
         opening, _, _, _ = await run_in_threadpool(
@@ -169,30 +175,31 @@ class PaperReaderService:
         )
         op = opening.strip()
         await run_in_threadpool(set_cached_opening, self._db.db_path, paper_id, op)
-        await self._ensure_opening_turn_safe(paper_id=paper_id, opening_text=op)
+        await self._ensure_opening_turn_safe(paper_id=paper_id, user_id=user_id, opening_text=op)
         return {"opening": op, "pdf_parsing": pdf_parsing}
 
     async def process_chat(
         self,
         *,
         paper_id: int,
+        user_id: int,
         messages: list[Any],
         user_message: str,
         background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
         from ..memory.memory_store import MemoryStore
 
-        paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages = await self._build_reader_context(paper_id, user_message)
+        paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages = await self._build_reader_context(paper_id, user_id, user_message)
         from .paper_reader_context import build_reader_snap
 
         reader_snap = build_reader_snap(paper, pdf_text_for_references=pdf_ref_text, pdf_pages=pdf_pages)
         try:
-            pdf_path = self._db.get_library_pdf_abspath(paper_id)
+            pdf_path = self._db.get_library_pdf_abspath(paper_id, user_id=user_id)
             if pdf_path:
                 reader_snap["_pdf_abspath"] = pdf_path
         except Exception:
             pass
-        self._schedule_pdf_excerpt(paper_id, ctx, background_tasks)
+        self._schedule_pdf_excerpt(paper_id, user_id, ctx, background_tasks)
 
         store = MemoryStore(self._db.db_path)
         # Query-specific memory: only inject if different from what _build_reader_context already added
@@ -231,7 +238,7 @@ class PaperReaderService:
             "related_count": len(related_papers or []),
             "citation_count": len(citations or []),
         })
-        await self._append_history(paper_id=paper_id, user_message=user_message, reply=reply, metadata=_meta)
+        await self._append_history(paper_id=paper_id, user_id=user_id, user_message=user_message, reply=reply, metadata=_meta)
         await self._update_memory(store=store, paper_id=paper_id, user_message=user_message, reply=reply)
         background_tasks.add_task(store.compress_working, scope="paper", paper_id=int(paper_id), min_entries=6)
 
@@ -244,10 +251,10 @@ class PaperReaderService:
             "citations": citations or [],
         }
 
-    async def get_history(self, *, paper_id: int, limit: int, user_id: int | None = None) -> list[dict[str, Any]]:
+    async def get_history(self, *, paper_id: int, limit: int, user_id: int) -> list[dict[str, Any]]:
         from .paper_reader_history import list_turns
 
-        paper = await run_in_threadpool(self._db.get_paper_by_id, int(paper_id))
+        paper = await run_in_threadpool(self._db.get_paper_by_id, int(paper_id), int(user_id))
         if not paper:
             raise HTTPException(status_code=404, detail="文献不存在")
         return await run_in_threadpool(

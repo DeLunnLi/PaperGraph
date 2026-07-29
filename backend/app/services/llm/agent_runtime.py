@@ -6,7 +6,11 @@ import logging
 from typing import Any, TypeVar
 from collections.abc import Callable
 
+from hello_agents import SimpleAgent
+
+from app.exceptions import LLMError
 from ...settings import get_settings
+from .agent_config import apply_project_skills, papergraph_agent_config, resolve_task_skills
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,22 @@ def _run_with_optional_timeout(fn: Callable[[], _T], timeout_sec: float | None) 
             fut.cancel()
             raise TimeoutError(f"agent task timeout after {timeout_sec}s") from exc
 
+def stateless_llm_chat(
+    llm: Any, system_prompt: str | None, user_prompt: str, **invoke_kwargs: Any
+) -> str:
+    """Single-turn stateless LLM call: build ``[system?, user]`` → ``invoke`` → ``.content``.
+
+    This is the shared chokepoint for one-shot LLM calls that must stay
+    request-isolated (no ``SimpleAgent`` history accumulation, see P0-4).
+    ``invoke_kwargs`` (e.g. ``temperature``, ``max_tokens``) are forwarded to ``invoke``.
+    """
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_prompt})
+    return llm.invoke(messages, **invoke_kwargs).content
+
+
 def run_agent_task(
     *,
     task_name: str,
@@ -59,6 +79,7 @@ def run_agent_task(
     user_prompt: str,
     timeout_sec: float | None = None,
     retries: int | None = None,
+    max_tokens: int | None = None,
     task_logger: logging.Logger | None = None,
 ) -> str:
     log = task_logger or logger
@@ -70,15 +91,21 @@ def run_agent_task(
         getattr(s, "agent_runtime_default_retries", 1)
     )
     attempts = max(1, resolved_retries + 1)
+    selected_skills = resolve_task_skills(task_name)
+    if selected_skills:
+        log.debug("[%s] project skills: %s", task_name, ",".join(selected_skills))
+    resolved_system_prompt = apply_project_skills(system_prompt, selected_skills)
     last_error: Exception | None = None
 
     for i in range(attempts):
         try:
-            messages: list[dict[str, str]] = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": user_prompt})
-            raw = _run_with_optional_timeout(lambda: llm.chat(messages).content, resolved_timeout)
+            agent = SimpleAgent(
+                name=agent_name,
+                llm=llm,
+                system_prompt=resolved_system_prompt,
+                config=papergraph_agent_config(max_tokens=max_tokens),
+            )
+            raw = _run_with_optional_timeout(lambda: agent.run(user_prompt), resolved_timeout)
             return (raw or "").strip()
         except Exception as exc:
             last_error = exc
@@ -89,7 +116,7 @@ def run_agent_task(
                     log.warning("[%s] failed after %d attempt(s): %s", task_name, attempts, last_error)
                 else:
                     log.exception("[%s] failed after %d attempt(s)", task_name, attempts)
-    raise RuntimeError(f"{task_name}_failed") from last_error
+    raise LLMError(f"{task_name}_failed", code=f"{task_name}_failed") from last_error
 
 def run_json_task(
     *,
@@ -101,7 +128,7 @@ def run_json_task(
     timeout_sec: float | None = None,
     retries: int | None = None,
     default: dict[str, Any | None] = None,
-    parse_fn: Callable[[str | None, dict[str, Any | None]]] = None,
+    parse_fn: Callable[[str | None], Any] | None = None,
     task_logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     log = task_logger or logger

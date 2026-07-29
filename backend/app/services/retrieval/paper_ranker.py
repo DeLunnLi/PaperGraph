@@ -15,6 +15,7 @@ from ..llm.llm_service import get_llm
 from ..search_intent import extract_json_object
 from ...settings import get_settings
 from .paper_filters import should_exclude_main_conference_paper
+from .semantic_scoring import rank_by_semantic_relevance
 from .ranking_prompt import (
     RANKER_SYSTEM_PROMPT,
     RANKER_SYSTEM_PROMPT_RETRY,
@@ -110,6 +111,30 @@ class LlmPaperRanker:
         t = str(getattr(p, "title", "") or "").strip().lower()[:240]
         return f"t:{t}" if t else f"id:{id(p)}"
 
+    @staticmethod
+    def _recover_complete_ranking_items(raw: str) -> list[dict[str, Any]]:
+        """Recover complete objects from a truncated rankings JSON array."""
+        marker = re.search(r'"rankings"\s*:\s*\[', raw or "", re.IGNORECASE)
+        if not marker:
+            return []
+        tail = raw[marker.end():]
+        decoder = json.JSONDecoder()
+        items: list[dict[str, Any]] = []
+        pos = 0
+        while pos < len(tail):
+            start = tail.find("{", pos)
+            if start < 0:
+                break
+            try:
+                item, consumed = decoder.raw_decode(tail[start:])
+            except json.JSONDecodeError:
+                pos = start + 1
+                continue
+            if isinstance(item, dict):
+                items.append(item)
+            pos = start + max(1, consumed)
+        return items
+
     def _parse_ranking_result(self, result: str, papers: list[RankedPaper]) -> list[RankedPaper]:
         if not papers:
             return []
@@ -132,9 +157,12 @@ class LlmPaperRanker:
                     if not isinstance(data, dict):
                         data = None
         except Exception as e:
-            logger.warning("[LlmPaperRanker] 精排 JSON 解析失败: %s", e)
-            return []
+            logger.warning("[LlmPaperRanker] 精排 JSON 解析失败，尝试恢复完整条目: %s", e)
+            data = None
 
+        if not isinstance(data, dict):
+            recovered = self._recover_complete_ranking_items(raw)
+            data = {"rankings": recovered} if recovered else None
         if not isinstance(data, dict):
             return []
         rankings = data.get("rankings")
@@ -147,7 +175,11 @@ class LlmPaperRanker:
             if not isinstance(r, dict):
                 continue
             try:
-                idx = int(r.get("paper_index", r.get("index", 0))) - 1
+                idx_raw = int(r.get("paper_index", r.get("index", 0)))
+                idx = idx_raw - 1
+                # Heuristic: accept index 0 when the model used zero-based indices.
+                if idx < 0 and 0 <= idx_raw < len(papers):
+                    idx = idx_raw
             except (TypeError, ValueError):
                 continue
             if idx in seen_idx or not (0 <= idx < len(papers)):
@@ -211,6 +243,7 @@ class LlmPaperRanker:
             user_prompt=prompt,
             timeout_sec=timeout_sec,
             retries=0,
+            max_tokens=1200,
             task_logger=logger,
         )
 
@@ -245,6 +278,7 @@ class LlmPaperRanker:
         year_from: int | None = None,
         year_to: int | None = None,
         method_acronym: str | None = None,
+        wall_timeout_sec: float | None = None,
     ) -> tuple[list[RankedPaper], str]:
         if not papers:
             return [], "llm_rank"
@@ -264,12 +298,14 @@ class LlmPaperRanker:
         except Exception:
             fine_timeout_sec = 30.0
         fine_timeout_sec = max(10.0, min(120.0, fine_timeout_sec))
+        if wall_timeout_sec is not None and wall_timeout_sec > 0:
+            fine_timeout_sec = max(5.0, min(fine_timeout_sec, wall_timeout_sec - 2.0))
 
         candidates = list(papers or [])[:cand_limit]
         try:
-            abs_max = int(os.getenv("PAPERGRAPH_FINE_RANK_ABSTRACT_CHARS", "").strip() or 200)
+            abs_max = int(os.getenv("PAPERGRAPH_FINE_RANK_ABSTRACT_CHARS", "").strip() or 120)
         except Exception:
-            abs_max = 200
+            abs_max = 120
 
         rank_kwargs = dict(
             ranking_profile=profile,
@@ -300,7 +336,7 @@ class LlmPaperRanker:
             return ranked[:top_k], fine_method
 
         except Exception as e:
-            if _looks_like_llm_timeout(e) or _is_connectionish_error(e):
+            if wall_timeout_sec is None and (_looks_like_llm_timeout(e) or _is_connectionish_error(e)):
                 try:
                     retry_limit = min(max(int(top_k or 10) * 2, 12), max(12, cand_limit))
                     retry_candidates = list(papers or [])[:retry_limit]
@@ -407,6 +443,26 @@ class LlmPaperRanker:
             )
 
         candidate_pool = _papers_to_ranked_pool(papers, cap=recall_cap, prefer_recency=prefer_recency)
+        if candidate_pool and query:
+            # Embedding-assisted coarse ranking improves multilingual/synonym recall
+            # before the LLM sees the bounded fine-ranking pool. Preserve wrappers
+            # so source provenance and existing recall scores remain intact.
+            paper_to_ranked = {id(item.paper): item for item in candidate_pool}
+            semantic_order = rank_by_semantic_relevance(
+                [item.paper for item in candidate_pool],
+                query,
+                keywords=list(kwargs.get("keywords") or []),
+                target_titles=list(kwargs.get("target_titles") or []),
+                top_k=recall_cap,
+                # The following LLM stage already provides semantic judgement.
+                # Avoid a second remote embedding round-trip on the critical path.
+                use_embeddings=False,
+            )
+            candidate_pool = []
+            for paper, semantic_score in semantic_order:
+                item = paper_to_ranked[id(paper)]
+                item.fine_score = semantic_score
+                candidate_pool.append(item)
         if not candidate_pool:
             return [], {"error": "无候选论文"}
 
@@ -425,6 +481,7 @@ class LlmPaperRanker:
                 year_from=kwargs.get("year_from"),
                 year_to=kwargs.get("year_to"),
                 method_acronym=(kwargs.get("method_acronym") or "").strip() or None,
+                wall_timeout_sec=kwargs.get("_wall_timeout_sec"),
             )
             method = fine_method
         except Exception:

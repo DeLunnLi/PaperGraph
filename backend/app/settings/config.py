@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     description: str = "学术文献管理系统"
     debug: bool = False
 
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8000
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -58,6 +58,11 @@ class Settings(BaseSettings):
         default="deepseek-v4-flash",
         description="兼容 OpenAI 的 chat 模型 ID",
     )
+
+    embed_api_key: str = Field(default="", description="OpenAI 兼容嵌入接口密钥；留空则不启用语义粗排")
+    embed_base_url: str = Field(default="", description="OpenAI 兼容嵌入接口 Base URL")
+    embed_model_name: str = Field(default="", description="嵌入模型名称")
+    embed_timeout_sec: float = Field(default=8.0, ge=1.0, le=30.0, description="嵌入请求超时（秒）")
 
     data_dir: str = _DEFAULT_DATA_DIR
     downloads_dir: str = Field(
@@ -105,7 +110,7 @@ class Settings(BaseSettings):
         description="意图 JSON 解析或校验失败后，让模型重新生成的次数（不含首次）",
     )
     papergraph_search_recall_wall_sec: float = Field(
-        default=25.0,
+        default=15.0,
         ge=10.0,
         le=180.0,
         description="多源搜索 anyio 总墙时间（秒）",
@@ -117,7 +122,7 @@ class Settings(BaseSettings):
         description="arXiv 兜底搜索墙时间（秒）",
     )
     papergraph_search_recall_http_timeout_sec: float = Field(
-        default=18.0,
+        default=10.0,
         ge=2.0,
         le=60.0,
         description="多源召回阶段 per-request HTTP 超时（秒）",
@@ -137,7 +142,7 @@ class Settings(BaseSettings):
         description="无 JSON 域名映射时，用 Tavily 按会议名+年份自动发现 proceedings 官网再检索",
     )
     papergraph_fine_rank_pipeline_wall_sec: float = Field(
-        default=25.0,
+        default=15.0,
         ge=10.0,
         le=120.0,
         description="检索流水线内 LLM 精排线程墙钟上限（秒）",
@@ -149,7 +154,7 @@ class Settings(BaseSettings):
         le=60,
         description="进入精排前的最大候选篇数（多源召回上限）",
     )
-    papergraph_fine_rank_candidates: int = Field(default=15, ge=5, le=40)
+    papergraph_fine_rank_candidates: int = Field(default=10, ge=5, le=40)
     papergraph_deep_search_max_sub_queries: int = Field(default=4, ge=1, le=6, description="深度搜索子问题上限")
     papergraph_deep_search_max_iterations: int = Field(default=2, ge=0, le=3, description="深度搜索迭代轮数上限")
     papergraph_deep_search_recall_per_subquery: int = Field(default=12, ge=4, le=30, description="每个子问题召回数")
@@ -157,6 +162,26 @@ class Settings(BaseSettings):
     papergraph_deep_search_decompose_timeout_sec: float = Field(default=20.0, ge=5.0, le=60.0)
     papergraph_deep_search_synthesis_timeout_sec: float = Field(default=45.0, ge=10.0, le=120.0)
     papergraph_search_http_max_attempts: int = Field(default=2, ge=1, le=5)
+    papergraph_search_circuit_failure_threshold: int = Field(
+        default=3, ge=1, le=20,
+        description="数据源熔断阈值：连续失败 N 次后跳过该源（hello-agents CircuitBreaker）",
+    )
+    papergraph_search_circuit_recovery_timeout_sec: int = Field(
+        default=300, ge=10, le=3600,
+        description="数据源熔断恢复时间（秒），超时后半开重试",
+    )
+    trace_retention_days: int = Field(
+        default=7, ge=1, le=365,
+        description="trace 文件保留天数；超期的会话（jsonl+html 成对）删除",
+    )
+    trace_max_files: int = Field(
+        default=1000, ge=10, le=100000,
+        description="trace 会话数上限；超限时保留最新 N 个，删除最旧",
+    )
+    trace_cleanup_interval_sec: int = Field(
+        default=3600, ge=0, le=86400,
+        description="trace 清理后台任务间隔秒数；0=禁用后台任务（仅启动时清理一次）",
+    )
     papergraph_pipeline_parallel_presearch: bool = Field(default=True)
     papergraph_venue_hydrate_wall_sec: float = Field(
         default=3.0,
@@ -236,6 +261,16 @@ def validate_config():
     if not llm_api_key:
         warnings.append("LLM_API_KEY未配置，AI分析功能将无法使用")
 
+    embed_api_key = os.getenv("EMBED_API_KEY", "").strip()
+    embed_base_url = os.getenv("EMBED_BASE_URL", "").strip()
+    embed_model = os.getenv("EMBED_MODEL_NAME", "").strip()
+    if any((embed_api_key, embed_base_url, embed_model)) and not all((embed_api_key, embed_base_url, embed_model)):
+        warnings.append("嵌入服务配置不完整，搜索将自动回退词法相关性评分")
+
+    jwt_secret = os.getenv("PAPERGRAPH_JWT_SECRET", "").strip()
+    if len(jwt_secret) < 32:
+        errors.append("PAPERGRAPH_JWT_SECRET 必须配置且至少包含 32 个字符")
+
     if (settings.openalex_mailto or "").strip().lower() == "user@example.com":
         warnings.append("OPENALEX_MAILTO 配置为占位符 user@example.com，可能导致 OpenAlex 400/更严格限流（建议改为真实邮箱或留空）")
 
@@ -263,5 +298,7 @@ def print_config():
     logger.info("LLM API Key: %s", ("已配置" if llm_api_key else "未配置"))
     logger.info("LLM Base URL: %s", llm_base_url)
     logger.info("LLM Model: %s", llm_model)
+    embed_model = os.getenv("EMBED_MODEL_NAME", "").strip()
+    logger.info("Embedding Model: %s", embed_model or "未配置（使用词法评分）")
     logger.info("数据目录: %s", settings.data_dir)
     logger.info("日志级别: %s", settings.log_level)

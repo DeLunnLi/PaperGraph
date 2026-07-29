@@ -14,6 +14,19 @@ def json_api_headers(searcher, *, accept: str = "application/json") -> dict[str,
     return {"User-Agent": searcher._user_agent(), "Accept": accept}
 
 
+def safe_int(value: Any, *, default: int | None = None) -> int | None:
+    """Best-effort ``int()`` for loosely-typed API fields (year, citation counts).
+
+    Returns ``default`` for ``None``/empty/ non-numeric values instead of raising.
+    """
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def normalize_query_authors(query: str, raw_authors: Any) -> list[str]:
     if isinstance(raw_authors, str):
         raw_authors = [raw_authors]

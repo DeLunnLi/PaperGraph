@@ -1,10 +1,11 @@
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
-from ..llm.agent_runtime import run_json_task
+from ..llm.agent_runtime import run_json_task, stateless_llm_chat
 from .sqlite_document_store_compat import SQLiteDocumentStore
 
 class MemoryStoreConfig:
@@ -18,9 +19,13 @@ class MemoryStoreConfig:
 class MemoryStore:
 
     def __init__(self, db_path: str, config: MemoryStoreConfig | None = None) -> None:
-        self.db_path = db_path
+        # Reader memory uses synthetic papergraph:* identities and therefore must
+        # not share the application memories table, whose user_id references
+        # authenticated users. Keep one sidecar DB beside the application DB.
+        root = os.path.dirname(os.path.abspath(db_path))
+        self.db_path = os.path.join(root, "reader_memory.db")
         self.config = config or MemoryStoreConfig()
-        self.store = SQLiteDocumentStore(db_path=db_path)
+        self.store = SQLiteDocumentStore(db_path=self.db_path)
 
     @staticmethod
     def _user_id_for(scope: str, paper_id: int | None) -> str:
@@ -94,7 +99,7 @@ class MemoryStore:
             import json as _json
             llm = get_llm()
             prompt = f"Are these two research notes semantically the same topic? Answer JSON only: {{\"duplicate\":true/false}}\n1: {a[:200]}\n2: {b[:200]}"
-            txt = llm.chat([{"role":"user","content":prompt}], temperature=0.0, max_tokens=30).content.strip()
+            txt = stateless_llm_chat(llm, None, prompt, temperature=0.0, max_tokens=30).strip()
             d = _json.loads(txt) if txt.startswith("{") else {}
             return bool(d.get("duplicate", False))
         except Exception:
@@ -360,7 +365,7 @@ class MemoryStore:
         try:
             from ..llm.llm_service import get_llm
             llm = get_llm()
-            summary = llm.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400).content
+            summary = stateless_llm_chat(llm, None, prompt, temperature=0.3, max_tokens=400)
             return str(summary or "").strip()
         except Exception:
             return ""
@@ -436,6 +441,17 @@ class MemoryStore:
                 break
         return contents
 
+    def _collect_packets(
+        self, *, scope: str, paper_id: int | None, kinds: list[str], limit_per_kind: int, label: str
+    ) -> list[tuple[str, str, float]]:
+        """Fetch recent docs and project them onto ``(label, content, score)`` packets."""
+        return [
+            (label, self._content_of(doc), self._score_memory(doc))
+            for doc in self._list_recent_docs(
+                scope=scope, paper_id=paper_id, kinds=kinds, limit_per_kind=limit_per_kind,
+            )
+        ]
+
     def build_context_block(self, *, paper_id: int, use_cache: bool = True, max_tokens: int = 1200) -> str:
 
         _ttl = self.config.working_ttl_minutes or 60
@@ -483,21 +499,15 @@ class MemoryStore:
                 self._delete_docs(_to_del)
 
         packets: list[tuple[str, str, float]] = []
-
-        for doc in self._list_recent_docs(
-            scope="global", paper_id=None, kinds=["preference"], limit_per_kind=5,
-        ):
-            packets.append(("preference", self._content_of(doc), self._score_memory(doc)))
-
-        for doc in self._list_recent_docs(
-            scope="paper", paper_id=paper_id, kinds=["paper_summary", "long"], limit_per_kind=3,
-        ):
-            packets.append(("long", self._content_of(doc), self._score_memory(doc)))
-
-        for doc in self._list_recent_docs(
-            scope="paper", paper_id=paper_id, kinds=["short", "working"], limit_per_kind=10,
-        ):
-            packets.append(("working", self._content_of(doc), self._score_memory(doc)))
+        packets += self._collect_packets(
+            scope="global", paper_id=None, kinds=["preference"], limit_per_kind=5, label="preference",
+        )
+        packets += self._collect_packets(
+            scope="paper", paper_id=paper_id, kinds=["paper_summary", "long"], limit_per_kind=3, label="long",
+        )
+        packets += self._collect_packets(
+            scope="paper", paper_id=paper_id, kinds=["short", "working"], limit_per_kind=10, label="working",
+        )
 
         packets.sort(key=lambda x: x[2], reverse=True)
         selected: list[str] = []

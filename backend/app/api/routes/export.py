@@ -12,12 +12,12 @@ import json
 import logging
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 
-from ..deps import optional_user
+from ..deps import require_user
 
 from ...settings import get_settings
 
@@ -46,7 +46,11 @@ def _export_papers(conn: sqlite3.Connection, user_id: int | None = None) -> list
                    read_status, importance, notes, citations, created_at, updated_at
             FROM papers ORDER BY created_at ASC
         """).fetchall()
-    cols = [d[0] for d in conn.execute("SELECT * FROM papers LIMIT 0").description]
+    cols = [
+        "id", "title", "doi", "arxiv_id", "abstract", "journal", "venue_type", "year",
+        "pdf_url", "source_url", "source", "keywords", "category", "tags", "rating",
+        "read_status", "importance", "notes", "citations", "created_at", "updated_at",
+    ]
     out = []
     for r in rows:
         d = dict(zip(cols, r))
@@ -54,7 +58,7 @@ def _export_papers(conn: sqlite3.Connection, user_id: int | None = None) -> list
         authors = conn.execute("""
             SELECT a.name FROM authors a
             JOIN paper_authors pa ON a.id = pa.author_id
-            WHERE pa.paper_id = ? ORDER BY pa."order"
+            WHERE pa.paper_id = ? ORDER BY pa.author_order
         """, (d["id"],)).fetchall()
         d["authors"] = [a[0] for a in authors]
         # Strip heavy/internal
@@ -79,13 +83,21 @@ def _export_reader_turns(conn: sqlite3.Connection, user_id: int | None = None) -
     return [{"paper_id": r[0], "role": r[1], "content": r[2], "created_at": r[3]} for r in rows]
 
 
-def _export_memory(conn: sqlite3.Connection) -> list[dict]:
-    # agent_memory table
+def _export_memory(conn: sqlite3.Connection, user_id: int) -> list[dict]:
+    """Export only memories attached to papers owned by the current user.
+
+    Global/shared agent memories do not currently carry an auth user id and are
+    intentionally excluded rather than leaking them across tenants.
+    """
     try:
         rows = conn.execute("""
-            SELECT agent_name, memory_type, content, importance, shared, scope, paper_id, created_at
-            FROM agent_memory ORDER BY created_at ASC
-        """).fetchall()
+            SELECT m.agent_name, m.memory_type, m.content, m.importance,
+                   m.shared, m.scope, m.paper_id, m.created_at
+            FROM agent_memory m
+            JOIN papers p ON p.id = m.paper_id
+            WHERE p.user_id = ?
+            ORDER BY m.created_at ASC
+        """, (int(user_id),)).fetchall()
         return [{"agent": r[0], "type": r[1], "content": r[2], "importance": r[3],
                  "shared": bool(r[4]), "scope": r[5], "paper_id": r[6], "created_at": r[7]}
                 for r in rows]
@@ -93,12 +105,17 @@ def _export_memory(conn: sqlite3.Connection) -> list[dict]:
         return []
 
 
-def _export_relations(conn: sqlite3.Connection) -> list[dict]:
+def _export_relations(conn: sqlite3.Connection, user_id: int) -> list[dict]:
     try:
         rows = conn.execute("""
-            SELECT source_paper_id, target_paper_id, relation, score, evidence, created_at
-            FROM paper_relations ORDER BY created_at ASC
-        """).fetchall()
+            SELECT r.source_paper_id, r.target_paper_id, r.relation,
+                   r.score, r.evidence, r.created_at
+            FROM paper_relations r
+            JOIN papers source ON source.id = r.source_paper_id
+            JOIN papers target ON target.id = r.target_paper_id
+            WHERE source.user_id = ? AND target.user_id = ?
+            ORDER BY r.created_at ASC
+        """, (int(user_id), int(user_id))).fetchall()
         return [{"source": r[0], "target": r[1], "relation": r[2], "score": r[3],
                  "evidence": r[4], "created_at": r[5]} for r in rows]
     except Exception:
@@ -125,8 +142,11 @@ def _export_feedback(conn: sqlite3.Connection, user_id: int | None = None) -> li
 
 @router.get("/json")
 async def export_json(
-    scope: str = Query(default="all", description="all|papers|reader|memory|graph|feedback"),
-    user: dict = Depends(optional_user),
+    scope: Literal["all", "papers", "reader", "memory", "graph", "feedback"] = Query(
+        default="all",
+        description="all|papers|reader|memory|graph|feedback",
+    ),
+    user: dict = Depends(require_user),
 ):
     """Export knowledge base as a portable JSON file (filtered by user)."""
     db_path = _get_db_path()
@@ -145,9 +165,9 @@ async def export_json(
         if "reader" in scopes:
             data["reading_turns"] = _export_reader_turns(conn, user_id=user_id)
         if "memory" in scopes:
-            data["memories"] = _export_memory(conn)
+            data["memories"] = _export_memory(conn, user_id=user_id)
         if "graph" in scopes:
-            data["relations"] = _export_relations(conn)
+            data["relations"] = _export_relations(conn, user_id=user_id)
         if "feedback" in scopes:
             data["feedback"] = _export_feedback(conn, user_id=user_id)
 

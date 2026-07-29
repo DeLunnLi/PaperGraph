@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,7 +9,7 @@ import anyio
 
 from ...core.paper import Paper as LitPaper
 from ...settings import get_settings
-from .paper_filters import should_exclude_main_conference_paper
+from .paper_filters import has_strong_main_conference_venue_signal, should_exclude_main_conference_paper
 from .paper_ranker import LlmPaperRanker, RankedPaper
 from .pipeline_runtime import SearchRuntimeConfig
 from .plan_helpers import is_venue_browse_plan, method_acronym_for, primary_venue
@@ -17,7 +17,59 @@ from .recall_context import RecallContext, build_recall_context, enrich_recall_c
 from .recall_jobs import build_recall_jobs, dedupe_papers, execute_recall_jobs, merge_candidates
 from .relevance_guard import apply_relevance_guard
 from .search_plan import ResolvedSearchPlan
+from .search_recipe import SearchRecipe
 from .semantic_scoring import rank_by_semantic_relevance
+
+
+_DOMAIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("biomedical", ("medical", "medicine", "health", "clinical", "patient", "disease", "biomedical", "hospital", "hepat", "nephro", "drug")),
+    ("software", ("software", "code", "programming", "test case", "repository")),
+    ("knowledge_graph", ("knowledge graph", "graph retrieval", "ontology")),
+    ("security", ("security", "privacy", "attack", "injection", "vulnerability")),
+    ("networking", ("network", "communication", "wireless", "6g", "telecom")),
+    ("science", ("chemistry", "material", "molecule", "scientific discovery")),
+)
+
+
+def _paper_domain_bucket(paper: LitPaper) -> str:
+    fields = [
+        getattr(paper, "title", "") or "",
+        getattr(paper, "abstract", "") or "",
+        getattr(paper, "journal", "") or "",
+        " ".join(str(x) for x in (getattr(paper, "keywords", None) or [])[:12]),
+    ]
+    blob = re.sub(r"\s+", " ", " ".join(fields).lower())
+    for bucket, signals in _DOMAIN_SIGNALS:
+        if any(signal in blob for signal in signals):
+            return bucket
+    return "general"
+
+
+def diversify_broad_ranked_results(
+    ranked: list[RankedPaper],
+    *,
+    top_k: int,
+    max_per_domain: int = 3,
+) -> list[RankedPaper]:
+    """Keep broad-topic results relevant while preventing one application domain dominating."""
+    if len(ranked) <= max_per_domain or top_k <= 3:
+        return ranked[:top_k]
+    selected: list[RankedPaper] = []
+    deferred: list[RankedPaper] = []
+    counts: Counter[str] = Counter()
+    for item in ranked:
+        bucket = _paper_domain_bucket(item.paper)
+        # "general" contains foundational/survey papers rather than one narrow
+        # application domain; limiting it would push canonical work out of Top-K.
+        if bucket == "general" or counts[bucket] < max_per_domain:
+            selected.append(item)
+            counts[bucket] += 1
+        else:
+            deferred.append(item)
+        if len(selected) >= top_k:
+            return selected[:top_k]
+    selected.extend(deferred[: max(0, top_k - len(selected))])
+    return selected[:top_k]
 
 
 @dataclass
@@ -31,31 +83,29 @@ class SearchPipelineResult:
     plan_explanation: str
 
 
-def _merge_pinned_papers(candidates: list[LitPaper], pinned_ids: list[str], searcher: Any) -> list[LitPaper]:
+async def _merge_pinned_papers(
+    candidates: list[LitPaper], pinned_ids: list[str], searcher: Any
+) -> list[LitPaper]:
     if not pinned_ids:
         return candidates
     try:
-        if hasattr(searcher, "search_by_arxiv_ids"):
-            pinned = searcher.search_by_arxiv_ids(pinned_ids)
-        elif hasattr(searcher, "search_async"):
-            loop = asyncio.new_event_loop()
-            try:
-                pinned = loop.run_until_complete(
-                    searcher.search_async(
-                        "",
-                        sources=["arxiv"],
-                        arxiv_id_list=pinned_ids,
-                        max_results=len(pinned_ids) * 2,
-                    )
-                )
-            finally:
-                loop.close()
-        else:
-            pinned = searcher.search(
+        if hasattr(searcher, "search_async"):
+            pinned = await searcher.search_async(
                 "",
                 sources=["arxiv"],
                 arxiv_id_list=pinned_ids,
                 max_results=len(pinned_ids) * 2,
+            )
+        elif hasattr(searcher, "search_by_arxiv_ids"):
+            pinned = await anyio.to_thread.run_sync(searcher.search_by_arxiv_ids, pinned_ids)
+        else:
+            pinned = await anyio.to_thread.run_sync(
+                lambda: searcher.search(
+                    "",
+                    sources=["arxiv"],
+                    arxiv_id_list=pinned_ids,
+                    max_results=len(pinned_ids) * 2,
+                )
             )
         pinned = pinned or []
     except Exception:
@@ -85,6 +135,13 @@ def normalize_and_filter_candidates(
     venue = primary_venue(plan)
     ma = method_acronym_for(plan, ctx) or None
     candidates = dedupe_papers(candidates)
+    before_year_filter = len(candidates)
+    if plan.year_from is not None:
+        candidates = [p for p in candidates if getattr(p, "year", None) is not None and int(p.year) >= plan.year_from]
+    if plan.year_to is not None:
+        candidates = [p for p in candidates if getattr(p, "year", None) is not None and int(p.year) <= plan.year_to]
+    if len(candidates) != before_year_filter:
+        meta["year_filter_removed"] = before_year_filter - len(candidates)
 
     if ma:
         from .method_acronym import paper_matches_method_query
@@ -130,6 +187,39 @@ def normalize_and_filter_candidates(
     return candidates
 
 
+def should_use_llm_rank(plan: ResolvedSearchPlan) -> bool:
+    """Reserve expensive LLM ranking for genuinely ambiguous/constrained searches."""
+    if not plan.use_llm_rank:
+        return False
+    if is_venue_browse_plan(plan):
+        return False
+    return bool(
+        plan.recipe in {SearchRecipe.METHOD, SearchRecipe.TITLE, SearchRecipe.VENUE_YEAR}
+        or plan.target_titles
+        or plan.authors
+        or plan.venues
+        or plan.method_acronym
+    )
+
+
+def rank_venue_browse_deterministic(
+    candidates: list[LitPaper], *, venue: str | None, top_k: int
+) -> list[RankedPaper]:
+    """Rank a pure proceedings browse without an unnecessary LLM call."""
+    ordered = sorted(
+        candidates,
+        key=lambda paper: (
+            not has_strong_main_conference_venue_signal(paper, venue),
+            -int(getattr(paper, "citations", 0) or 0),
+            (getattr(paper, "title", "") or "").lower(),
+        ),
+    )
+    return [
+        RankedPaper(paper=paper, fine_score=float(getattr(paper, "citations", 0) or 0))
+        for paper in ordered[:top_k]
+    ]
+
+
 async def rank_candidates(
     candidates: list[LitPaper],
     *,
@@ -140,10 +230,48 @@ async def rank_candidates(
 ) -> tuple[list[RankedPaper], str, dict[str, Any]]:
     if not candidates:
         return [], "recall_only", {}
-    if not plan.use_llm_rank:
-        return [RankedPaper(paper=p) for p in candidates[: runtime.max_results]], "recall_only", {}
-
+    if is_venue_browse_plan(plan):
+        ranked = rank_venue_browse_deterministic(
+            candidates, venue=primary_venue(plan), top_k=runtime.max_results
+        )
+        return ranked, "deterministic_venue_browse", {
+            "llm_rank_skipped": True,
+            "skip_reason": "pure_venue_browse_no_topic",
+        }
+    use_llm_rank = should_use_llm_rank(plan)
     venue = primary_venue(plan)
+    constraints_fully_verified = bool(
+        venue
+        and plan.main_conference_proceedings_only
+        and candidates
+        and all(has_strong_main_conference_venue_signal(paper, venue) for paper in candidates)
+    )
+    if not use_llm_rank or constraints_fully_verified:
+        scored = rank_by_semantic_relevance(
+            candidates,
+            ctx.enhanced_query or ctx.rank_query,
+            keywords=ctx.merged_keywords,
+            target_titles=_merge_target_titles(plan, ctx),
+        )
+        semantic_ranked = [RankedPaper(paper=p, fine_score=score) for p, score in scored]
+        if not (plan.authors or plan.venues or plan.target_titles or plan.year_from or plan.year_to):
+            semantic_ranked = diversify_broad_ranked_results(
+                semantic_ranked, top_k=runtime.max_results
+            )
+        return (
+            semantic_ranked[: runtime.max_results],
+            "hybrid_semantic" if not plan.use_llm_rank else "adaptive_semantic",
+            {
+                "semantic_scores": [rp.fine_score for rp in semantic_ranked[: runtime.max_results]],
+                "llm_rank_skipped": bool(plan.use_llm_rank),
+                "skip_reason": (
+                    "constraints_fully_verified"
+                    if constraints_fully_verified
+                    else "deterministic_general_topic" if plan.use_llm_rank else None
+                ),
+            },
+        )
+
     ranker = LlmPaperRanker(recall_max=runtime.recall_max, fine_top_k=runtime.max_results)
     prefer_rec = (plan.sort or "").strip().lower() == "date" or bool(plan.year_from) or bool(venue)
     try:
@@ -165,7 +293,10 @@ async def rank_candidates(
                     main_conference_proceedings_only=bool(plan.main_conference_proceedings_only),
                     intent_source_message=ctx.intent_source_message,
                     method_acronym=ctx.search_kwargs.get("method_acronym"),
-                )
+                    keywords=ctx.merged_keywords,
+                    _wall_timeout_sec=runtime.rank_wall,
+                ),
+                abandon_on_cancel=True,
             )
         return ranked, ranking_metadata.get("ranking_method", "llm_rank"), ranking_metadata
     except TimeoutError:
@@ -178,10 +309,15 @@ async def rank_candidates(
                     candidates,
                     ctx.enhanced_query or ctx.rank_query,
                     keywords=ctx.merged_keywords,
-                    top_k=runtime.max_results,
+                    target_titles=_merge_target_titles(plan, ctx),
                 )
                 ranked = [RankedPaper(paper=p, fine_score=score) for p, score in scored]
-                return ranked, "semantic_fallback_timeout", {"semantic_scores": [s for _, s in scored]}
+                if not (plan.authors or plan.venues or plan.target_titles or plan.year_from or plan.year_to):
+                    ranked = diversify_broad_ranked_results(
+                        ranked, top_k=runtime.max_results
+                    )
+                ranked = ranked[: runtime.max_results]
+                return ranked, "semantic_fallback_timeout", {"semantic_scores": [rp.fine_score for rp in ranked]}
             except Exception:
                 pass
         from .paper_ranker import _papers_to_ranked_pool
@@ -218,14 +354,23 @@ async def run_search_pipeline_async(
     )
 
     pinned_ids = list(ctx.pinned_arxiv_ids or [])
-    if pinned_ids and searcher is not None:
+    # The primary arXiv job already receives arxiv_id_list. Only retry missing IDs;
+    # this removes a duplicate network request from exact-ID searches.
+    found_ids = {
+        str(getattr(p, "arxiv_id", "") or "").strip().lower().split("v", 1)[0]
+        for p in candidates
+        if getattr(p, "arxiv_id", None)
+    }
+    missing_pinned = [
+        aid for aid in pinned_ids
+        if aid.strip().lower().split("v", 1)[0] not in found_ids
+    ]
+    if missing_pinned and searcher is not None:
         try:
-            with anyio.fail_after(3.0):
-                candidates = await anyio.to_thread.run_sync(
-                    _merge_pinned_papers, candidates, pinned_ids, searcher
-                )
+            with anyio.fail_after(min(8.0, runtime.recall_wall)):
+                candidates = await _merge_pinned_papers(candidates, missing_pinned, searcher)
         except TimeoutError:
-            pass
+            fallbacks.append({"stage": "pinned_arxiv", "reason": "timeout"})
 
     candidates = normalize_and_filter_candidates(
         candidates, plan=plan, ctx=ctx, recall_cap=runtime.recall_cap, meta=meta

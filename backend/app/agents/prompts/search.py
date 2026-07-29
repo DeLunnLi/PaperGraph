@@ -52,6 +52,7 @@ INTENT_LLM_PROMPT = """你是一个学术检索意图解析器。根据用户的
 
 ### flags
 - main_conference_proceedings_only: 会议检索默认 true
+- research_domain: 生物医学/临床/生命科学查询填 "biomedical"；计算机科学填 "computer_science"；其他填 "general"
 - max_results: 10–30
 - wants_recent/wants_classic: 按意图
 - use_llm_rank: true
@@ -84,6 +85,7 @@ INTENT_LLM_PROMPT = """你是一个学术检索意图解析器。根据用户的
     "wants_recent": false,
     "use_tavily": null,
     "confidence_level": "medium",
-    "main_conference_proceedings_only": false
+    "main_conference_proceedings_only": false,
+    "research_domain": "general"
   }}
 }}"""

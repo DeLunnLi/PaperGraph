@@ -24,6 +24,7 @@ def ensure_tables(db_path: str) -> None:
     exec_sql(db_path,
         """CREATE TABLE IF NOT EXISTS daily_recommend_feedback (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
           date_key TEXT NOT NULL,
           paper_identity_key TEXT NOT NULL,
           identity_type TEXT NOT NULL,
@@ -65,10 +66,20 @@ def ensure_tables(db_path: str) -> None:
         "CREATE INDEX IF NOT EXISTS idx_interest_date ON user_interest_evolution(date_key)",
         "CREATE INDEX IF NOT EXISTS idx_interest_kw ON user_interest_evolution(keyword, date_key)",
     )
+    conn = sqlite3.connect(db_path)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(daily_recommend_feedback)").fetchall()]
+        if "user_id" not in cols:
+            conn.execute("ALTER TABLE daily_recommend_feedback ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_user_date ON daily_recommend_feedback(user_id, date_key)")
+        conn.commit()
+    finally:
+        conn.close()
 
 def record_feedback(
     db_path: str,
     *,
+    user_id: int,
     date_key: str,
     paper_identity_key: str,
     identity_type: str,
@@ -84,9 +95,9 @@ def record_feedback(
         with _conn(db_path) as conn:
             cur = conn.cursor()
             cur.execute(
-                """INSERT INTO daily_recommend_feedback(date_key,paper_identity_key,identity_type,title,action,source_list,score_at_recommend,created_at)
-                VALUES(?,?,?,?,?,?,?,?)""",
-                (str(date_key), str(paper_identity_key), str(identity_type),
+                """INSERT INTO daily_recommend_feedback(user_id,date_key,paper_identity_key,identity_type,title,action,source_list,score_at_recommend,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (int(user_id), str(date_key), str(paper_identity_key), str(identity_type),
                  (title or "")[:400] if title else None, str(action.value),
                  source_list, float(score_at_recommend) if score_at_recommend is not None else None, now),
             )
@@ -213,6 +224,7 @@ def _upsert_interest_evolution(
 def get_skipped_papers(
     db_path: str,
     *,
+    user_id: int,
     days: int = 30,
     include_shown: bool = True,
 ) -> set[str]:
@@ -223,20 +235,20 @@ def get_skipped_papers(
         cur = conn.cursor()
         cur.execute(
             f"SELECT DISTINCT paper_identity_key FROM daily_recommend_feedback "
-            f"WHERE date_key>=? AND action IN ({placeholders})",
-            (cutoff, *actions),
+            f"WHERE user_id=? AND date_key>=? AND action IN ({placeholders})",
+            (int(user_id), cutoff, *actions),
         )
         skipped = {str(row[0]) for row in cur.fetchall()}
     return skipped
 
 
-def clear_daily_shown_for_date(db_path: str, date_key: str) -> int:
+def clear_daily_shown_for_date(db_path: str, date_key: str, user_id: int) -> int:
     """手动刷新时清除当日 shown 记录，避免候选池被永久锁死。"""
     with _conn(db_path) as conn:
         cur = conn.cursor()
         cur.execute(
-            "DELETE FROM daily_recommend_feedback WHERE date_key=? AND action='shown'",
-            (str(date_key),),
+            "DELETE FROM daily_recommend_feedback WHERE user_id=? AND date_key=? AND action='shown'",
+            (int(user_id), str(date_key)),
         )
         return int(cur.rowcount or 0)
 
@@ -244,20 +256,22 @@ def record_daily_shown_papers(
     db_path: str,
     date_key: str,
     papers: list[dict[str, str]],
+    user_id: int,
 ) -> None:
     if not papers:
         return
     now = int(time.time())
     with _conn(db_path) as conn:
         conn.cursor().executemany(
-            """INSERT OR IGNORE INTO daily_recommend_feedback(date_key,paper_identity_key,identity_type,title,action,source_list,score_at_recommend,created_at)
-            VALUES(?,?,'title_hash',?,'shown','daily',0.0,?)""",
-            [(date_key, p.get("identity_key", ""), p.get("title", ""), now) for p in papers],
+            """INSERT OR IGNORE INTO daily_recommend_feedback(user_id,date_key,paper_identity_key,identity_type,title,action,source_list,score_at_recommend,created_at)
+            VALUES(?,?,?,'title_hash',?,'shown','daily',0.0,?)""",
+            [(int(user_id), date_key, p.get("identity_key", ""), p.get("title", ""), now) for p in papers],
         )
 
 def get_high_value_keywords_from_feedback(
     db_path: str,
     *,
+    user_id: int,
     days: int = 21,
     top_n: int = 20,
 ) -> set[str]:
@@ -265,8 +279,8 @@ def get_high_value_keywords_from_feedback(
     with _conn(db_path) as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT title FROM daily_recommend_feedback WHERE date_key>=? AND action IN ('click','save','read') AND title IS NOT NULL ORDER BY created_at DESC LIMIT 200",
-            (cutoff,),
+            "SELECT title FROM daily_recommend_feedback WHERE user_id=? AND date_key>=? AND action IN ('click','save','read') AND title IS NOT NULL ORDER BY created_at DESC LIMIT 200",
+            (int(user_id), cutoff),
         )
         titles = [str(row[0]) for row in cur.fetchall() if row[0]]
 

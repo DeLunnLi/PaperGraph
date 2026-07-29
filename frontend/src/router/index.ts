@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { clearAuth, isUsableToken } from '@/services/api/auth'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -13,11 +14,10 @@ const router = createRouter({
   ],
 })
 
-// Auth guard: redirect to login if no token
 router.beforeEach((to, _from, next) => {
-  const token = localStorage.getItem('pg_token')
-  if (!to.meta.public && !token) {
-    next('/login')
+  if (!to.meta.public && !isUsableToken()) {
+    clearAuth()
+    next({ path: '/login', query: { redirect: to.fullPath } })
   } else {
     next()
   }

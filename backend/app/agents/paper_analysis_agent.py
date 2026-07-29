@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.core.paper_paths import normalize_library_category_display
+from app.exceptions import LLMError
 
 from ..utils import parse_llm_json
+from hello_agents import SimpleAgent, ToolRegistry
 from ..services.llm.llm_service import is_llm_configured
-from ..services.llm.agent_loop import run_agent_loop_sync, ToolSpec
+from ..services.llm.agent_config import papergraph_agent_config
 from .base import BaseAgent
 from .support.paper_analysis_helpers import (
     clip_text as _clip,
@@ -74,66 +76,46 @@ class PaperAnalysisAgent(BaseAgent):
         self._venue_type_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------
-    # 无状态 LLM 调用 —— 替代原 SimpleAgent 工厂。
+    # LLM 调用 —— hello-agents 原语复用。
     #
-    # 历史问题：SimpleAgent.run() 往自身 _history 累积并在每次调用重建 messages，
-    # 跨并发请求（paper_reader_reply 跑在线程池）会交叉污染 history；clear_history()
-    # 在并发下有 TOCTOU 窗口，故原方案每请求新建 SimpleAgent。
-    # 现方案：_llm_chat / run_agent_loop_sync 完全无状态（history 由 caller 传入，
-    # 默认空），self.llm（LLMClient）复用但不持可变状态 —— 并发隔离由架构保证。
+    # Reader 工具循环用 SimpleAgent（每请求新建，避免单例 _history 跨并发请求污染）；
+    # 工具注册到 ToolRegistry，SimpleAgent 自带 function-calling 多轮 + run_with_timing。
+    # 其余单轮调用（classify / taxonomy / interpreter / cleanup）走无状态 llm.invoke。
+    # self.llm 为 HelloAgentsLLM 单例，无可变调用状态 —— 并发隔离由 ReaderCtx +
+    # 每请求 SimpleAgent 保证。
     # ------------------------------------------------------------------
-    def _build_reader_tools(self, ctx: "ReaderCtx") -> list[ToolSpec]:
-        """构造 reader 工具的 ToolSpec 列表（无状态函数式工具）。
-
-        _to_spec 使用工具的 to_openai_schema() 生成 JSON schema，
-        并按原 SimpleAgent._execute_tool_call 的语义把工具结果转成字符串
-        （ERROR/PARTIAL 加前缀）。
-        """
-
-        def _to_spec(tool: Any) -> ToolSpec:
-            schema = tool.to_openai_schema()["function"]
-
-            def fn(args: dict[str, Any]) -> str:
-                resp = tool.run_with_timing(args)
-                status = getattr(resp, "status", "SUCCESS")
-                if status == "ERROR":
-                    code = (getattr(resp, "error_info", None) or {}).get("code", "UNKNOWN")
-                    return f"❌ 错误 [{code}]: {resp.text}"
-                if status == "PARTIAL":
-                    return f"⚠️ 部分成功: {resp.text}"
-                return resp.text
-
-            return ToolSpec(
-                name=schema["name"],
-                description=schema["description"],
-                parameters_schema=schema["parameters"],
-                fn=fn,
-            )
-
-        return [
-            _to_spec(ReaderPaperLookupTool(
-                on_papers_found=lambda papers, src: self._reader_tool_on_found(ctx, papers, src),
-                get_snap=lambda: ctx.snap,
-            )),
-            _to_spec(ReaderReferenceLookupTool(
-                get_snap=lambda: ctx.snap,
-                on_papers_found=lambda papers, src: self._reader_tool_on_found(ctx, papers, src),
-                get_user_message=lambda: ctx.user_message,
-            )),
-            _to_spec(ReaderPdfParseTool(
-                get_snap=lambda: ctx.snap,
-                on_parsed=lambda obj: self._reader_on_pdf_structure(ctx, obj),
-            )),
-            _to_spec(ReaderTableTool(get_snap=lambda: ctx.snap)),
-        ]
+    def _new_reader_agent(self, ctx: "ReaderCtx") -> SimpleAgent:
+        """每请求新建 reader SimpleAgent，工具回调绑定到 ctx（并发隔离）。"""
+        reg = ToolRegistry()
+        reg.register_tool(ReaderPaperLookupTool(
+            on_papers_found=lambda papers, src: self._reader_tool_on_found(ctx, papers, src),
+            get_snap=lambda: ctx.snap,
+        ))
+        reg.register_tool(ReaderReferenceLookupTool(
+            get_snap=lambda: ctx.snap,
+            on_papers_found=lambda papers, src: self._reader_tool_on_found(ctx, papers, src),
+            get_user_message=lambda: ctx.user_message,
+        ))
+        reg.register_tool(ReaderPdfParseTool(
+            get_snap=lambda: ctx.snap,
+            on_parsed=lambda obj: self._reader_on_pdf_structure(ctx, obj),
+        ))
+        reg.register_tool(ReaderTableTool(get_snap=lambda: ctx.snap))
+        return SimpleAgent(
+            name="papergraph_paper_reader",
+            llm=self.llm,
+            system_prompt=READER_CHAT_SYSTEM,
+            config=papergraph_agent_config(),
+            tool_registry=reg,
+            enable_tool_calling=True,
+            max_tool_iterations=5,
+        )
 
     def _llm_chat(self, system_prompt: str, user_prompt: str) -> str:
-        """无状态单轮 LLM 调用（替代 _new_*_agent().run）。"""
-        messages: list[dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt})
-        return self.llm.chat(messages).content
+        """无状态单轮 LLM 调用（HelloAgentsLLM.invoke 返回 LLMResponse，取 .content）。"""
+        from ..services.llm.agent_runtime import stateless_llm_chat
+
+        return stateless_llm_chat(self.llm, system_prompt, user_prompt)
 
     def _prune_reco_ref_offset(self) -> None:
         """Bound memory: keep only the most recent entries."""
@@ -170,14 +152,14 @@ class PaperAnalysisAgent(BaseAgent):
             except Exception:
                 logger.exception("major_taxonomy_bootstrap_failed")
             if not wl:
-                raise RuntimeError("major_taxonomy_bootstrap_failed")
+                raise LLMError("major_taxonomy_bootstrap_failed", code="major_taxonomy_bootstrap_failed")
             _MAJOR_WHITELIST = wl
             logger.info("paper_analysis_major_whitelist_ready", extra={"n": len(wl)})
 
     def _get_major_whitelist(self) -> Tuple[str, ...]:
         self._ensure_major_whitelist()
         if _MAJOR_WHITELIST is None:
-            raise RuntimeError("major_whitelist_unavailable")
+            raise LLMError("major_whitelist_unavailable", code="major_whitelist_unavailable")
         return _MAJOR_WHITELIST
 
     def _cleanup_mixed_reader_response(self, reply: str, user_message: str) -> str:
@@ -294,7 +276,8 @@ class PaperAnalysisAgent(BaseAgent):
             raw = self._llm_chat(spec.system_prompt, prompt)
         except Exception as exc:
             logger.exception("paper_analysis_llm_failed", extra={"task": spec.name})
-            raise RuntimeError(f"paper_analysis_llm_failed:{spec.name}") from exc
+            raise LLMError(f"paper_analysis_llm_failed:{spec.name}",
+                           code="paper_analysis_llm_failed") from exc
 
         raw_text = (raw if isinstance(raw, str) else str(raw or "")).strip()
 
@@ -302,7 +285,8 @@ class PaperAnalysisAgent(BaseAgent):
             if not raw_text:
                 if spec.name == "paper_reader_reply":
                     return ""
-                raise RuntimeError(f"paper_analysis_empty_response:{spec.name}")
+                raise LLMError(f"paper_analysis_empty_response:{spec.name}",
+                               code="paper_analysis_empty_response")
 
             # Some tool responses need a final explanation pass.
             if spec.name == "paper_reader_reply" and self._looks_like_raw_tool_output(raw_text):
@@ -322,7 +306,8 @@ class PaperAnalysisAgent(BaseAgent):
                 return data2
         except Exception:
             logger.exception("paper_analysis_json_retry_failed", extra={"task": spec.name})
-        raise RuntimeError(f"paper_analysis_parse_failed:{spec.name}")
+        raise LLMError(f"paper_analysis_parse_failed:{spec.name}",
+                       code="paper_analysis_parse_failed")
 
     def _record_preference_signals(
         self,
@@ -540,15 +525,7 @@ class PaperAnalysisAgent(BaseAgent):
             + f"【用户最新问题】\n{um}"
         )
         user = _clip(user, 7200)
-        out = run_agent_loop_sync(
-            llm=self.llm,
-            system_prompt=READER_CHAT_SYSTEM,
-            history=[],
-            user_prompt=user,
-            tools=self._build_reader_tools(ctx),
-            max_tool_iterations=5,
-            temperature=0.3,
-        )
+        out = self._new_reader_agent(ctx).run(user)
         if isinstance(out, str) and out.strip():
             if self._looks_like_raw_tool_output(out):
                 logger.info("paper_reader: detected raw tool output, invoking interpreter")
@@ -789,7 +766,7 @@ class PaperAnalysisAgent(BaseAgent):
                 "若回复未推荐具体论文，返回 []。\n\n"
                 "回复原文：\n" + text_out[:3000]
             )
-            llm_text = self.llm.chat([{"role": "user", "content": prompt}]).content
+            llm_text = self._llm_chat("", prompt)
             import json as _json
             extracted = _json.loads(llm_text.strip().removeprefix("```json").removesuffix("```").strip())
             if isinstance(extracted, list) and extracted:

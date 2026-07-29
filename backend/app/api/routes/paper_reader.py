@@ -1,7 +1,7 @@
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 
 from ...models.schemas import (
     PaperReaderChatRequest,
@@ -12,8 +12,8 @@ from ...models.schemas import (
     PaperReaderOpeningResponse,
 )
 from ..dependencies import get_database
-from ..deps import optional_user, check_rate_limit
-from ...utils.common import safe_http_500
+from ..deps import require_user, check_rate_limit
+from ...utils.common import route_errors
 from ...services.reader.paper_reader_service import PaperReaderService
 
 logger = logging.getLogger(__name__)
@@ -32,16 +32,16 @@ async def paper_reader_opening(
     body: PaperReaderOpeningRequest,
     background_tasks: BackgroundTasks,
     service: PaperReaderService = Depends(get_paper_reader_service),
-    user: dict = Depends(optional_user),
+    user: dict = Depends(require_user),
 ):
     check_rate_limit(request.client.host if request.client else "unknown", max_requests=20)
-    try:
-        result = await service.get_opening(paper_id=int(body.paper_id), background_tasks=background_tasks)
+    with route_errors("paper_reader_opening"):
+        result = await service.get_opening(
+            paper_id=int(body.paper_id),
+            user_id=user["user_id"],
+            background_tasks=background_tasks,
+        )
         return PaperReaderOpeningResponse(success=True, **result)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise safe_http_500("paper_reader_opening", e)
 
 @router.post("/paper-reader/chat", response_model=PaperReaderChatResponse)
 async def paper_reader_chat(
@@ -49,12 +49,13 @@ async def paper_reader_chat(
     body: PaperReaderChatRequest,
     background_tasks: BackgroundTasks,
     service: PaperReaderService = Depends(get_paper_reader_service),
-    user: dict = Depends(optional_user),
+    user: dict = Depends(require_user),
 ):
     check_rate_limit(request.client.host if request.client else "unknown", max_requests=15)
-    try:
+    with route_errors("paper_reader_chat"):
         out = await service.process_chat(
             paper_id=int(body.paper_id),
+            user_id=user["user_id"],
             messages=list(body.messages or []),
             user_message=body.user_message,
             background_tasks=background_tasks,
@@ -68,26 +69,18 @@ async def paper_reader_chat(
             kg_edges=list(out.get("kg_edges") or []),
             citations=list(out.get("citations") or []),
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise safe_http_500("paper_reader_chat", e)
 
 @router.get("/paper-reader/history", response_model=PaperReaderHistoryResponse)
 async def paper_reader_history(
     paper_id: int = Query(..., ge=1),
     limit: int = Query(default=200, ge=1, le=1000),
     service: PaperReaderService = Depends(get_paper_reader_service),
-    user: dict = Depends(optional_user),
+    user: dict = Depends(require_user),
 ):
-    try:
+    with route_errors("paper_reader_history"):
         turns = await service.get_history(paper_id=int(paper_id), limit=int(limit), user_id=user["user_id"])
         return PaperReaderHistoryResponse(
             success=True,
             paper_id=int(paper_id),
             turns=[PaperReaderHistoryItem(**t) for t in turns],
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise safe_http_500("paper_reader_history", e)

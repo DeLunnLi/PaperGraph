@@ -20,8 +20,8 @@ anyio>=4.0.0
 # Caching
 cachetools>=5.3.0
 
-# AI/LLM client (replaces hello-agents)
-openai>=1.109.0
+# AI/LLM agent framework (hello-agents: HelloAgentsLLM + SimpleAgent + Tool)
+hello-agents>=1.0.0
 
 # PDF text extraction
 pymupdf>=1.24.0

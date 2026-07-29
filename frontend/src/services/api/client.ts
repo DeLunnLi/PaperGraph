@@ -1,16 +1,22 @@
 import axios from 'axios'
 import { BACKEND_ORIGIN, BACKEND_PORT } from '@/config/ports'
+import { clearAuthAndRedirect, getToken } from './auth'
 
 export const API_BASE_URL = BACKEND_ORIGIN
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: 120000,
-  headers: { 'Content-Type': 'application/json' },
+  headers: { Accept: 'application/json' },
 })
+
+/** Trailing-slash-stripped base URL for non-axios callers (e.g. fetch SSE). */
+export function apiBaseUrl(): string {
+  return (apiClient.defaults.baseURL || API_BASE_URL).replace(/\/$/, '')
+}
 
 // Inject JWT token on every request
 apiClient.interceptors.request.use((config) => {
-  const token = localStorage.getItem('pg_token')
+  const token = getToken()
   if (token) {
     config.headers = config.headers || {}
     config.headers['Authorization'] = `Bearer ${token}`
@@ -29,11 +35,7 @@ apiClient.interceptors.response.use(
     }
     // 401 → clear token, redirect to login
     if (ax?.response?.status === 401) {
-      localStorage.removeItem('pg_token')
-      localStorage.removeItem('pg_username')
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login'
-      }
+      clearAuthAndRedirect()
     }
     const msg0 = String(ax?.message ?? '')
     if (ax.code === 'ECONNABORTED' || /timeout of \d+ms exceeded/i.test(msg0)) {
@@ -45,6 +47,8 @@ apiClient.interceptors.response.use(
         hint = '请求超时：文献检索响应过久。请确认后端已运行，或改用更短、更具体的查询。'
       } else if (rel.includes('paper-reader/chat')) {
         hint = '请求超时：阅读助手响应过久（可能含相关论文检索）。请稍后重试。'
+      } else if (rel.includes('papers/import-pdf')) {
+        hint = 'PDF 导入处理超时，服务端可能仍在解析或补全元数据。请稍后刷新文献库，确认未导入后再重试。'
       } else {
         hint = `请求超时：请确认后端已运行（默认 ${BACKEND_PORT}）且通过 Vite 开发服务器访问。`
       }

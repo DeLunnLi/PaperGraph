@@ -9,7 +9,9 @@ import anyio
 
 from ...core.paper import Paper as LitPaper
 from ...core.search import PaperSearcher
+from ...core.search.normalize import titles_match_strict
 from .method_acronym import derive_full_title_from_named_method
+from .paper_filters import has_strong_main_conference_venue_signal
 from .plan_helpers import (
     is_venue_browse_plan,
     method_acronym_for,
@@ -23,7 +25,7 @@ from .search_plan import ResolvedSearchPlan
 from .search_recipe import SearchRecipe
 
 MergeStrategy = Literal["prepend", "replace", "append"]
-RunWhen = Literal["always", "empty_candidates", "sparse_or_venue_browse"]
+RunWhen = Literal["always", "empty_candidates", "missing_target_title", "incomplete_doi_metadata", "sparse_or_venue_browse"]
 SideEffect = Literal["none", "derive_method_title", "record_arxiv_fallback"]
 Runner = Literal["search", "proceedings"]
 
@@ -89,14 +91,43 @@ def should_run_job(
 ) -> bool:
     if job.run_when == "empty_candidates":
         return not candidates
-    if job.run_when == "sparse_or_venue_browse":
-        # Always run proceedings when venue is specified — topic+venue searches
-        # like "nips 异常检测" need venue-filtered papers from proceedings site
-        return runtime.proc_enabled and should_supplement_from_proceedings_site(plan) and (
-            bool(plan.venues)
-            or is_venue_browse_plan(plan)
-            or len(candidates) < runtime.proc_min
+    if job.run_when == "incomplete_doi_metadata":
+        return any(
+            str(getattr(paper, "doi", None) or "").strip()
+            and (not str(getattr(paper, "journal", None) or "").strip() or getattr(paper, "year", None) is None)
+            for paper in candidates
         )
+    if job.run_when == "missing_target_title":
+        targets = [str(title).strip() for title in (plan.target_titles or []) if str(title).strip()]
+        return bool(targets) and not any(
+            titles_match_strict(getattr(paper, "title", None), target)
+            for paper in candidates
+            for target in targets
+        )
+    if job.run_when == "sparse_or_venue_browse":
+        if not runtime.proc_enabled or not should_supplement_from_proceedings_site(plan):
+            return False
+        if is_venue_browse_plan(plan):
+            return True
+        venue = primary_venue(plan)
+        # Proceedings 补召回代价高，只在主召回没有足量“可证明属于目标会议”
+        # 的论文时执行。不能仅因查询包含 venue 就无条件再跑一轮网页发现。
+        verified = sum(
+            1
+            for paper in candidates
+            if has_strong_main_conference_venue_signal(paper, venue)
+            and (
+                plan.year_from is None
+                or getattr(paper, "year", None) is not None
+                and int(paper.year) >= int(plan.year_from)
+            )
+            and (
+                plan.year_to is None
+                or getattr(paper, "year", None) is not None
+                and int(paper.year) <= int(plan.year_to)
+            )
+        )
+        return verified < runtime.proc_min
     return True
 
 
@@ -136,6 +167,32 @@ def build_recall_jobs(
         )
     ]
 
+    if plan.research_domain == "biomedical" and plan.recipe != SearchRecipe.VENUE_YEAR:
+        jobs.append(
+            RecallJob(
+                "europe_pmc_biomedical",
+                ctx.effective_query,
+                ["europe_pmc"],
+                min(16, runtime.recall_cap),
+                kwargs={**sk, "http_timeout_sec": min(12.0, runtime.http_timeout_sec), "http_max_attempts": 1},
+                merge_strategy="append",
+                timeout_sec=14.0,
+            )
+        )
+
+    if plan.recipe == SearchRecipe.TITLE and plan.target_titles:
+        jobs.append(
+            RecallJob(
+                "semantic_scholar_title_fallback",
+                str(plan.target_titles[0]),
+                ["semantic_scholar"],
+                3,
+                kwargs={**sk, "target_titles": list(plan.target_titles), "http_timeout_sec": 10, "http_max_attempts": 1},
+                run_when="missing_target_title",
+                timeout_sec=12.0,
+            )
+        )
+
     ma = method_acronym_for(plan, ctx)
     if ma and plan.recipe in (SearchRecipe.METHOD, SearchRecipe.VENUE_YEAR):
         ax_sk = {**sk, "llm_keywords": [ma]}
@@ -170,6 +227,19 @@ def build_recall_jobs(
                 side_effect="record_arxiv_fallback",
             )
         )
+
+    jobs.append(
+        RecallJob(
+            "crossref_doi_metadata",
+            "",
+            ["crossref"],
+            2,
+            kwargs={**sk, "http_timeout_sec": min(10.0, runtime.http_timeout_sec), "http_max_attempts": 1},
+            merge_strategy="append",
+            run_when="incomplete_doi_metadata",
+            timeout_sec=12.0,
+        )
+    )
 
     if should_supplement_from_proceedings_site(plan):
         jobs.append(
@@ -239,6 +309,15 @@ async def execute_recall_jobs(
     for job in jobs:
         if job.needs_derived_query or not should_run_job(job, candidates, plan=plan, runtime=runtime):
             continue
+
+        if job.run_when == "incomplete_doi_metadata":
+            dois = list(dict.fromkeys(
+                str(getattr(paper, "doi", None) or "").strip().lower()
+                for paper in candidates
+                if str(getattr(paper, "doi", None) or "").strip()
+                and (not str(getattr(paper, "journal", None) or "").strip() or getattr(paper, "year", None) is None)
+            ))[:2]
+            job = replace(job, max_results=len(dois), kwargs={**job.kwargs, "dois": dois})
 
         batch: list[LitPaper] = []
         try:

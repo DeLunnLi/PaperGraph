@@ -11,12 +11,15 @@ import feedparser
 
 from ...author import Author
 from ...paper import Paper
+from .base import register_source
 from ..normalize import (
     _arxiv_pdf_url_from_id,
     sanitize_search_keyword_list,
     split_query_phrases,
+    strip_arxiv_version,
 )
 from ..paper_searcher import _sanitize_author_list_for_query
+from .source_common import json_api_headers
 from ....utils.common import text_has_cjk
 
 logger = logging.getLogger(__name__)
@@ -200,7 +203,7 @@ def _filter_arxiv_entries_by_days_back(
 def _arxiv_paper_dedupe_key(searcher, p: Paper) -> str:
     aid = (p.arxiv_id or "").strip()
     if aid:
-        return re.sub(r"v\d+$", "", aid, flags=re.I).lower()
+        return strip_arxiv_version(aid).lower()
     return hashlib.md5(
         (p.title or "").strip().lower().encode("utf-8", errors="ignore")
     ).hexdigest()[:20]
@@ -253,16 +256,21 @@ async def _search_arxiv_by_author_list(
     return merged[:max_results]
 
 
+@register_source("arxiv")
 async def search_arxiv(
     searcher, query: str, max_results: int = 10, **kwargs
 ) -> List[Paper]:
     await searcher._ensure_async_client()
     await searcher._rate_limit_async("arxiv")
 
-    id_list0 = str(kwargs.get("arxiv_id_list") or "").strip()
+    raw_id_list = kwargs.get("arxiv_id_list") or ""
+    id_list0 = ",".join(str(item).strip() for item in raw_id_list if str(item).strip()) if isinstance(raw_id_list, (list, tuple)) else str(raw_id_list).strip()
     lk0 = sanitize_search_keyword_list(kwargs.get("llm_keywords"))
     venue_bound = bool((kwargs.get("venue") or "").strip())
-    if not id_list0 and len(lk0) >= 2 and not venue_bound:
+    # A resolved topic query is already the strongest arXiv expression. Running one
+    # HTTP request per LLM keyword made ordinary searches serial and often exhausted
+    # the entire recall wall. Keep fan-out only for the rare keyword-only plan.
+    if not id_list0 and not (query or "").strip() and len(lk0) >= 2 and not venue_bound:
         return await _search_arxiv_by_keyword_list_async(
             searcher, query, max_results, lk0, **kwargs
         )
@@ -273,7 +281,7 @@ async def search_arxiv(
     include_venue_in_arxiv_query = bool(
         venue and (not vpj) and bool(kwargs.get("strict_venue_match"))
     )
-    id_list = str(kwargs.get("arxiv_id_list") or "").strip()
+    id_list = id_list0
     if id_list:
         params = {
             "id_list": id_list,
@@ -304,7 +312,7 @@ async def search_arxiv(
             "sortOrder": "descending",
         }
 
-    headers = {"User-Agent": searcher._user_agent()}
+    headers = json_api_headers(searcher)
     req_timeout = float(kwargs.get("http_timeout_sec", 30.0))
     max_attempts = max(1, min(10, int(kwargs.get("http_max_attempts", 4))))
     resp = await searcher._async_http_get_with_retry(
@@ -372,7 +380,7 @@ async def search_arxiv(
                     abs_url = link.get("href")
             if not pdf_url and arxiv_id:
                 pdf_url = _arxiv_pdf_url_from_id(
-                    re.sub(r"v\d+$", "", arxiv_id.strip(), flags=re.I)
+                    strip_arxiv_version(arxiv_id)
                 )
             primary_category = tags[0].get("term", "") if tags else ""
             papers.append(

@@ -5,6 +5,7 @@ from typing import Any
 
 from ..services.llm.llm_service import get_llm
 from ..settings import get_settings
+from app.exceptions import LLMError
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,8 @@ class BaseAgent:
             return get_llm()
         except Exception as e:
             logger.exception("[%s] LLM 初始化失败", type(self).__name__)
-            raise RuntimeError(f"{type(self).__name__}_llm_init_failed") from e
+            raise LLMError(f"{type(self).__name__}_llm_init_failed",
+                           code="llm_init_failed") from e
 
     def _cfg(self, name: str, default: Any = None) -> Any:
         return getattr(self._settings, name, default)

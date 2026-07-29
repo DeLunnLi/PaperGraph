@@ -6,11 +6,12 @@
         <span>历史 ({{ conversations.length }})</span>
       </div>
       <div class="search-hero">
+        <div class="hero-eyebrow"><span></span> AI RESEARCH WORKSPACE</div>
         <div class="logo-large">
           <div class="logo-large__mark"><RobotOutlined /></div>
           <div class="logo-large__text">
-            <span class="logo-large__title">文献助手</span>
-            <span class="logo-large__subtitle">语义检索 · 多源聚合 · 智能推荐</span>
+            <span class="logo-large__title">从问题出发，找到关键论文</span>
+            <span class="logo-large__subtitle">跨来源检索、融合排序与推荐理由，让每次探索都有依据</span>
           </div>
         </div>
         <div class="search-box">
@@ -46,7 +47,7 @@
           </div>
         </div>
         <div class="search-examples">
-          <span class="search-examples__label">试试：</span>
+          <span class="search-examples__label">探索灵感</span>
           <button
             v-for="(ex, i) in examplePrompts"
             :key="i"
@@ -69,13 +70,13 @@
         </div>
         <div class="header-right">
           <a-space>
-            <a-button size="small" @click="createNewConversation">
+            <a-button size="small" @click="handleCreateNewConversation">
               <PlusOutlined /> 新对话
             </a-button>
           </a-space>
         </div>
       </div>
-      <div class="messages-container" ref="messagesContainer">
+      <div ref="messagesContainer" class="messages-container" role="log" aria-live="polite" aria-label="搜索对话消息">
         <div v-for="(msg, index) in messages" :key="index" class="message" :class="msg.role">
           <div v-if="msg.role === 'user'" class="user-bubble">
             <div class="message-content">{{ msg.content }}</div>
@@ -163,7 +164,7 @@
         </a-button>
       </div>
       <div class="sidebar-content">
-        <a-button type="dashed" block size="small" @click="createNewConversation" class="new-chat-btn-sidebar">
+        <a-button type="dashed" block size="small" @click="handleCreateNewConversation" class="new-chat-btn-sidebar">
           <PlusOutlined /> 新对话
         </a-button>
         <div class="conversations-list">
@@ -172,7 +173,7 @@
             :key="conv.id"
             class="conversation-item"
             :class="{ active: currentConversationId === conv.id }"
-            @click="loadConversation(conv.id)"
+            @click="handleLoadConversation(conv.id)"
           >
             <div class="conversation-title">{{ conv.title || '未命名对话' }}</div>
             <div class="conversation-meta">
@@ -194,7 +195,7 @@
   </div>
 </template>
 <script setup lang="ts">
-import { ref, nextTick, watch, onMounted, onActivated } from 'vue'
+import { ref, nextTick, watch, onMounted, onActivated, onBeforeUnmount, onDeactivated } from 'vue'
 import { useRoute } from 'vue-router'
 import { message, Empty, Modal } from 'ant-design-vue'
 import {
@@ -214,6 +215,7 @@ import type { Paper } from '@/types'
 import { renderMarkdownWithLatex } from '@/utils/markdown'
 import { useSearchConversations } from '@/composables/useSearchConversations'
 import { useSearchAgentChat } from '@/composables/useSearchAgentChat'
+import { useImeGuard } from '@/composables/useImeGuard'
 defineOptions({ name: 'SearchAgent' })
 interface ToolCall {
   name: string
@@ -235,12 +237,17 @@ interface Message {
 }
 const messages = ref<Message[]>([])
 const userInput = ref('')
-const textareaImeComposing = ref(false)
+const {
+  composing: textareaImeComposing,
+  onCompositionStart: onTextareaCompositionStart,
+  onCompositionEnd: onTextareaCompositionEnd,
+} = useImeGuard()
 const isLoading = ref(false)
 const hasSearched = ref(false)
 const messagesContainer = ref<HTMLElement | null>(null)
 const showSidebar = ref(false)
 const deepSearch = ref(false)
+const searchRequestActive = ref(false)
 const route = useRoute()
 const examplePrompts = [
   '扩散模型在图像生成中的最新进展',
@@ -279,10 +286,16 @@ const {
   messages,
   hasSearched,
   userInput,
-  showSidebar,
   titleFromMessages: generateTitle,
 })
+const flushConversationState = () => {
+  if (searchRequestActive.value) abortActiveRequest()
+  if (hasSearched.value) {
+    persistConversationAndState(true)
+  }
+}
 function deleteConversation(id: string) {
+  const isDeletingCurrent = currentConversationId.value === id
   Modal.confirm({
     title: '删除对话',
     content: '确定要删除这条对话记录吗？删除后无法恢复。',
@@ -290,22 +303,41 @@ function deleteConversation(id: string) {
     okType: 'danger',
     cancelText: '取消',
     onOk: () => {
+      if (isDeletingCurrent) abortActiveRequest()
       removeConversation(id)
       message.success('已删除对话')
     },
   })
 }
+function handleCreateNewConversation() {
+  if (searchRequestActive.value) abortActiveRequest()
+  createNewConversation()
+}
+function handleLoadConversation(id: string) {
+  if (searchRequestActive.value && currentConversationId.value !== id) abortActiveRequest()
+  loadConversation(id)
+}
 onMounted(() => {
   initFromStorage()
+  window.addEventListener('beforeunload', flushConversationState)
   scrollToBottom()
+})
+onBeforeUnmount(() => {
+  abortActiveRequest()
+  window.removeEventListener('beforeunload', flushConversationState)
+  flushConversationState()
 })
 onActivated(() => {
   scrollToBottom()
+})
+onDeactivated(() => {
+  if (searchRequestActive.value) abortActiveRequest()
 })
 watch(
   () => String(route.name || '').toLowerCase(),
   (name) => {
     if (name === 'search') scrollToBottom()
+    else if (searchRequestActive.value) abortActiveRequest()
   },
 )
 watch([hasSearched, currentConversationId], () => {
@@ -313,35 +345,24 @@ watch([hasSearched, currentConversationId], () => {
     persistConversationAndState()
   }
 })
-function onTextareaCompositionStart() {
-  textareaImeComposing.value = true
-}
-function onTextareaCompositionEnd() {
-  textareaImeComposing.value = false
-}
 function handleKeydown(e: KeyboardEvent) {
   if (e.key !== 'Enter' || e.shiftKey) return
   if (e.isComposing || textareaImeComposing.value) return
   e.preventDefault()
   sendMessage()
 }
+let scrollFrame = 0
 function scrollToBottom() {
-  const apply = () => {
-    const el = messagesContainer.value
-    if (!el || !hasSearched.value) return
-    el.scrollTop = el.scrollHeight
-  }
   nextTick(() => {
-    apply()
-    requestAnimationFrame(() => {
-      apply()
-      requestAnimationFrame(apply)
+    if (scrollFrame) cancelAnimationFrame(scrollFrame)
+    scrollFrame = requestAnimationFrame(() => {
+      const el = messagesContainer.value
+      if (!el || !hasSearched.value) return
+      el.scrollTop = el.scrollHeight
     })
-    window.setTimeout(apply, 60)
-    window.setTimeout(apply, 220)
   })
 }
-const { sendMessage } = useSearchAgentChat({
+const { sendMessage, abortActiveRequest } = useSearchAgentChat({
   messages,
   userInput,
   isLoading,
@@ -350,6 +371,9 @@ const { sendMessage } = useSearchAgentChat({
   ensureCurrentConversationId,
   scrollToBottom,
   onConversationDirty: () => persistConversationAndState(),
+  onRequestStateChange: (active) => {
+    searchRequestActive.value = active
+  },
 })
 const saveOne = async (paper: Paper) => {
   try {
@@ -388,7 +412,7 @@ watch(currentConversationId, () => scrollToBottom())
 .conversations-sidebar {
   width: 280px;
   min-width: 280px;
-  background: #f1f5f9;
+  background: rgba(245,246,250,.96);
   border-right: 1px solid var(--pg-border);
   display: flex;
   flex-direction: column;
@@ -397,7 +421,7 @@ watch(currentConversationId, () => scrollToBottom())
 .conversations-sidebar.right-sidebar {
   position: fixed;
   right: 0;
-  top: 64px;
+  top: 62px;
   bottom: 0;
   z-index: 1000;
   border-right: none;
@@ -413,7 +437,7 @@ watch(currentConversationId, () => scrollToBottom())
   align-items: center;
   padding: 16px;
   border-bottom: 1px solid var(--pg-border);
-  background: white;
+  background: var(--pg-surface);
 }
 .sidebar-title {
   font-weight: 600;
@@ -534,7 +558,7 @@ watch(currentConversationId, () => scrollToBottom())
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 40px 20px;
+  padding: 48px 24px 76px;
   background: var(--pg-bg);
   background-image: var(--pg-bg-aurora);
   overflow: hidden;
@@ -564,14 +588,29 @@ watch(currentConversationId, () => scrollToBottom())
   box-shadow: 0 4px 12px rgba(59,130,246,0.15);
 }
 .search-hero {
-  width: 100%;
-  max-width: min(680px, 90vw);
-  text-align: center;
+width: 100%;
+max-width: min(760px, 92vw);
+text-align: center;
   animation: pg-hero-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @keyframes pg-hero-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+from { opacity: 0; transform: translateY(8px); }
+to { opacity: 1; transform: translateY(0); }
+}
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  color: var(--pg-accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+.hero-eyebrow span {
+  width: 20px;
+  height: 1px;
+  background: currentColor;
 }
 .logo-large {
   display: flex;
@@ -581,12 +620,12 @@ watch(currentConversationId, () => scrollToBottom())
   margin-bottom: 18px;
 }
 .logo-large__mark {
-  width: 52px;
-  height: 52px;
-  border-radius: 13px;
-  background: var(--pg-surface);
-  border: 1px solid var(--pg-border);
-  color: var(--pg-primary);
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  background: var(--pg-primary-soft);
+  border: 1px solid #dfe3ff;
+  color: var(--pg-accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -601,7 +640,7 @@ watch(currentConversationId, () => scrollToBottom())
 }
 .logo-large__title {
   font-family: var(--pg-font-serif);
-  font-size: 32px;
+  font-size: clamp(28px, 3vw, 38px);
   font-weight: 700;
   color: var(--pg-text-heading);
   letter-spacing: 0.01em;
@@ -615,8 +654,8 @@ watch(currentConversationId, () => scrollToBottom())
 }
 .search-box {
   background: var(--pg-surface);
-  border-radius: var(--pg-radius-xl);
-  box-shadow: var(--pg-shadow-md);
+  border-radius: 22px;
+  box-shadow: 0 18px 50px rgba(12,10,29,.09), 0 2px 8px rgba(12,10,29,.03);
   border: 1px solid var(--pg-border);
   overflow: hidden;
   margin-bottom: 18px;
@@ -629,9 +668,9 @@ watch(currentConversationId, () => scrollToBottom())
 .search-input {
   border: none;
   resize: none;
-  padding: 20px 24px;
-  font-size: 15px;
-  line-height: 1.6;
+padding: 22px 24px 18px;
+font-size: 16px;
+line-height: 1.65;
   background: transparent;
 }
 .search-input:focus {
@@ -641,9 +680,9 @@ watch(currentConversationId, () => scrollToBottom())
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 20px;
+  padding: 13px 18px;
   border-top: 1px solid var(--pg-border-soft);
-  background: var(--pg-bg-soft);
+  background: linear-gradient(180deg, #fafaff, var(--pg-primary-softer));
 }
 .search-actions__left {
   display: flex;
@@ -675,7 +714,7 @@ watch(currentConversationId, () => scrollToBottom())
   color: var(--pg-text-tertiary);
 }
 .search-example-chip {
-  padding: 5px 12px;
+  padding: 7px 13px;
   font-size: 13px;
   color: var(--pg-text-secondary);
   background: var(--pg-surface);
@@ -694,16 +733,19 @@ watch(currentConversationId, () => scrollToBottom())
   cursor: not-allowed;
 }
 .send-btn {
-  height: 40px;
-  padding: 0 26px;
-  font-weight: 600;
-  border-radius: var(--pg-radius-sm);
-  background: var(--pg-primary);
-  border: none;
+height: 40px;
+padding: 0 24px;
+font-weight: 600;
+border-radius: 11px;
+background: #6366e8;
+border: 1px solid rgba(67, 56, 202, 0.08);
+box-shadow: 0 4px 12px rgba(99, 102, 232, 0.16);
 }
 .send-btn:hover:not(:disabled) {
-  background: var(--pg-primary-hover) !important;
+background: #5658dc !important;
+box-shadow: 0 6px 16px rgba(99, 102, 232, 0.22) !important;
 }
+
 .chat-interface {
   flex: 1;
   display: flex;
@@ -859,16 +901,18 @@ watch(currentConversationId, () => scrollToBottom())
   flex-shrink: 0;
 }
 .chat-send-btn {
-  height: 36px;
-  width: 36px;
-  padding: 0;
-  border-radius: 8px;
-  background: var(--pg-primary);
-  border: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+height: 36px;
+width: 36px;
+padding: 0;
+border-radius: 10px;
+background: #6366e8;
+border: 1px solid rgba(67, 56, 202, 0.08);
+box-shadow: 0 3px 10px rgba(99, 102, 232, 0.15);
+display: inline-flex;
+align-items: center;
+justify-content: center;
 }
+
 .send-icon {
   font-size: 16px;
   line-height: 1;
@@ -925,9 +969,21 @@ watch(currentConversationId, () => scrollToBottom())
   border-radius: 3px;
 }
 @media (max-width: 768px) {
-  .search-hero {
-  padding: 0 16px;
-  }
+.centered-search {
+  align-items: flex-start;
+  padding: clamp(34px, 8vh, 72px) 12px 24px;
+  overflow-y: auto;
+}
+.initial-history-btn {
+  top: 12px;
+  left: 12px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.search-hero {
+padding: 0;
+}
+.hero-eyebrow { margin-bottom: 14px; }
   .logo-large__mark {
   width: 44px;
   height: 44px;

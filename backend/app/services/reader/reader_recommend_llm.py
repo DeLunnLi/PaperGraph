@@ -45,7 +45,7 @@ def extract_title_queries_from_ref_blob_llm(
     )
     try:
         llm = get_llm()
-        text = llm.chat(
+        text = llm.invoke(
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -174,7 +174,7 @@ def rerank_reader_recommend_pairs_by_llm(
     keep_n: int | None = None
     try:
         llm = get_llm()
-        text = llm.chat(
+        text = llm.invoke(
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

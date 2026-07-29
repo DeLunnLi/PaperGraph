@@ -6,8 +6,10 @@ import logging
 from typing import Any
 
 from ..utils import parse_llm_json
+from app.exceptions import LLMError
 from .base import BaseAgent
 from .prompts.knowledge_graph import REL_PROMPT
+from ..services.llm.agent_config import apply_project_skills
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +17,6 @@ class KnowledgeGraphAgent(BaseAgent):
     def __init__(
         self,
         *,
-        agent: Any | None = None,
         min_score: float = 0.55,
         max_edges: int = 12,
         chunk_size: int = 20,
@@ -24,9 +25,6 @@ class KnowledgeGraphAgent(BaseAgent):
         self.min_score = min_score
         self.max_edges = max_edges
         self.chunk_size = chunk_size
-        # agent 参数保留向后兼容；KG 现用无状态 llm.chat（不再持有 SimpleAgent 单例，
-        # 避免跨 chunk _history 累积污染）。
-        self._agent = agent
 
     def _candidate_id(self, paper: dict[str, Any]) -> int | None:
         for key in ("paper_id", "id", "target_paper_id"):
@@ -80,11 +78,11 @@ class KnowledgeGraphAgent(BaseAgent):
         return [items[i : i + self.chunk_size] for i in range(0, len(items), self.chunk_size)]
 
     def _llm_chat(self, user_prompt: str) -> str:
-        """无状态单轮 LLM 调用（替代 self._agent.run）。"""
-        return self.llm.chat([
-            {"role": "system", "content": REL_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]).content
+        """无状态单轮 LLM 调用（HelloAgentsLLM.invoke → LLMResponse.content）。"""
+        from ..services.llm.agent_runtime import stateless_llm_chat
+
+        system = apply_project_skills(REL_PROMPT, ["knowledge-graph", "literature-quality"])
+        return stateless_llm_chat(self.llm, system, user_prompt)
 
     def infer_edges(
         self, *, new_paper: dict[str, Any], candidates: list[dict[str, Any]]
@@ -111,7 +109,7 @@ class KnowledgeGraphAgent(BaseAgent):
                 raw = self._llm_chat(json.dumps(payload, ensure_ascii=False))
             except Exception as exc:
                 logger.exception("kg_llm_run_failed")
-                raise RuntimeError("kg_llm_run_failed") from exc
+                raise LLMError("kg_llm_run_failed", code="kg_llm_run_failed") from exc
 
             data = parse_llm_json(raw)
             if data is None:
@@ -147,5 +145,5 @@ class KnowledgeGraphAgent(BaseAgent):
                     shared=True,
                 )
         except Exception:
-            logger.debug("kg_memory_write_failed", exc_info=True)
+            logger.warning("kg_memory_write_failed", exc_info=True)
         return edges, None

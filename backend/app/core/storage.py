@@ -51,8 +51,9 @@ class PaperDatabase:
 
     @contextmanager
     def _get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 10000")
         try:
             yield conn
             conn.commit()
@@ -125,6 +126,7 @@ class PaperDatabase:
                 self._ensure_column(conn, "local_pdf_path")
                 self._ensure_column(conn, "category")
                 self._ensure_column(conn, "venue_type")
+                self._ensure_column(conn, "user_id", "INTEGER NOT NULL DEFAULT 1")
 
                 cursor.execute(
                     """
@@ -192,6 +194,98 @@ class PaperDatabase:
                 except sqlite3.OperationalError as e:
                     logger.warning("FTS5 不可用或未启用，跳过全文索引: %s", e)
                 cursor.execute("PRAGMA user_version = 2")
+                db_version = 2
+
+            if db_version < 3:
+                # Legacy schemas made scholarly identifiers globally unique. That
+                # prevents two users from saving the same paper, even though all
+                # library operations are user-scoped. Rebuild the table and use
+                # per-user partial unique indexes instead.
+                cursor.executescript(
+                    """
+                    DROP TRIGGER IF EXISTS papers_ai;
+                    DROP TRIGGER IF EXISTS papers_ad;
+                    DROP TRIGGER IF EXISTS papers_au;
+                    DROP TABLE IF EXISTS papers_fts;
+
+                    CREATE TABLE papers_v3 (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL,
+                        abstract TEXT,
+                        doi TEXT,
+                        pmid TEXT,
+                        arxiv_id TEXT,
+                        pmc_id TEXT,
+                        journal TEXT,
+                        year INTEGER,
+                        volume TEXT,
+                        issue TEXT,
+                        pages TEXT,
+                        publisher TEXT,
+                        pdf_url TEXT,
+                        source_url TEXT,
+                        local_pdf_path TEXT,
+                        keywords TEXT,
+                        mesh_terms TEXT,
+                        "references" TEXT,
+                        citations INTEGER DEFAULT 0,
+                        source TEXT DEFAULT 'unknown',
+                        notes TEXT,
+                        tags TEXT,
+                        category TEXT,
+                        rating INTEGER,
+                        read_status TEXT DEFAULT 'unread',
+                        importance TEXT DEFAULT 'normal',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        venue_type TEXT,
+                        user_id INTEGER NOT NULL DEFAULT 1
+                    );
+                    INSERT INTO papers_v3 SELECT * FROM papers;
+                    DROP TABLE papers;
+                    ALTER TABLE papers_v3 RENAME TO papers;
+
+                    CREATE UNIQUE INDEX uq_papers_user_doi
+                        ON papers(user_id, doi) WHERE doi IS NOT NULL AND doi <> '';
+                    CREATE UNIQUE INDEX uq_papers_user_pmid
+                        ON papers(user_id, pmid) WHERE pmid IS NOT NULL AND pmid <> '';
+                    CREATE UNIQUE INDEX uq_papers_user_arxiv
+                        ON papers(user_id, arxiv_id) WHERE arxiv_id IS NOT NULL AND arxiv_id <> '';
+                    CREATE UNIQUE INDEX uq_papers_user_pmc
+                        ON papers(user_id, pmc_id) WHERE pmc_id IS NOT NULL AND pmc_id <> '';
+                    CREATE INDEX idx_papers_category ON papers(category);
+                    CREATE INDEX idx_papers_year ON papers(year);
+                    CREATE INDEX idx_papers_read_status ON papers(read_status);
+                    CREATE INDEX idx_papers_created_at ON papers(created_at);
+                    CREATE INDEX idx_category_year ON papers(category, year);
+                    """
+                )
+                try:
+                    cursor.executescript(
+                        """
+                        CREATE VIRTUAL TABLE papers_fts USING fts5(
+                            title, abstract, content='papers', content_rowid='id'
+                        );
+                        CREATE TRIGGER papers_ai AFTER INSERT ON papers BEGIN
+                            INSERT INTO papers_fts(rowid, title, abstract)
+                            VALUES (new.id, new.title, new.abstract);
+                        END;
+                        CREATE TRIGGER papers_ad AFTER DELETE ON papers BEGIN
+                            INSERT INTO papers_fts(papers_fts, rowid, title, abstract)
+                            VALUES ('delete', old.id, old.title, old.abstract);
+                        END;
+                        CREATE TRIGGER papers_au AFTER UPDATE ON papers BEGIN
+                            INSERT INTO papers_fts(papers_fts, rowid, title, abstract)
+                            VALUES ('delete', old.id, old.title, old.abstract);
+                            INSERT INTO papers_fts(rowid, title, abstract)
+                            VALUES (new.id, new.title, new.abstract);
+                        END;
+                        INSERT INTO papers_fts(papers_fts) VALUES('rebuild');
+                        """
+                    )
+                except sqlite3.OperationalError as e:
+                    logger.warning("FTS5 不可用或未启用，跳过全文索引: %s", e)
+                cursor.execute("PRAGMA user_version = 3")
 
     @staticmethod
     def _norm_id_field(val: str | None) -> str | None:
@@ -211,7 +305,7 @@ class PaperDatabase:
                abstract = COALESCE(?, abstract),
                title = COALESCE(?, title),
                venue_type = COALESCE(?, venue_type),
-               updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+               updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?""",
             (
                 cat,
                 json.dumps(paper.tags or [], ensure_ascii=False),
@@ -223,6 +317,7 @@ class PaperDatabase:
                 title_new,
                 getattr(paper, "venue_type", None),
                 paper_id,
+                int(paper.user_id or 0),
             ),
         )
 
@@ -235,7 +330,10 @@ class PaperDatabase:
 
         for field, val in (("doi", doi), ("arxiv_id", arxiv_id), ("pmid", pmid), ("pmc_id", pmc_id)):
             if val:
-                cursor.execute(f"SELECT id FROM papers WHERE {field} = ?", (val,))
+                cursor.execute(
+                    f"SELECT id FROM papers WHERE {field} = ? AND user_id = ?",
+                    (val, int(paper.user_id or 0)),
+                )
                 existing = cursor.fetchone()
                 if existing:
                     eid = int(existing[0])
@@ -248,8 +346,8 @@ class PaperDatabase:
                 title, abstract, doi, pmid, arxiv_id, pmc_id,
                 journal, year, volume, issue, pages, publisher,
                 pdf_url, source_url, local_pdf_path, keywords, mesh_terms, "references",
-                citations, source, notes, tags, category, venue_type, rating, read_status, importance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                citations, source, notes, tags, category, venue_type, rating, read_status, importance, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 paper.title,
@@ -279,6 +377,7 @@ class PaperDatabase:
                 paper.rating,
                 paper.read_status,
                 paper.importance,
+                int(paper.user_id or 0),
             ),
         )
 
@@ -393,20 +492,33 @@ class PaperDatabase:
             rating=row["rating"],
             read_status=row["read_status"] or "unread",
             importance=row["importance"] or "normal",
+            user_id=int(row["user_id"]) if "user_id" in keys and row["user_id"] is not None else None,
         )
 
-    def count_papers(self) -> int:
-        return self._query("SELECT COUNT(*) FROM papers", fetch='one')[0]
+    def count_papers(self, user_id: int) -> int:
+        return self._query("SELECT COUNT(*) FROM papers WHERE user_id = ?", (int(user_id),), fetch='one')[0]
 
-    def get_all_papers(self, limit: int | None = None, offset: int = 0, order_by: str = "created_at DESC") -> list[Paper]:
+    def get_all_papers(self, limit: int | None = None, offset: int = 0, order_by: str = "created_at DESC", user_id: int | None = None) -> list[Paper]:
+        allowed_order_by = {
+            "created_at ASC", "created_at DESC", "year ASC", "year DESC",
+            "title ASC", "title DESC", "citations ASC", "citations DESC",
+            "rating ASC", "rating DESC",
+        }
+        if order_by not in allowed_order_by:
+            order_by = "created_at DESC"
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            query = f"SELECT * FROM papers ORDER BY {order_by}"
+            query = "SELECT * FROM papers"
+            params: list[Any] = []
+            if user_id is not None:
+                query += " WHERE user_id = ?"
+                params.append(int(user_id))
+            query += f" ORDER BY {order_by}"
             if limit:
                 query += f" LIMIT {int(limit)}"
             if offset:
                 query += f" OFFSET {int(offset)}"
-            cursor.execute(query)
+            cursor.execute(query, params)
             rows = cursor.fetchall()
             if not rows:
                 return []
@@ -417,8 +529,15 @@ class PaperDatabase:
                 for row in rows
             ]
 
-    def get_paper_by_id(self, paper_id: int) -> Paper | None:
-        row = self._query("SELECT * FROM papers WHERE id = ?", (paper_id,), fetch='one')
+    def get_paper_by_id(self, paper_id: int, user_id: int | None = None) -> Paper | None:
+        if user_id is None:
+            row = self._query("SELECT * FROM papers WHERE id = ?", (paper_id,), fetch='one')
+        else:
+            row = self._query(
+                "SELECT * FROM papers WHERE id = ? AND user_id = ?",
+                (paper_id, int(user_id)),
+                fetch='one',
+            )
         if not row:
             return None
         with self._get_connection() as conn:
@@ -435,11 +554,15 @@ class PaperDatabase:
         category: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        user_id: int | None = None,
     ) -> list[Paper]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             clauses: list[str] = ["1=1"]
             params: list[Any] = []
+            if user_id is not None:
+                clauses.append("p.user_id = ?")
+                params.append(int(user_id))
             use_fts = False
             match_expr = ""
             clean_query = ""
@@ -520,7 +643,7 @@ class PaperDatabase:
                 papers = [p for p in papers if tag_set.intersection(set(p.tags))]
             return papers
 
-    def update_paper(self, paper_id: int, **fields) -> bool:
+    def update_paper(self, paper_id: int, user_id: int, **fields) -> bool:
         allowed = {"notes", "tags", "rating", "read_status", "importance", "category", "abstract"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
@@ -528,28 +651,31 @@ class PaperDatabase:
         if "tags" in updates and isinstance(updates["tags"], list):
             updates["tags"] = json.dumps(updates["tags"], ensure_ascii=False)
         set_parts = [f"{k} = ?" for k in updates]
-        values = list(updates.values()) + [paper_id]
+        values = list(updates.values()) + [paper_id, int(user_id)]
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE papers SET {', '.join(set_parts)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                f"UPDATE papers SET {', '.join(set_parts)}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
                 values,
             )
             return cursor.rowcount > 0
 
-    def set_local_pdf_path(self, paper_id: int, relative_path: str | None) -> bool:
+    def set_local_pdf_path(self, paper_id: int, relative_path: str | None, user_id: int) -> bool:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE papers SET local_pdf_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (relative_path, paper_id),
+                "UPDATE papers SET local_pdf_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
+                (relative_path, paper_id, int(user_id)),
             )
             return cursor.rowcount > 0
 
-    def delete_paper(self, paper_id: int) -> bool:
+    def delete_paper(self, paper_id: int, user_id: int) -> bool:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT local_pdf_path FROM papers WHERE id = ?", (paper_id,))
+            cursor.execute(
+                "SELECT local_pdf_path FROM papers WHERE id = ? AND user_id = ?",
+                (paper_id, int(user_id)),
+            )
             row = cursor.fetchone()
             if row and row[0]:
                 abspath = self._abs_local_pdf(row[0])
@@ -557,10 +683,13 @@ class PaperDatabase:
                     with suppress(OSError):
                         os.remove(abspath)
             cursor.execute("DELETE FROM paper_authors WHERE paper_id = ?", (paper_id,))
-            cursor.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
+            cursor.execute(
+                "DELETE FROM papers WHERE id = ? AND user_id = ?",
+                (paper_id, int(user_id)),
+            )
             return cursor.rowcount > 0
 
-    def repair_library_local_pdf_paths_batch(self, paper_ids: list[int]) -> dict[int, str]:
+    def repair_library_local_pdf_paths_batch(self, paper_ids: list[int], user_id: int) -> dict[int, str]:
         want = {int(x) for x in paper_ids if x is not None and int(x) >= 0}
         if not want:
             return {}
@@ -593,12 +722,12 @@ class PaperDatabase:
                 continue
             rows.sort(key=lambda x: -x[0])
             best_rel = rows[0][1]
-            if self.set_local_pdf_path(pid, best_rel):
+            if self.set_local_pdf_path(pid, best_rel, user_id=user_id):
                 out[pid] = best_rel
         return out
 
-    def get_library_pdf_abspath(self, paper_id: int) -> str | None:
-        p = self.get_paper_by_id(paper_id)
+    def get_library_pdf_abspath(self, paper_id: int, user_id: int | None = None) -> str | None:
+        p = self.get_paper_by_id(paper_id, user_id=user_id)
         if not p or not (getattr(p, "local_pdf_path", None) or "").strip():
             return None
         rel = (p.local_pdf_path or "").strip()
@@ -612,24 +741,52 @@ class PaperDatabase:
                 self._abs_local_pdf(f"{LIBRARY_PDF_ROOT_DIR}/" + rel[len("pdfs/") :])
             )
         root = os.path.realpath(self._data_root())
+        valid_candidates: list[tuple[float, str]] = []
         for abspath in candidates:
             if not abspath or not os.path.isfile(abspath):
                 continue
             real_f = os.path.realpath(abspath)
             if real_f != root and not real_f.startswith(root + os.sep):
                 continue
-            return real_f
-        return None
+            try:
+                if os.path.getsize(real_f) < 5:
+                    continue
+                with open(real_f, "rb") as probe:
+                    if probe.read(5) != b"%PDF-":
+                        continue
+                valid_candidates.append((os.path.getmtime(real_f), real_f))
+            except OSError:
+                continue
+        if not valid_candidates:
+            return None
+        return max(valid_candidates, key=lambda item: item[0])[1]
 
-    def list_library_category_folders(self) -> list[dict[str, Any]]:
-        rows = self._query(
-            """
-            SELECT COALESCE(NULLIF(TRIM(category), ''), '未分类') AS c, COUNT(*) AS n
-            FROM papers
-            GROUP BY c
-            ORDER BY n DESC, c ASC
-            """
+    def _category_counts_rows(
+        self, user_id: int | None, *, limit: int | None = None, scope_all_if_none: bool = False
+    ) -> list[dict[str, Any]]:
+        """Shared ``category → count`` aggregation backing the two category endpoints.
+
+        ``scope_all_if_none`` widens to all users when ``user_id`` is ``None``
+        (used by the by-count listing); otherwise the query is strict per-user.
+        """
+        if scope_all_if_none:
+            where, params = "WHERE (? IS NULL OR user_id = ?)", (user_id, user_id)
+        else:
+            where, params = "WHERE user_id = ?", (user_id,)
+        sql = (
+            "SELECT COALESCE(NULLIF(TRIM(category), ''), '未分类') AS c, COUNT(*) AS n\n"
+            "            FROM papers\n"
+            f"            {where}\n"
+            "            GROUP BY c\n"
+            "            ORDER BY n DESC, c ASC"
         )
+        if limit is not None:
+            sql += "\n            LIMIT ?"
+            params = (*params, int(limit))
+        return self._query(sql, params)
+
+    def list_library_category_folders(self, user_id: int) -> list[dict[str, Any]]:
+        rows = self._category_counts_rows(int(user_id))
 
         standalone: dict[str, int] = {}
         by_parent: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -701,20 +858,11 @@ class PaperDatabase:
         out.sort(key=lambda x: (-x["count"], x["category"]))
         return out
 
-    def list_library_categories_by_count(self, limit: int = 80) -> list[str]:
+    def list_library_categories_by_count(self, limit: int = 80, user_id: int | None = None) -> list[str]:
         limit = int(limit or 0)
         if limit <= 0:
             limit = 80
-        rows = self._query(
-            """
-            SELECT COALESCE(NULLIF(TRIM(category), ''), '未分类') AS c, COUNT(*) AS n
-            FROM papers
-            GROUP BY c
-            ORDER BY n DESC, c ASC
-            LIMIT ?
-            """,
-            (limit,),
-        )
+        rows = self._category_counts_rows(user_id, limit=limit, scope_all_if_none=True)
         out: list[str] = []
         for r in rows:
             c = (r["c"] or "").strip() or "未分类"

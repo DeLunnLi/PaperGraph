@@ -1,10 +1,12 @@
 import logging
 import os
+import threading
 import time
 
 from fastapi import BackgroundTasks, HTTPException, Request
 
 from ...settings import get_settings
+from ...utils.common import safe_http_500
 from ...models.schemas import (
     DeletePaperResponse,
     LibraryCategoriesResponse,
@@ -18,6 +20,18 @@ from ...models.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+_pdf_download_locks: dict[tuple[int, int], threading.Lock] = {}
+_pdf_download_locks_guard = threading.Lock()
+
+
+def _pdf_download_lock(user_id: int, paper_id: int) -> threading.Lock:
+    key = (int(user_id), int(paper_id))
+    with _pdf_download_locks_guard:
+        lock = _pdf_download_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _pdf_download_locks[key] = lock
+        return lock
 
 def _merge_tag_lists(base: list[str], extra: list[str], max_n: int = 24) -> list[str]:
     out: list[str] = []
@@ -35,18 +49,18 @@ def _merge_tag_lists(base: list[str], extra: list[str], max_n: int = 24) -> list
             break
     return out
 
-def list_library_categories(*, db) -> LibraryCategoriesResponse:
+def list_library_categories(*, db, user_id: int) -> LibraryCategoriesResponse:
     try:
         from app.core.paper_paths import LIBRARY_PDF_ROOT_DIR
 
-        items = db.list_library_category_folders()
+        items = db.list_library_category_folders(user_id=user_id)
         return LibraryCategoriesResponse(
             success=True,
             store_root=LIBRARY_PDF_ROOT_DIR,
             folders=[LibraryCategoryFolder(**x) for x in items],
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_500("papers_library_service", e)
 
 def get_library(
     *,
@@ -76,13 +90,15 @@ def get_library(
                 category=cat,
                 limit=limit,
                 offset=offset,
+                user_id=user_id,
             )
         else:
-            papers_data = db.get_all_papers(limit=limit, offset=offset, order_by="created_at DESC")
-
-        # Filter by user_id if provided (multi-user isolation)
-        if user_id is not None:
-            papers_data = [p for p in papers_data if getattr(p, 'user_id', 1) == user_id]
+            papers_data = db.get_all_papers(
+                limit=limit,
+                offset=offset,
+                order_by="created_at DESC",
+                user_id=user_id,
+            )
 
         ids_missing_pdf = [
             int(p.id)
@@ -90,16 +106,16 @@ def get_library(
             if p.id is not None and not (getattr(p, "local_pdf_path", None) or "").strip()
         ]
         if ids_missing_pdf:
-            repaired = db.repair_library_local_pdf_paths_batch(ids_missing_pdf)
+            repaired = db.repair_library_local_pdf_paths_batch(ids_missing_pdf, user_id=user_id)
             for p in papers_data:
                 if p.id is not None and int(p.id) in repaired:
                     p.local_pdf_path = repaired[int(p.id)]
 
-        total = db.count_papers() if not (q or year_from or year_to or read_status or tag_list or cat) else len(papers_data) + (1 if len(papers_data) >= limit else 0)
+        total = db.count_papers(user_id=user_id) if not (q or year_from or year_to or read_status or tag_list or cat) else len(papers_data) + (1 if len(papers_data) >= limit else 0)
         papers = [litpaper_to_api_paper_fn(p) for p in papers_data]
         return PapersResponse(success=True, total=total or len(papers), papers=papers)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_500("papers_library_service", e)
 
 async def save_papers(
     *,
@@ -108,6 +124,7 @@ async def save_papers(
     background_tasks: BackgroundTasks,
     api_to_lit_fn,
     litpaper_to_api_paper_fn,
+    user_id: int,
 ) -> SavePapersResponse:
     try:
         t0 = time.perf_counter()
@@ -121,6 +138,7 @@ async def save_papers(
 
         lit_list = [api_to_lit_fn(p) for p in request.papers]
         for api_p, lit_p in zip(request.papers, lit_list):
+            lit_p.user_id = int(user_id)
             if (api_p.source_url or "").strip():
                 lit_p.source_url = (api_p.source_url or "").strip()
             if (api_p.pdf_url or "").strip():
@@ -164,7 +182,7 @@ async def save_papers(
             try:
                 existing_categories = []
                 try:
-                    existing_categories = db.list_library_categories_by_count(limit=80)
+                    existing_categories = db.list_library_categories_by_count(limit=80, user_id=user_id)
                 except Exception:
                     existing_categories = []
 
@@ -253,11 +271,11 @@ async def save_papers(
                         lit_p.doi,
                     )
                 if os.path.isfile(dest) and os.path.getsize(dest) >= 256:
-                    db.set_local_pdf_path(int(pid), relpath)
+                    db.set_local_pdf_path(int(pid), relpath, user_id=user_id)
                     pdf_downloaded += 1
                     continue
                 if resolved and download_paper_pdf_to_path(lit_p, dest, email=mail):
-                    db.set_local_pdf_path(int(pid), relpath)
+                    db.set_local_pdf_path(int(pid), relpath, user_id=user_id)
                     pdf_downloaded += 1
                 elif resolved:
                     logger.warning("保存 PDF 下载失败 title=%r", lit_p.title)
@@ -267,11 +285,11 @@ async def save_papers(
         if ids_ok:
             need_repair = []
             for pid in ids_ok:
-                row = db.get_paper_by_id(pid)
+                row = db.get_paper_by_id(pid, user_id=user_id)
                 if row and not (getattr(row, "local_pdf_path", None) or "").strip():
                     need_repair.append(pid)
             if need_repair:
-                db.repair_library_local_pdf_paths_batch(need_repair)
+                db.repair_library_local_pdf_paths_batch(need_repair, user_id=user_id)
 
         msg = None
         if (
@@ -306,22 +324,43 @@ async def save_papers(
         )
     except Exception as e:
         logger.exception("POST /api/papers/save 失败")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_500("papers_library_service", e)
 
-def get_paper_by_id(*, db, paper_id: int, litpaper_to_api_paper_fn) -> Paper:
-    p = db.get_paper_by_id(paper_id)
+def ensure_paper_pdf(*, db, paper_id: int, user_id: int, litpaper_to_api_paper_fn) -> Paper:
+    """Ensure an owned library paper has a local PDF, downloading it when possible."""
+    from ..reader.paper_reader_context import _ensure_reader_pdf_available
+
+    with _pdf_download_lock(user_id, paper_id):
+        p = db.get_paper_by_id(paper_id, user_id=user_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="文献不存在")
+        path = _ensure_reader_pdf_available(db, p, user_id=user_id)
+        if not path:
+            raise HTTPException(status_code=404, detail="未找到可下载的论文 PDF，请检查论文的 arXiv、DOI 或原文链接")
+        refreshed = db.get_paper_by_id(paper_id, user_id=user_id)
+        return litpaper_to_api_paper_fn(refreshed or p)
+
+
+def get_paper_by_id(*, db, paper_id: int, user_id: int, litpaper_to_api_paper_fn) -> Paper:
+    p = db.get_paper_by_id(paper_id, user_id=user_id)
     if not p:
         raise HTTPException(status_code=404, detail="文献不存在")
 
-    if p.id is not None and not (getattr(p, "local_pdf_path", None) or "").strip():
-        repaired = db.repair_library_local_pdf_paths_batch([int(p.id)])
-        if repaired:
-            p2 = db.get_paper_by_id(paper_id)
-            if p2:
-                p = p2
+    if p.id is not None:
+        local_path = db.get_library_pdf_abspath(int(p.id), user_id=user_id)
+        if not local_path:
+            repaired = db.repair_library_local_pdf_paths_batch([int(p.id)], user_id=user_id)
+            if repaired:
+                p2 = db.get_paper_by_id(paper_id, user_id=user_id)
+                if p2:
+                    p = p2
+            elif (getattr(p, "local_pdf_path", None) or "").strip():
+                # Do not advertise a stale path to the reader. It would make the
+                # frontend request a ticket for a file that cannot be served.
+                p.local_pdf_path = None
     return litpaper_to_api_paper_fn(p)
 
-def update_paper_by_id(*, db, paper_id: int, body: UpdatePaperRequest) -> UpdatePaperResponse:
+def update_paper_by_id(*, db, paper_id: int, user_id: int, body: UpdatePaperRequest) -> UpdatePaperResponse:
     try:
         from app.core.paper_paths import normalize_library_category_display
 
@@ -338,27 +377,28 @@ def update_paper_by_id(*, db, paper_id: int, body: UpdatePaperRequest) -> Update
             fields["read_status"] = body.read_status.value
         if body.importance is not None:
             fields["importance"] = body.importance
-        ok = db.update_paper(paper_id, **fields)
+        ok = db.update_paper(paper_id, user_id=user_id, **fields)
         if not ok:
             raise HTTPException(status_code=404, detail="未更新或文献不存在")
         return UpdatePaperResponse(success=True, updated_fields=list(fields.keys()))
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_500("papers_library_service", e)
 
-def delete_paper_by_id(*, db, paper_id: int) -> DeletePaperResponse:
-    ok = db.delete_paper(paper_id)
+def delete_paper_by_id(*, db, paper_id: int, user_id: int) -> DeletePaperResponse:
+    ok = db.delete_paper(paper_id, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="文献不存在")
     return DeletePaperResponse(success=True, message="已删除")
 
-def build_library_pdf_response_service(*, paper_id: int, request: Request, db_path: str, logger_obj):
+def build_library_pdf_response_service(*, paper_id: int, user_id: int, request: Request, db_path: str, logger_obj):
     from ..pdf.pdf_service import build_library_pdf_response
 
     return build_library_pdf_response(
         paper_id=int(paper_id),
         request=request,
         db_path=db_path,
+        user_id=user_id,
         logger=logger_obj,
     )

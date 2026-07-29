@@ -6,6 +6,8 @@ from typing import Any, Optional
 
 from cachetools import TTLCache
 
+from app.exceptions import IntentParseError, LLMError
+
 from ..core.search.paper_searcher import _sanitize_author_list_for_query
 from ..models.schemas import Paper
 from ..services.search_intent import (
@@ -14,6 +16,7 @@ from ..services.search_intent import (
     finalize_llm_intent,
     search_intent_from_dict,
 )
+from ..services.search_intent.arxiv_normalization import extract_arxiv_ids_from_text
 from ..services.search_intent.parsing import _ensure_intent_year_window_ordered
 from ..settings import get_settings
 from .base import BaseAgent
@@ -47,7 +50,7 @@ class SearchAgent(BaseAgent):
         if not msg:
             raise ValueError("intent_parse_empty_message")
         if not self.llm:
-            raise RuntimeError("intent_parse_llm_unavailable")
+            raise LLMError("intent_parse_llm_unavailable", code="intent_parse_llm_unavailable")
 
         from ..services.search_intent.parsing import format_intent_llm_prompt
 
@@ -55,10 +58,13 @@ class SearchAgent(BaseAgent):
         prompt = format_intent_llm_prompt(
             tmpl, msg, profile, correction_hint=(correction_hint or "").strip() or None
         )
-        resp = self.llm.chat([
-            {"role": "system", "content": "你是学术检索意图解析器。只输出 JSON，不要解释。"},
-            {"role": "user", "content": prompt},
-        ]).content
+        from ..services.llm.agent_runtime import stateless_llm_chat
+
+        resp = stateless_llm_chat(
+            self.llm,
+            "你是学术检索意图解析器。只输出 JSON，不要解释。",
+            prompt,
+        )
         text = (resp or "").strip()
         payload = extract_json_object(text)
         if not payload:
@@ -70,6 +76,21 @@ class SearchAgent(BaseAgent):
         return finalize_llm_intent(intent, profile)
 
     def understand_intent(self, message: str, profile: str = "accuracy") -> SearchIntent:
+        # Explicit arXiv IDs are already a complete, unambiguous search plan. Avoid
+        # spending an LLM round-trip on them and keep the exact ID authoritative.
+        explicit_ids = extract_arxiv_ids_from_text(message)
+        if explicit_ids:
+            return SearchIntent(
+                query=explicit_ids[0],
+                raw_user_message=(message or "").strip()[:3200],
+                arxiv_id_list=explicit_ids[:8],
+                sources=["arxiv"],
+                search_strategy="targeted_lookup",
+                use_llm_rank=False,
+                rerank_recall_max=max(8, len(explicit_ids)),
+                max_results=max(5, min(30, len(explicit_ids))),
+            )
+
         # Inject shared cross-agent memory as context hints
         # This lets search benefit from user's reading history and preferences
         # Filter by tags: search agent cares about reader insights and previous searches
@@ -128,7 +149,7 @@ class IntentParser:
 
         prof = self._agent._normalize_profile(profile)
         if not self._agent.llm:
-            raise RuntimeError("search_agent_llm_unavailable")
+            raise LLMError("search_agent_llm_unavailable", code="search_agent_llm_unavailable")
         s = get_settings()
         outer_retries = max(0, min(5, int(getattr(s, "papergraph_intent_parse_max_retries", 2) or 2)))
         correction: str | None = None
@@ -154,7 +175,7 @@ class IntentParser:
                     e, user_message=msg, last_output=last_output
                 )
         logger.warning("[SearchAgent] LLM intent parse exhausted retries: %s", last_exc)
-        raise RuntimeError("search_agent_intent_failed") from last_exc
+        raise IntentParseError("search_agent_intent_failed", code="search_agent_intent_failed") from last_exc
 
     def _parse_llm_primary(
         self,

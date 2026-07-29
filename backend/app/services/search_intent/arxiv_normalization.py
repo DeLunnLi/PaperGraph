@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ...utils.common import dedupe_strings_preserve_order
 
 _ALLOWED_ARXIV_CAT_REST = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")
@@ -67,6 +69,23 @@ def parse_legacy_arxiv_id(t: str) -> str | None:
     if not prefix or not all(ch.islower() or ch in ".-" for ch in prefix):
         return None
     return u
+
+def extract_arxiv_ids_from_text(text: str | None) -> list[str]:
+    """Deterministically recover explicit IDs even when the LLM misses them."""
+    raw = str(text or "")
+    candidates: list[str] = []
+    candidates.extend(
+        re.findall(r"(?<!\d)(\d{4}\.\d{4,5}(?:v\d+)?)(?!\d)", raw, flags=re.IGNORECASE)
+    )
+    candidates.extend(
+        re.findall(
+            r"(?<![A-Za-z0-9.-])([A-Za-z][A-Za-z.-]*/\d{7}(?:v\d+)?)(?!\d)",
+            raw,
+            flags=re.IGNORECASE,
+        )
+    )
+    return sanitize_arxiv_id_list(candidates)
+
 
 def sanitize_arxiv_id_list(raw: list[str | None]) -> list[str]:
     out: list[str] = []

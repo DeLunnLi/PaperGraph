@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio, hashlib, logging, os, re, time
+import asyncio, hashlib, logging, math, os, re, time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,6 +10,7 @@ from requests import Session
 from requests.adapters import HTTPAdapter
 
 from ..paper import Paper
+from app.exceptions import SearchSourceError
 from ...utils.async_sync import run_coroutine_sync
 from ...utils.author_query_match import (
     normalize_author_names, author_phrase_matches_canonical_line,
@@ -19,6 +20,7 @@ from .normalize import (
     _normalize_title_for_dedupe,
     _arxiv_canonical_from_paper,
     plain_query_for_text_apis,
+    sanitize_search_keyword_list,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,15 @@ def _merge_paper_link_fields(dst: Paper, src: Paper) -> None:
     sa, da = (src.arxiv_id or "").strip(), (dst.arxiv_id or "").strip()
     if not da and sa:
         dst.arxiv_id = sa
+    for field in ("pmid", "pmc_id", "journal", "volume", "issue", "pages", "publisher"):
+        source_value = str(getattr(src, field, None) or "").strip()
+        if source_value and not str(getattr(dst, field, None) or "").strip():
+            setattr(dst, field, source_value)
+    if dst.year is None and src.year is not None:
+        dst.year = src.year
+    if not dst.authors and src.authors:
+        dst.authors = list(src.authors)
+    dst.citations = max(int(dst.citations or 0), int(src.citations or 0))
 
 
 
@@ -114,6 +125,11 @@ from .sources.openalex import (
     _search_openalex_works_by_author_async,
 )
 from .sources.mcp import _search_mcp_src
+from .sources import crossref as _crossref_source  # noqa: F401
+from .sources import europe_pmc as _europe_pmc_source  # noqa: F401
+from .sources import semantic_scholar as _semantic_scholar_source  # noqa: F401
+from .sources.base import get_source
+from hello_agents.tools.response import ToolResponse
 
 
 class PaperSearcher:
@@ -122,8 +138,9 @@ class PaperSearcher:
         _email = (email or os.getenv("OPENALEX_MAILTO") or os.getenv("NCBI_EMAIL") or "").strip()
         if _email.lower() == "user@example.com": _email = ""
         self.email, self.api_key, self.download_dir = _email, api_key, download_dir
+        self._httpx_trust_env = bool(httpx_trust_env)
         os.makedirs(self.download_dir, exist_ok=True)
-        self._rate = RateLimiter(fixed_delays={"arxiv": 0.1, "openalex": 0.15, "dblp": 0.35})
+        self._rate = RateLimiter(fixed_delays={"arxiv": 0.1, "openalex": 0.15, "dblp": 0.35, "europe_pmc": 0.15})
         # Configure session with connection pooling
         self._session = Session()
         adapter = HTTPAdapter(pool_connections=20, pool_maxsize=50)
@@ -133,6 +150,13 @@ class PaperSearcher:
         self._async_client_loop: Optional[asyncio.AbstractEventLoop] = None
         self.stats = {"arxiv_requests": 0, "dblp_requests": 0, "openalex_requests": 0,
                       "total_results": 0, "downloaded_pdfs": 0}
+        # 搜索源熔断器（hello-agents CircuitBreaker）。PaperSearcher 是进程级 singleton
+        # （app/api/dependencies.py），故 breaker 跨搜索请求共享 —— 这在 P0-4 reader
+        # 并发隔离边界之外（reader 路径用 ReaderCtx + 每请求 _new_reader_agent，不碰此处）。
+        # 竞态良性：CircuitBreaker 内部用 plain dict 无锁，但搜索跑在单 event loop
+        # （asyncio.gather 协作式），最坏情况 failure_counts 差 1，recovery_timeout 自愈。
+        from .sources.base import _new_circuit_breaker  # local import to avoid cycle
+        self._circuit_breaker = _new_circuit_breaker()
 
     def _bump_stat(self, key: str, n: int = 1) -> None:
         self.stats[key] = self.stats.get(key, 0) + n
@@ -145,7 +169,8 @@ class PaperSearcher:
             try: await self._async_client.aclose()
             except Exception: pass
         self._async_client = httpx.AsyncClient(
-            trust_env=False, limits=httpx.Limits(max_keepalive_connections=20, max_connections=80),
+            trust_env=self._httpx_trust_env,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=80),
             timeout=httpx.Timeout(60.0))
         self._async_client_loop = loop
         return self._async_client
@@ -208,9 +233,16 @@ class PaperSearcher:
             try:
                 resp = await self._async_client.get(url, params=params, headers=headers, timeout=timeout)
                 if resp.status_code == 429:
-                    if attempt < max_attempts - 1 and "arxiv" in str(url):
-                        await asyncio.sleep(8 + attempt * 8); continue
-                    raise RuntimeError(f"HTTP 429: {url}")
+                    if attempt < max_attempts - 1:
+                        retry_after = resp.headers.get("Retry-After")
+                        try:
+                            hinted_delay = max(0.0, min(float(retry_after), 60.0)) if retry_after else 0.0
+                        except (TypeError, ValueError):
+                            hinted_delay = 0.0
+                        default_delay = (8 + attempt * 8) if "arxiv" in str(url) else (2 + attempt * 3)
+                        await asyncio.sleep(max(hinted_delay, default_delay))
+                        continue
+                    raise SearchSourceError(f"HTTP 429: {url}", code="http_429")
                 if resp.status_code in (500, 502, 503, 504) and attempt < max_attempts - 1:
                     await asyncio.sleep(4 + attempt * 4); continue
                 resp.raise_for_status()
@@ -219,7 +251,10 @@ class PaperSearcher:
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(4 + attempt * 4)
                     continue
-                raise RuntimeError(f"HTTP request failed after {max_attempts} attempts: {exc}") from exc
+                raise SearchSourceError(
+                    f"HTTP request failed after {max_attempts} attempts: {exc}",
+                    code="http_request_failed",
+                ) from exc
 
     def _post_process_results(self, all_results: List[Paper], query: str, *, max_results: int,
                               **kwargs: Any) -> List[Paper]:
@@ -251,7 +286,37 @@ class PaperSearcher:
         if sort_mode == "date":
             unique_results.sort(key=lambda p: (p.year or -1, p.citations or 0), reverse=True)
         else:
-            unique_results.sort(key=lambda p: (p.citations or 0, p.year or -1), reverse=True)
+            query_terms = sanitize_search_keyword_list(
+                [query, *(kwargs.get("llm_keywords") or [])]
+            )
+
+            def _match_text(value: str) -> str:
+                return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", value.lower())).strip()
+
+            primary_query = _match_text(query or "")
+            primary_tokens = set(primary_query.split())
+
+            def relevance_key(p: Paper) -> tuple[float, int, float, int, int]:
+                title = _match_text(p.title or "")
+                abstract = _match_text(p.abstract or "")
+                blob = f"{title} {abstract}"
+                title_tokens = set(title.split())
+                primary_exact = bool(primary_query and primary_query in title)
+                primary_coverage = (
+                    len(primary_tokens & title_tokens) / len(primary_tokens)
+                    if primary_tokens else 0.0
+                )
+                expansion_hits = sum(
+                    1 for term in query_terms[1:] if _match_text(term) in blob
+                )
+                topical_score = (1.5 if primary_exact else 0.0) + primary_coverage
+                metadata_quality = int(bool((p.abstract or "").strip())) + int(bool(p.doi or p.arxiv_id))
+                citation_authority = math.log1p(max(0, p.citations or 0))
+                # Expansion terms must not beat authority once two papers match
+                # the user's primary topic equally well.
+                return (topical_score, metadata_quality, citation_authority, expansion_hits, p.year or -1)
+
+            unique_results.sort(key=relevance_key, reverse=True)
         return unique_results[:max_results]
 
     def search(self, query: str, sources: Optional[List[str]] = None, max_results: int = 10, **kwargs) -> List[Paper]:
@@ -268,6 +333,14 @@ class PaperSearcher:
         sources = [str(s).strip().lower() for s in sources if str(s).strip()] or ["arxiv", "dblp", "openalex"]
         # Tavily 网页结果不作为普通 paper 源；会议官网兜底由显式 proceedings 路径处理
         sources = [s for s in sources if s != "tavily"] or ["arxiv", "dblp", "openalex"]
+        # MCP 是 opt-in 源：disabled 时即使显式传入也不调用（否则 _run_one 会把空结果
+        # 记为 success，让 breaker 永不熔断 mcp，且浪费一次 wait_for 超时预算）。
+        try:
+            from .sources.mcp import _mcp_enabled
+            if not _mcp_enabled():
+                sources = [s for s in sources if s != "mcp"]
+        except Exception:
+            pass
 
         raw_authors_kw = kwargs.get("authors") or kwargs.get("author") or []
         if isinstance(raw_authors_kw, str): raw_authors_kw = [raw_authors_kw]
@@ -306,35 +379,52 @@ class PaperSearcher:
             "openalex": float(kwargs.get("openalex_timeout_sec") or kwargs.get("http_timeout_sec") or 45.0),
             "arxiv": float(kwargs.get("arxiv_timeout_sec") or kwargs.get("http_timeout_sec") or 30.0),
             "mcp": float(kwargs.get("mcp_timeout_sec") or 45.0),
+            "semantic_scholar": float(kwargs.get("http_timeout_sec") or 10.0),
+            "europe_pmc": float(kwargs.get("http_timeout_sec") or 12.0),
+            "crossref": float(kwargs.get("http_timeout_sec") or 10.0),
         }
 
         async def _fetch_src(src: str) -> List[Paper]:
-            if src == "arxiv":
-                if author_centric and expanded_authors:
-                    by_author_ax = await _search_arxiv_by_author_list(self, expanded_authors, per_src_n, **kwargs)
-                    if by_author_ax: return by_author_ax
-                    return await _search_arxiv_src(self, _query_before_author, per_src_n, **kwargs)
-                return await _search_arxiv_src(self, query, per_src_n, **kwargs)
-            elif src == "openalex":
-                if author_centric and expanded_authors:
-                    by_author = await _search_openalex_works_by_author_async(self, expanded_authors, per_src_n, **kwargs)
-                    if by_author: return by_author
-                    return await _search_openalex_src(self, _query_before_author, per_src_n, **kwargs)
-                return await _search_openalex_src(self, query, per_src_n, **kwargs)
-            elif src == "dblp":
-                return await _search_dblp_src(self, query, per_src_n, **kwargs)
-            elif src == "mcp":
-                return await _search_mcp_src(self, query, per_src_n, **kwargs)
-            else:
+            # author-centric 策略仅 arxiv/openalex 有专用 by-author 路径；
+            # 其余源（含未来经 registry 注册的 S2/PubMed）走默认分派。
+            if src == "arxiv" and author_centric and expanded_authors:
+                by_author_ax = await _search_arxiv_by_author_list(self, expanded_authors, per_src_n, **kwargs)
+                if by_author_ax: return by_author_ax
+                return await _search_arxiv_src(self, _query_before_author, per_src_n, **kwargs)
+            if src == "openalex" and author_centric and expanded_authors:
+                by_author = await _search_openalex_works_by_author_async(self, expanded_authors, per_src_n, **kwargs)
+                if by_author: return by_author
+                return await _search_openalex_src(self, _query_before_author, per_src_n, **kwargs)
+            # 默认：经 registry 分派（4 个内置源已注册，新源注册即自动接入）
+            fn = get_source(src)
+            if fn is None:
                 return []
+            source_query = _query_before_author if author_centric else query
+            return await fn(self, source_query, per_src_n, **kwargs)
 
         async def _run_one(src: str) -> List[Paper]:
+            # 熔断中：跳过该源（fast-skip，返回 [] 与失败回退一致，零正确性影响）
+            if self._circuit_breaker.is_open(src):
+                logger.warning("搜索 %s 跳过：熔断器开启", src); return []
             wall = max(5.0, min(60.0, float(_src_timeouts.get(src, 25.0))))
-            try: return await asyncio.wait_for(_fetch_src(src), timeout=wall)
+            try:
+                result = await asyncio.wait_for(_fetch_src(src), timeout=wall)
+                self._circuit_breaker.record_result(
+                    src, ToolResponse.success(text=f"{src} ok", data={"count": len(result)})
+                )
+                return result
             except asyncio.TimeoutError:
-                logger.warning("搜索 %s 超时（%.0fs）", src, wall); return []
+                logger.warning("搜索 %s 超时（%.0fs）", src, wall)
+                self._circuit_breaker.record_result(
+                    src, ToolResponse.error(code="timeout", message=f"{src} timeout after {wall}s")
+                )
+                return []
             except Exception as e:
-                logger.warning("搜索 %s 时出错: %s", src, str(e)); return []
+                logger.warning("搜索 %s 时出错: %s", src, str(e))
+                self._circuit_breaker.record_result(
+                    src, ToolResponse.error(code="exception", message=str(e))
+                )
+                return []
 
         results_by_src = await asyncio.gather(*[_run_one(s) for s in sources])
         all_results: List[Paper] = []
@@ -381,6 +471,8 @@ class PaperSearcher:
     def _paper_dedupe_key(paper: Paper) -> str:
         if ax := _arxiv_canonical_from_paper(paper): return f"arxiv:{ax}"
         if doi := (paper.doi or "").strip().lower(): return f"doi:{doi}"
+        if pmid := (paper.pmid or "").strip(): return f"pmid:{pmid}"
+        if pmc_id := (paper.pmc_id or "").strip().upper(): return f"pmc:{pmc_id}"
         nt = _normalize_title_for_dedupe(paper.title)
         return f"empty:{id(paper)}" if not nt else "title:" + hashlib.md5(nt.encode("utf-8")).hexdigest()
 

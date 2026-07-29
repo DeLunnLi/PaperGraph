@@ -1,7 +1,7 @@
 import { createApp } from 'vue'
 import {
-  Alert, Button, Card, Collapse, ConfigProvider, Empty, Input, Layout,
-  List, Menu, Select, Space, Spin, Table, Tag, Tooltip,
+  Alert, Button, Card, Collapse, ConfigProvider, Dropdown, Empty, Input, Layout,
+  List, Menu, Modal, Progress, Select, Space, Spin, Switch, Table, Tag, Tooltip, Upload,
 } from 'ant-design-vue'
 import 'ant-design-vue/dist/reset.css'
 import './styles/theme.css'
@@ -10,8 +10,8 @@ import router from './router'
 
 const app = createApp(App)
 app.use(router)
-const comps = [Alert, Button, Card, Collapse, ConfigProvider, Empty, Input, Layout,
-  List, Menu, Select, Space, Spin, Table, Tag, Tooltip]
+const comps = [Alert, Button, Card, Collapse, ConfigProvider, Dropdown, Empty, Input, Layout,
+  List, Menu, Modal, Progress, Select, Space, Spin, Switch, Table, Tag, Tooltip, Upload]
 comps.forEach((c) => app.use(c))
 
 // Global error handler — catches unhandled errors in component lifecycle, watchers, etc.

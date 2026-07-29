@@ -6,6 +6,7 @@ import functools
 import sqlite3
 import logging
 import re
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi import HTTPException
@@ -16,15 +17,29 @@ def safe_http_500(op_name: str, exc: Exception) -> HTTPException:
     logger.exception("%s failed", op_name, exc_info=exc)
     return HTTPException(status_code=500, detail="服务暂时不可用，请稍后重试")
 
+@contextmanager
+def route_errors(op_name: str):
+    """Wrap a route body: re-raise ``HTTPException`` as-is, convert anything else to a 500.
+
+    Replaces the repeated ``except HTTPException: raise / except Exception: raise safe_http_500(...)``
+    boilerplate in route handlers.
+    """
+    try:
+        yield
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise safe_http_500(op_name, exc)
+
 def normalize_arxiv_id(arxiv_id: str | None) -> str | None:
     if not arxiv_id:
         return None
     s = str(arxiv_id).strip()
     if not s:
         return None
-    if "v" in s and s.rsplit("v", 1)[-1].isdigit():
-        s = s.rsplit("v", 1)[0]
-    return s.lower()
+    from app.core.search.normalize import strip_arxiv_version
+
+    return strip_arxiv_version(s).lower()
 
 def parse_llm_json(text: str) -> dict[str, Any | None]:
     from app.services.search_intent.parsing import extract_json_object

@@ -9,11 +9,12 @@ from typing import Any, List
 
 from ...author import Author
 from ...paper import Paper
+from .base import register_source
 from ....utils.common import text_has_cjk
 from ..normalize import (
     _QUERY_DELIM,
-    _RE_ARXIV_VERSION_SUFFIX,
     sanitize_search_keyword_list,
+    strip_arxiv_version,
     topic_terms_excluding_venue_year,
 )
 from .source_common import json_api_headers, normalize_query_authors, pick_best_name_match
@@ -48,10 +49,10 @@ def _dblp_parse_ee_urls(ee: Any) -> tuple[str | None, str | None, str | None, st
             if aid is None:
                 m = re.search(r"arxiv/([\d.]+)", lu)
                 if m:
-                    aid = _RE_ARXIV_VERSION_SUFFIX.sub("", m.group(1))
+                    aid = strip_arxiv_version(m.group(1))
         if aid is None and "arxiv.org/abs/" in lu:
             raw = u.split("arxiv.org/abs/", 1)[-1].strip().rstrip("/")
-            aid = _RE_ARXIV_VERSION_SUFFIX.sub("", raw)
+            aid = strip_arxiv_version(raw)
 
         bl = base.lower()
         if pdf_url is None and (bl.endswith(".pdf") or "arxiv.org/pdf/" in bl):
@@ -112,6 +113,7 @@ def _dblp_venue_search_queries(venue_only: str, year_from: Any) -> list[str]:
     return out
 
 
+@register_source("dblp")
 async def search_dblp(searcher, query, max_results=10, **kwargs):
     await searcher._ensure_async_client()
     await searcher._rate_limit_async("dblp")
@@ -126,7 +128,7 @@ async def search_dblp(searcher, query, max_results=10, **kwargs):
         )
         if papers_by_author:
             break
-    if papers_by_author:
+    if papers_by_author and not (query or "").strip() and not (kwargs.get("venue") or "").strip():
         searcher._bump_stat("dblp_requests")
         return papers_by_author
     if author_names and not papers_by_author:
@@ -226,11 +228,12 @@ async def search_dblp(searcher, query, max_results=10, **kwargs):
                 ),
             ),
         )
-    except Exception:
+    except Exception as exc:
+        logger.debug("[dblp] http_max_attempts parse failed, using default 2: %s", exc, exc_info=False)
         max_attempts = 2
     query_chain = dblp_queries if venue_only else [qtext]
     dblp_req_to = max(
-        10.0,
+        2.0,
         min(
             90.0,
             float(
@@ -269,7 +272,7 @@ async def search_dblp(searcher, query, max_results=10, **kwargs):
             continue
     if not raw_hits:
         searcher._bump_stat("dblp_requests")
-        return []
+        return list(papers_by_author or [])[:max_results]
 
     raw_list = [raw_hits] if isinstance(raw_hits, dict) else list(raw_hits)
     y_min = (
@@ -294,7 +297,7 @@ async def search_dblp(searcher, query, max_results=10, **kwargs):
             if key.startswith("conf/"):
                 parts = key.split("/")
                 if len(parts) >= 3 and re.fullmatch(
-                    r"(?:19|20)\d{2}w?", parts[-1].strip().lower()
+                    r"(?:19|20)\d{2}w", parts[-1].strip().lower()
                 ):
                     continue
             title = (info.get("title") or "").strip() or "Unknown"
@@ -398,7 +401,19 @@ async def search_dblp(searcher, query, max_results=10, **kwargs):
                 },
             )
 
-    return papers
+    if papers_by_author:
+        # Keep author-PID recall as a supplement, but never let it bypass the
+        # topical/venue query path. Final pipeline deduplication merges metadata.
+        seen = {
+            ((p.doi or "").strip().lower(), (p.title or "").strip().lower())
+            for p in papers
+        }
+        for paper in papers_by_author:
+            key = ((paper.doi or "").strip().lower(), (paper.title or "").strip().lower())
+            if key not in seen:
+                papers.append(paper)
+                seen.add(key)
+    return papers[:max_results]
 
 
 async def _search_dblp_by_author_pid(searcher, author_name, max_results, kwargs):

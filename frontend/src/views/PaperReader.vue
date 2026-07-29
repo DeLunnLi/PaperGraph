@@ -1,5 +1,13 @@
 <template>
-  <div class="paper-reader">
+  <div
+    class="paper-reader"
+    :class="{
+      'paper-reader--compact': compactLayout,
+      'paper-reader--coarse-pointer': coarsePointer,
+      'paper-reader--hover-capable': hoverCapable,
+    }"
+    :data-layout="compactLayout ? 'tabs' : 'split'"
+  >
     <div class="paper-reader__toolbar">
       <a-space>
         <a-button type="link" @click="backToLibrary">← 返回文献库</a-button>
@@ -7,6 +15,10 @@
       </a-space>
       <span v-if="paper" class="paper-reader__title">{{ paper.title }}</span>
       <span v-else class="paper-reader__title paper-reader__title--placeholder">文献阅读</span>
+      <div class="paper-reader__mobile-switch" role="tablist" aria-label="阅读区域">
+        <button type="button" role="tab" :aria-selected="mobilePane === 'pdf'" :class="{ 'is-active': mobilePane === 'pdf' }" @click="mobilePane = 'pdf'">论文</button>
+        <button type="button" role="tab" :aria-selected="mobilePane === 'chat'" :class="{ 'is-active': mobilePane === 'chat' }" @click="mobilePane = 'chat'">助手</button>
+      </div>
       <a-space v-if="paper" class="paper-reader__toolbar-actions">
         <a-dropdown @click.stop>
           <a-button size="small" type="text"><CopyOutlined /> 复制引用</a-button>
@@ -23,7 +35,7 @@
     <div v-if="loadError" class="paper-reader__err">{{ loadError }}</div>
     <div v-if="pdfParsing" class="paper-reader__notice">PDF 正在解析中，论文全文内容将在稍后可用。你可先基于摘要提问。</div>
     <div ref="splitRef" class="paper-reader__split">
-      <div class="paper-reader__pane paper-reader__pane--pdf" :style="leftPaneStyle">
+      <div class="paper-reader__pane paper-reader__pane--pdf" :class="{ 'paper-reader__pane--mobile-hidden': mobilePane !== 'pdf' }" :style="leftPaneStyle">
         <PdfJsViewer
           v-if="paperId != null && pdfSrc"
           ref="pdfViewerRef"
@@ -33,7 +45,8 @@
           class="pdf-js-viewer-wrapper"
         />
         <div v-else class="paper-reader__pdf-placeholder">
-          <a-spin v-if="loadingPaper" tip="正在加载文献信息…" />
+          <a-spin v-if="acquiringPdf" tip="正在安全获取论文原文 PDF…" />
+          <a-spin v-else-if="loadingPaper" tip="正在加载文献信息…" />
           <a-empty v-else-if="loadError" description="PDF 加载失败">
             <template #description>
               <p style="color: var(--pg-text-secondary); margin-bottom: 12px;">{{ loadError }}</p>
@@ -43,10 +56,15 @@
           <a-empty v-else description="该文献尚无本地 PDF">
             <template #description>
               <p style="color: var(--pg-text-secondary); margin-bottom: 12px;">
-                可基于摘要与助手对话；可回检索/文献库重新保存以重试下载。
+                {{ pdfAcquireError || '可以立即尝试从 arXiv、DOI 或论文原文链接获取 PDF。' }}
               </p>
             </template>
-            <a-button type="link" @click="backToLibrary">返回文献库</a-button>
+            <a-space>
+              <a-button type="primary" :loading="acquiringPdf" @click="acquirePdf">获取论文 PDF</a-button>
+              <a-button v-if="paperExternalUrl(paper)" type="link" :href="paperExternalUrl(paper)!" target="_blank" rel="noopener noreferrer">
+                打开原文链接
+              </a-button>
+            </a-space>
           </a-empty>
         </div>
       </div>
@@ -54,10 +72,24 @@
         ref="dividerRef"
         class="paper-reader__divider"
         role="separator"
-        aria-label="Resize"
+        aria-label="调整论文与助手的宽度"
+        aria-orientation="vertical"
+        :aria-valuenow="dividerPercent"
+        aria-valuemin="40"
+        aria-valuemax="75"
+        tabindex="0"
+        @keydown="onDividerKeydown"
         @pointerdown="onDividerPointerDown"
       />
-      <div class="paper-reader__pane paper-reader__pane--chat" :style="rightPaneStyle">
+      <div class="paper-reader__pane paper-reader__pane--chat" :class="{ 'paper-reader__pane--mobile-hidden': mobilePane !== 'chat' }" :style="rightPaneStyle">
+        <div class="paper-reader__assistant-head">
+          <div class="paper-reader__assistant-mark"><RobotOutlined /></div>
+          <div class="paper-reader__assistant-meta">
+            <strong>论文阅读助手</strong>
+            <span>基于当前论文内容回答，并提供页码依据</span>
+          </div>
+          <span class="paper-reader__assistant-status">全文上下文</span>
+        </div>
         <div
           ref="scrollRef"
           class="paper-reader__messages"
@@ -69,7 +101,6 @@
               <RobotOutlined />
             </div>
             <div class="paper-reader__bubble paper-reader__bubble--assistant">
-              <div class="paper-reader__msg-role">论文阅读助手</div>
               <a-skeleton active :paragraph="{ rows: 3 }" :title="{ width: '60%' }" />
             </div>
           </div>
@@ -85,8 +116,8 @@
             <div v-if="m.role === 'user'" class="paper-reader__bubble paper-reader__bubble--user">
               <div class="paper-reader__msg-body">{{ m.content }}</div>
             </div>
-            <div v-else class="paper-reader__bubble paper-reader__bubble--assistant">
-              <div class="paper-reader__msg-role">论文阅读助手</div>
+              <div v-else-if="m.role === 'assistant'" class="paper-reader__bubble paper-reader__bubble--assistant">
+
               <div class="paper-reader__msg-body" v-html="renderMarkdown(normalizeAssistantText(m.content))"></div>
               <div v-if="m.citations && m.citations.length" class="paper-reader__citations">
                 <span class="paper-reader__citations-title">引用锚点</span>
@@ -155,7 +186,8 @@
             </div>
           </div>
         </div>
-        <div class="paper-reader__input">
+        <div class="paper-reader__composer">
+          <div class="paper-reader__input">
           <a-textarea
             :key="inputKey"
             v-model:value="draft"
@@ -163,11 +195,13 @@
             :auto-size="{ minRows: 1, maxRows: 6 }"
             placeholder="基于当前文献提问…"
             :disabled="sending"
-            @compositionstart="composing = true"
-            @compositionend="composing = false"
+            @compositionstart="onCompositionStart"
+            @compositionend="onCompositionEnd"
             @press-enter.exact.prevent="send"
           />
           <a-button type="primary" :loading="sending" :disabled="!draft.trim()" aria-label="发送消息" @click="send">发送</a-button>
+          </div>
+          <div class="paper-reader__composer-hint">Enter 发送 · 回答将优先引用论文正文</div>
         </div>
       </div>
     </div>
@@ -180,7 +214,8 @@ import { message } from 'ant-design-vue'
 import { RobotOutlined, CopyOutlined } from '@ant-design/icons-vue'
 import {
   getPaper,
-  getLibraryPdfHref,
+  getLibraryPdfStreamUrl,
+  ensurePaperPdf,
   postPaperReaderOpening,
   postPaperReaderChat,
   getPaperReaderHistory,
@@ -191,12 +226,19 @@ import type { PaperReaderCitation } from '@/services/api/reader'
 import type { Paper } from '@/types'
 import PdfJsViewer from '@/components/PdfJsViewer.vue'
 import { renderMarkdown } from '@/utils/markdown'
+import { paperExternalUrl, paperVenue, toAPA, toBibTeX, toPlain } from '@/utils/citation'
+import { isAbortError } from '@/utils/error'
+import { useImeGuard } from '@/composables/useImeGuard'
+import { useSplitPane } from '@/composables/useSplitPane'
 const route = useRoute()
 const router = useRouter()
 const paper = ref<Paper | null>(null)
 const loadingPaper = ref(true)
 const loadError = ref('')
 const pdfParsing = ref(false)
+const pdfStreamUrl = ref('')
+const acquiringPdf = ref(false)
+const pdfAcquireError = ref('')
 const pdfViewerRef = ref<InstanceType<typeof PdfJsViewer> | null>(null)
 const messages = ref<
   {
@@ -208,17 +250,31 @@ const messages = ref<
 >([])
 const draft = ref('')
 const sending = ref(false)
-const composing = ref(false)
+const { composing, onCompositionStart, onCompositionEnd } = useImeGuard()
 const inputKey = ref(0)
+let paperLoadSeq = 0
+const mobilePane = ref<'pdf' | 'chat'>('pdf')
 const scrollRef = ref<HTMLElement | null>(null)
 const splitRef = ref<HTMLElement | null>(null)
 const dividerRef = ref<HTMLElement | null>(null)
-const leftWidthPx = ref<number | null>(null)
-const dragging = ref(false)
-const dragPointerId = ref<number | null>(null)
-const rafPending = ref(false)
-const lastClientX = ref<number | null>(null)
+const {
+  compactLayout,
+  coarsePointer,
+  hoverCapable,
+  dragging,
+  leftPaneStyle,
+  dividerPercent,
+  onDividerPointerDown,
+  onDividerKeydown,
+  initDefaultSplitIfNeeded,
+  setup: setupSplitPane,
+  cleanup: cleanupSplitPane,
+} = useSplitPane(splitRef, dividerRef)
 const readingSession = ref<{ paperId: number; startedAtMs: number } | null>(null)
+let chatRequestSeq = 0
+let activeChatAbortController: AbortController | null = null
+let activeChatPaperId: number | null = null
+let activeAssistantPlaceholderIndex: number | null = null
 const normalizeAssistantText = (s: string): string => {
   const raw = String(s || '')
   if (raw.includes('```')) return raw.replace(/\r\n/g, '\n')
@@ -237,12 +293,9 @@ const isStandalone = computed(() => String(route.query?.standalone || '') === '1
 const hasLocalPdfForViewer = computed(
   () => !!(paper.value?.local_pdf_path && String(paper.value.local_pdf_path).trim())
 )
-const pdfSrc = computed(() => {
-  if (paperId.value == null) return ''
-  return hasLocalPdfForViewer.value ? getLibraryPdfHref(paperId.value) : ''
-})
+const pdfSrc = computed(() => pdfStreamUrl.value)
 const onPdfError = (msg: string) => {
-  loadError.value = msg || 'PDF 加载失败'
+  pdfAcquireError.value = msg || 'PDF 加载失败'
   pdfReady.value = true
   void maybeStartOpening()
 }
@@ -252,13 +305,44 @@ const onPdfLoaded = () => {
   pdfReady.value = true
   void maybeStartOpening()
 }
-const leftPaneStyle = computed(() => {
-  if (leftWidthPx.value == null) return {}
-  return { flex: `0 0 ${leftWidthPx.value}px` }
-})
 const rightPaneStyle = computed(() => ({}))
 const backToLibrary = () => {
   router.push('/library')
+}
+const resetPdfStreamUrl = () => {
+  pdfStreamUrl.value = ''
+}
+const isPaperContextCurrent = (targetPaperId: number, loadSeq?: number) => (
+  paperId.value === targetPaperId && (loadSeq == null || loadSeq === paperLoadSeq)
+)
+const loadLocalPdf = async (targetPaperId?: number) => {
+  const resolvedPaperId = targetPaperId ?? paperId.value
+  if (resolvedPaperId == null || !hasLocalPdfForViewer.value) return
+  resetPdfStreamUrl()
+  pdfStreamUrl.value = await getLibraryPdfStreamUrl(resolvedPaperId)
+}
+const acquirePdf = async (showSuccess = true, loadSeq?: number) => {
+  const targetPaperId = paperId.value
+  if (targetPaperId == null || acquiringPdf.value) return
+  acquiringPdf.value = true
+  pdfAcquireError.value = ''
+  try {
+    const ensuredPaper = await ensurePaperPdf(targetPaperId)
+    if (!isPaperContextCurrent(targetPaperId, loadSeq)) return
+    paper.value = ensuredPaper
+    await loadLocalPdf(targetPaperId)
+    if (!isPaperContextCurrent(targetPaperId, loadSeq)) return
+    if (showSuccess) message.success('PDF 已获取，正在加载原文')
+  } catch (e: unknown) {
+    if (!isPaperContextCurrent(targetPaperId, loadSeq)) return
+    pdfAcquireError.value = (e as Error).message || '未能获取论文 PDF'
+    pdfReady.value = true
+    void maybeStartOpening()
+  } finally {
+    if (isPaperContextCurrent(targetPaperId, loadSeq)) {
+      acquiringPdf.value = false
+    }
+  }
 }
 const retryLoadPaper = () => {
   loadError.value = ''
@@ -271,81 +355,12 @@ const closeTab = () => {
   } catch {
   }
 }
-const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
 const onChatWheel = (e: WheelEvent) => {
   e.stopPropagation()
 }
-const initDefaultSplitIfNeeded = () => {
-  if (leftWidthPx.value != null) return
-  const el = splitRef.value
-  if (!el) return
-  const rect = el.getBoundingClientRect()
-  if (!Number.isFinite(rect.width) || rect.width <= 0) return
-  const desiredLeft = rect.width * 0.8
-  const minSide = 320
-  const maxLeft = Math.max(minSide, rect.width - minSide)
-  leftWidthPx.value = clamp(Math.round(desiredLeft), minSide, maxLeft)
-}
-const setLeftWidthFromClientX = (clientX: number) => {
-  const el = splitRef.value
-  if (!el) return
-  const rect = el.getBoundingClientRect()
-  const minSide = 320
-  const maxLeft = Math.max(minSide, rect.width - minSide)
-  const w = clamp(clientX - rect.left, minSide, maxLeft)
-  leftWidthPx.value = w
-}
-const scheduleDragUpdate = () => {
-  if (rafPending.value) return
-  rafPending.value = true
-  requestAnimationFrame(() => {
-    rafPending.value = false
-    if (!dragging.value) return
-    if (lastClientX.value == null) return
-    setLeftWidthFromClientX(lastClientX.value)
-  })
-}
-const onDividerPointerMove = (ev: PointerEvent) => {
-  if (!dragging.value) return
-  if (dragPointerId.value != null && ev.pointerId !== dragPointerId.value) return
-  lastClientX.value = ev.clientX
-  scheduleDragUpdate()
-}
-const endDrag = () => {
-  if (!dragging.value) return
-  dragging.value = false
-  dragPointerId.value = null
-  lastClientX.value = null
-  rafPending.value = false
-  document.body.style.cursor = ''
-  document.body.style.userSelect = ''
-  window.removeEventListener('pointermove', onDividerPointerMove)
-  window.removeEventListener('pointerup', onDividerPointerUp)
-  window.removeEventListener('pointercancel', onDividerPointerUp)
-}
-const onDividerPointerUp = (ev: PointerEvent) => {
-  if (dragPointerId.value != null && ev.pointerId !== dragPointerId.value) return
-  endDrag()
-}
-const onDividerPointerDown = (ev: PointerEvent) => {
-  if (ev.button !== 0) return
-  ev.preventDefault()
-  dragging.value = true
-  dragPointerId.value = ev.pointerId
-  lastClientX.value = ev.clientX
-  setLeftWidthFromClientX(ev.clientX)
-  try {
-    dividerRef.value?.setPointerCapture(ev.pointerId)
-  } catch {
-  }
-  document.body.style.cursor = 'col-resize'
-  document.body.style.userSelect = 'none'
-  window.addEventListener('pointermove', onDividerPointerMove)
-  window.addEventListener('pointerup', onDividerPointerUp)
-  window.addEventListener('pointercancel', onDividerPointerUp)
-}
 onBeforeUnmount(() => {
-  endDrag()
+  cancelActiveChat('已取消当前提问')
+  cleanupSplitPane()
   void flushReadingSession()
 })
 const flushReadingSession = async () => {
@@ -365,9 +380,27 @@ const scrollBottom = async () => {
   const el = scrollRef.value
   if (el) el.scrollTop = el.scrollHeight
 }
+const cancelActiveChat = (reason = '已取消当前提问') => {
+  chatRequestSeq += 1
+  if (activeAssistantPlaceholderIndex != null) {
+    const msg = messages.value[activeAssistantPlaceholderIndex]
+    if (msg?.role === 'assistant' && msg.content === '正在思考…') {
+      msg.content = reason
+      msg.related_papers = undefined
+      msg.citations = undefined
+    }
+  }
+  if (activeChatAbortController) {
+    activeChatAbortController.abort()
+    activeChatAbortController = null
+  }
+  activeChatPaperId = null
+  activeAssistantPlaceholderIndex = null
+  sending.value = false
+}
 const gotoCitationPage = (page: number) => {
   if (!page || page < 1) return
-  pdfViewerRef.value?.gotoPage(page)
+  void pdfViewerRef.value?.gotoPage(page)
 }
 const mapHistoryTurns = (
   turns: { role?: string; content?: string | null; created_at?: number }[]
@@ -379,14 +412,16 @@ const mapHistoryTurns = (
       const content = role === 'assistant' ? normalizeAssistantText(String(t.content)) : String(t.content)
       return { role, content }
     })
-const ensureOpeningAndHistory = async (reloadHistory = false, showError = true) => {
+const ensureOpeningAndHistory = async (reloadHistory = false, showError = true, loadSeq?: number) => {
   if (paperId.value == null) return
   try {
     const res = await postPaperReaderOpening(paperId.value)
+    if (loadSeq != null && loadSeq !== paperLoadSeq) return
     if (!res.success || !res.opening) return
     if (res.pdf_parsing) pdfParsing.value = true
     if (reloadHistory) {
       const h = await getPaperReaderHistory(paperId.value, 200)
+      if (loadSeq != null && loadSeq !== paperLoadSeq) return
       if (h?.success && Array.isArray(h.turns) && h.turns.length > 0) {
         const restored = mapHistoryTurns(h.turns)
         if (restored.length > 0) {
@@ -412,68 +447,75 @@ const maybeStartOpening = async (reloadHistory = false, showError = true) => {
   if (paperId.value == null) return
   if (hasLocalPdfForViewer.value && !pdfReady.value) return
   openingStarted.value = true
-  void ensureOpeningAndHistory(reloadHistory, showError)
+  const loadSeq = paperLoadSeq
+  void ensureOpeningAndHistory(reloadHistory, showError, loadSeq)
 }
 const send = async () => {
   const text = draft.value.trim()
   if (!text || paperId.value == null || sending.value) return
   if (composing.value) return
+  const currentPaperId = paperId.value
+  const requestSeq = chatRequestSeq + 1
+  chatRequestSeq = requestSeq
+  const abortController = new AbortController()
+  activeChatAbortController = abortController
+  activeChatPaperId = currentPaperId
   sending.value = true
   messages.value.push({ role: 'user', content: text })
+  const assistantIdx = messages.value.push({ role: 'assistant', content: '正在思考…' }) - 1
+  activeAssistantPlaceholderIndex = assistantIdx
   draft.value = ''
   inputKey.value += 1
   await nextTick()
   await scrollBottom()
   try {
     const res = await postPaperReaderChat({
-      paper_id: paperId.value,
-      messages: messages.value.slice(0, -1),
+      paper_id: currentPaperId,
+      messages: messages.value.slice(0, -2),
       user_message: text,
-    })
+    }, { signal: abortController.signal })
+    if (chatRequestSeq !== requestSeq || activeChatPaperId !== currentPaperId || paperId.value !== currentPaperId) return
+    const target = messages.value[assistantIdx]
+    if (!target || target.role !== 'assistant') return
     if (res.success && res.reply) {
       const rp = Array.isArray((res as any).related_papers) ? ((res as any).related_papers as Paper[]) : []
       const cites = Array.isArray((res as any).citations) ? ((res as any).citations as PaperReaderCitation[]) : []
-      messages.value.push({
-        role: 'assistant',
-        content: normalizeAssistantText(res.reply),
-        related_papers: rp.length ? rp : undefined,
-        citations: cites.length ? cites : undefined,
-      })
+      target.content = normalizeAssistantText(res.reply)
+      target.related_papers = rp.length ? rp : undefined
+      target.citations = cites.length ? cites : undefined
     } else {
-      messages.value.push({ role: 'assistant', content: '（无回复）' })
+      target.content = '（无回复）'
+      target.related_papers = undefined
+      target.citations = undefined
     }
   } catch (e: unknown) {
+    const cancelled = isAbortError(e)
+    if (cancelled || chatRequestSeq !== requestSeq || activeChatPaperId !== currentPaperId || paperId.value !== currentPaperId) {
+      return
+    }
+    const target = messages.value[assistantIdx]
+    if (target?.role === 'assistant') {
+      target.content = '请求失败，请检查网络或 LLM 配置。'
+      target.related_papers = undefined
+      target.citations = undefined
+    }
     message.error((e as Error).message || '发送失败')
-    messages.value.push({ role: 'assistant', content: '请求失败，请检查网络或 LLM 配置。' })
   } finally {
-    sending.value = false
+    if (chatRequestSeq === requestSeq && activeChatAbortController === abortController) {
+      activeChatAbortController = null
+      activeChatPaperId = null
+      activeAssistantPlaceholderIndex = null
+      sending.value = false
+    }
     await scrollBottom()
   }
-}
-const paperExternalUrl = (p: Paper): string | null => {
-  if (!p) return null
-  const src = String(p.source_url || '').trim()
-  if (src && /^https?:\/\//i.test(src)) return src
-  const pdf = String(p.pdf_url || '').trim()
-  if (pdf && /^https?:\/\//i.test(pdf)) return pdf
-  let ax = String(p.arxiv_id || '').trim()
-  if (ax) {
-    ax = ax.replace(/^arxiv:/i, '').replace(/\.pdf$/i, '')
-    return `https://arxiv.org/abs/${ax}`
-  }
-  const doiRaw = String(p.doi || '').trim()
-  if (doiRaw) {
-    if (/^https?:\/\//i.test(doiRaw)) return doiRaw
-    return `https://doi.org/${doiRaw.replace(/^doi:/i, '')}`
-  }
-  return null
 }
 const relatedPaperMetaLine = (p: Paper): string => {
   const parts: string[] = []
   const names = (p.authors || []).map((a: { name?: string }) => a?.name).filter(Boolean) as string[]
   if (names.length) parts.push(names.slice(0, 4).join(', ') + (names.length > 4 ? '…' : ''))
   if (p.year != null) parts.push(String(p.year))
-  const j = String((p as { journal?: string }).journal || (p as { venue?: string }).venue || '').trim()
+  const j = paperVenue(p)
   if (j) parts.push(j)
   let s = parts.join(' · ')
   if (s.length > 140) s = `${s.slice(0, 137)}…`
@@ -488,43 +530,11 @@ const saveRelatedPaperToLibrary = async (p: Paper) => {
     message.error((e as Error).message || '保存失败')
   }
 }
-function escapeBib(s: string): string {
-  return String(s || '').replace(/([&%$#_{}~^\\])/g, '\\$1')
-}
-function generateBibTeX(p: Paper): string {
-  const authors = (p.authors || []).map((a) => a.name).filter(Boolean).join(' and ')
-  const year = p.year ?? ''
-  const key = `${(p.authors?.[0]?.name || 'unknown').split(' ').pop()?.toLowerCase() || 'unknown'}${year}`
-  const lines = [`@article{${key},`]
-  if (authors) lines.push(`  author = {${escapeBib(authors)}},`)
-  if (p.title) lines.push(`  title = {${escapeBib(p.title)}},`)
-  if (p.journal || p.venue) lines.push(`  journal = {${escapeBib(String(p.journal || p.venue))}},`)
-  if (year) lines.push(`  year = {${year}},`)
-  if (p.doi) lines.push(`  doi = {${p.doi}},`)
-  if (p.arxiv_id) lines.push(`  eprint = {${p.arxiv_id}},`)
-  if (p.source_url) lines.push(`  url = {${p.source_url}},`)
-  lines.push('}')
-  return lines.join('\n')
-}
-function generateAPA(p: Paper): string {
-  const authors = (p.authors || []).map((a) => a.name).filter(Boolean)
-  const authorStr = authors.length > 0
-    ? authors.length <= 3
-      ? authors.join(', ') + (authors.length === 2 ? ' & ' : authors.length === 1 ? '' : ', & ')
-      : authors[0] + ', et al.'
-    : ''
-  const year = p.year ? `(${p.year})` : ''
-  const title = p.title || ''
-  const venue = p.journal || p.venue || ''
-  const doi = p.doi ? ` https://doi.org/${p.doi}` : ''
-  return [authorStr, year, title, venue, doi].filter(Boolean).join('. ') + '.'
-}
 const onCopyCitation = async ({ key }: { key: string }) => {
   if (!paper.value) return
-  let text = ''
-  if (key === 'bibtex') text = generateBibTeX(paper.value)
-  else if (key === 'apa') text = generateAPA(paper.value)
-  else text = `${paper.value.title || ''}\n${(paper.value.authors || []).map((a) => a.name).join(', ')}\n${paper.value.journal || paper.value.venue || ''} ${paper.value.year ?? ''}\n${paper.value.doi ? 'DOI: ' + paper.value.doi : ''}`
+  const text = key === 'bibtex' ? toBibTeX(paper.value)
+    : key === 'apa' ? toAPA(paper.value)
+    : toPlain(paper.value)
   try {
     await navigator.clipboard.writeText(text)
     message.success(`已复制${key === 'bibtex' ? ' BibTeX' : key === 'apa' ? ' APA' : ''}引用`)
@@ -533,10 +543,14 @@ const onCopyCitation = async ({ key }: { key: string }) => {
   }
 }
 const loadPaper = async () => {
+  const loadSeq = ++paperLoadSeq
+  cancelActiveChat('已取消上一篇论文的提问')
   await flushReadingSession()
   loadingPaper.value = true
   loadError.value = ''
   paper.value = null
+  resetPdfStreamUrl()
+  pdfAcquireError.value = ''
   pdfReady.value = false
   openingStarted.value = false
   messages.value = []
@@ -550,8 +564,25 @@ const loadPaper = async () => {
   readingSession.value = { paperId: paperId.value, startedAtMs: Date.now() }
   try {
     paper.value = await getPaper(paperId.value)
+    if (loadSeq !== paperLoadSeq) return
+    if (hasLocalPdfForViewer.value) {
+      try {
+        await loadLocalPdf(paperId.value)
+        if (loadSeq !== paperLoadSeq) return
+      } catch (e: unknown) {
+        if (loadSeq !== paperLoadSeq) return
+        pdfAcquireError.value = (e as Error).message || 'PDF 加载失败'
+      }
+    } else if (paperExternalUrl(paper.value)) {
+      // Keep the left pane in an explicit loading state until PDF acquisition
+      // succeeds or fails; otherwise the assistant appears while the paper pane
+      // briefly claims that no PDF exists.
+      await acquirePdf(false, loadSeq)
+      if (loadSeq !== paperLoadSeq) return
+    }
     try {
       const h = await getPaperReaderHistory(paperId.value, 200)
+      if (loadSeq !== paperLoadSeq) return
       if (h?.success && Array.isArray(h.turns) && h.turns.length > 0) {
         const restored = mapHistoryTurns(h.turns)
         if (restored.length > 0) {
@@ -567,9 +598,12 @@ const loadPaper = async () => {
       void maybeStartOpening(true, false)
     }
   } catch (e: unknown) {
+    if (loadSeq !== paperLoadSeq) return
     loadError.value = (e as Error).message || '加载失败'
   } finally {
-    loadingPaper.value = false
+    if (loadSeq === paperLoadSeq) {
+      loadingPaper.value = false
+    }
   }
 }
 watch(
@@ -580,25 +614,35 @@ watch(
   { immediate: true }
 )
 onMounted(() => {
-  initDefaultSplitIfNeeded()
+  setupSplitPane()
+})
+onBeforeUnmount(() => {
+  cancelActiveChat('已取消当前提问')
+  resetPdfStreamUrl()
 })
 </script>
 <style scoped>
 .paper-reader {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  min-height: 100vh;
+  gap: 0;
+  flex: 1 1 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   color-scheme: light;
 }
 .paper-reader__toolbar {
   display: flex;
   align-items: center;
   gap: 12px;
-  flex-wrap: wrap;
-  padding: 14px 20px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  min-height: 60px;
+  padding: 10px 20px;
   border-bottom: 1px solid var(--pg-divider);
-  background: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.9);
   backdrop-filter: var(--pg-glass-blur-light);
   -webkit-backdrop-filter: var(--pg-glass-blur-light);
 }
@@ -608,7 +652,10 @@ onMounted(() => {
 }
 .paper-reader__title {
   flex: 1;
-  min-width: 120px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--pg-font-serif);
   font-weight: 600;
   font-size: 16px;
@@ -618,6 +665,9 @@ onMounted(() => {
 }
 .paper-reader__toolbar-actions {
   flex-shrink: 0;
+}
+.paper-reader__mobile-switch {
+  display: none;
 }
 .paper-reader__err {
   color: #cf1322;
@@ -637,7 +687,8 @@ onMounted(() => {
   flex-direction: row;
   flex: 1;
   min-height: 0;
-  height: calc(100vh - 56px);
+  height: auto;
+  overflow: hidden;
 }
 .paper-reader__pane {
   flex: 1;
@@ -668,9 +719,22 @@ onMounted(() => {
   background: var(--pg-divider);
   transition: background 0.15s ease;
 }
-.paper-reader__divider:hover::before {
+.paper-reader--hover-capable .paper-reader__divider:hover::before,
+.paper-reader__divider:focus-visible::before {
   background: var(--pg-primary);
-  opacity: 0.4;
+  opacity: 0.55;
+}
+.paper-reader__divider:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--pg-primary) 45%, transparent);
+  outline-offset: -2px;
+}
+.paper-reader--coarse-pointer:not(.paper-reader--compact) .paper-reader__divider {
+  flex-basis: 14px;
+}
+.paper-reader--coarse-pointer:not(.paper-reader--compact) .paper-reader__divider::before {
+  left: 5px;
+  width: 4px;
+  border-radius: 999px;
 }
 .pdf-js-viewer-wrapper {
   flex: 1;
@@ -679,22 +743,74 @@ onMounted(() => {
 }
 .paper-reader__pane--chat {
   min-height: 0;
-  max-height: calc(100vh - 56px);
+  max-height: none;
   position: relative;
   display: flex;
   flex-direction: column;
-  background: var(--pg-bg-soft);
+  background: var(--pg-bg);
   overflow: hidden;
+}
+.paper-reader__assistant-head {
+  flex: 0 0 auto;
+  min-height: 68px;
+  padding: 13px 18px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  background: rgba(255, 255, 255, 0.95);
+  border-bottom: 1px solid var(--pg-divider);
+  backdrop-filter: var(--pg-glass-blur-light);
+}
+.paper-reader__assistant-mark {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  color: var(--pg-accent);
+  font-size: 18px;
+  background: var(--pg-primary-soft);
+  border: 1px solid #dfe3ff;
+  box-shadow: var(--pg-shadow-sm);
+}
+.paper-reader__assistant-meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.paper-reader__assistant-meta strong {
+  color: var(--pg-text-heading);
+  font-size: 14px;
+  font-weight: 650;
+}
+.paper-reader__assistant-meta span {
+  color: var(--pg-text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.paper-reader__assistant-status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid #dfe3ff;
+  border-radius: var(--pg-radius-pill);
+  color: var(--pg-accent);
+  background: var(--pg-primary-softer);
+  font-size: 10px;
+  font-weight: 650;
 }
 .paper-reader__messages {
   flex: 1;
   min-height: 0;
-  max-height: calc(100vh - 56px - 60px - 16px);
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 18px;
+  padding: 26px 22px 34px;
   background: transparent;
-  margin: 12px;
+  margin: 0;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
@@ -717,10 +833,13 @@ onMounted(() => {
   display: none;
 }
 .paper-reader__msg {
-  margin-bottom: 18px;
+  margin-bottom: 26px;
   display: flex;
   gap: 10px;
   align-items: flex-start;
+}
+.paper-reader__msg--assistant {
+  max-width: 100%;
 }
 .paper-reader__msg--user {
   justify-content: flex-end;
@@ -737,10 +856,10 @@ onMounted(() => {
   margin-top: 2px;
 }
 .paper-reader__avatar--assistant {
-  background: var(--pg-surface);
-  border: 1px solid var(--pg-border);
+  background: var(--pg-primary-soft);
+  border: 1px solid #dfe3ff;
   color: var(--pg-primary);
-  box-shadow: var(--pg-shadow-xs);
+  box-shadow: none;
 }
 .paper-reader__bubble {
   max-width: 82%;
@@ -751,16 +870,18 @@ onMounted(() => {
   min-width: 0;
 }
 .paper-reader__bubble--user {
-  background: var(--pg-primary);
+  background: #6668e8;
   color: var(--pg-text-inverse);
   border-radius: 14px 14px 4px 14px;
   box-shadow: 0 4px 14px rgba(30, 27, 75, 0.18);
 }
 .paper-reader__bubble--assistant {
-  background: var(--pg-surface);
-  border: 1px solid var(--pg-border);
-  border-radius: 4px 14px 14px 14px;
-  box-shadow: var(--pg-shadow-sm);
+  max-width: calc(100% - 42px);
+  padding: 2px 4px 2px 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
   color: var(--pg-text);
 }
 .paper-reader__msg-role {
@@ -770,9 +891,15 @@ onMounted(() => {
   font-weight: 500;
 }
 .paper-reader__msg-body {
-  line-height: 1.6;
+  line-height: 1.72;
   font-size: 14px;
   color: var(--pg-text);
+}
+.paper-reader__bubble--assistant .paper-reader__msg-body :deep(p:first-child) {
+  margin-top: 0;
+}
+.paper-reader__bubble--assistant .paper-reader__msg-body :deep(p:last-child) {
+  margin-bottom: 0;
 }
 .paper-reader__bubble--user .paper-reader__msg-body {
   color: var(--pg-text-inverse);
@@ -965,23 +1092,44 @@ onMounted(() => {
   height: auto;
   line-height: 1.35;
 }
+.paper-reader__composer {
+  flex: 0 0 auto;
+  padding: 12px 16px 10px;
+  background: rgba(255, 255, 255, 0.96);
+  border-top: 1px solid var(--pg-divider);
+}
 .paper-reader__input {
   display: flex;
   gap: 8px;
-  padding: 12px 14px;
+  padding: 7px;
   background: var(--pg-surface);
-  border-top: 1px solid var(--pg-divider);
-  align-items: center;
+  border: 1px solid var(--pg-border);
+  border-radius: 16px;
+  align-items: flex-end;
+  box-shadow: 0 8px 26px rgba(12,10,29,.07);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.paper-reader__input:focus-within {
+  border-color: #c7ccf8;
+  box-shadow: 0 0 0 3px rgba(67, 56, 202, 0.08);
+}
+.paper-reader__composer-hint {
+  padding: 5px 4px 0;
+  color: var(--pg-text-tertiary);
+  font-size: 10px;
+  text-align: right;
 }
 .paper-reader__input :deep(.ant-input) {
   flex: 1;
-  border-radius: var(--pg-radius);
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  border: 0;
+  border-radius: 8px;
+  box-shadow: none;
+  transition: none;
 }
 .paper-reader__input :deep(.ant-input:focus),
 .paper-reader__input :deep(textarea.ant-input:focus) {
-  border-color: var(--pg-primary);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+  border-color: transparent;
+  box-shadow: none;
 }
 .paper-reader__input :deep(textarea.ant-input) {
   min-height: 36px;
@@ -990,13 +1138,101 @@ onMounted(() => {
   resize: none;
   padding: 6px 12px;
 }
-@media (max-width: 900px) {
-  .paper-reader__split {
-  flex-direction: column;
-  gap: 12px;
+@media (max-width: 760px) {
+  .paper-reader__toolbar {
+    padding: 8px 10px;
   }
-  .paper-reader__divider {
+  .paper-reader__title {
+    font-size: 14px;
+  }
+  .paper-reader__pane {
+    min-width: 0;
+  }
+  .paper-reader__pane--pdf {
+    flex: 1 1 auto !important;
+    border-right: 1px solid var(--pg-divider);
+  }
+  .paper-reader__pane--chat {
+    flex: 0 0 clamp(300px, 42vw, 334px);
+    min-width: 280px;
+  }
+}
+.paper-reader--compact .paper-reader__toolbar {
+  gap: 6px;
+  padding-inline: 8px;
+}
+.paper-reader--compact .paper-reader__toolbar > :first-child {
+  flex-shrink: 0;
+}
+.paper-reader--compact .paper-reader__title,
+.paper-reader--compact .paper-reader__toolbar-actions {
   display: none;
+}
+.paper-reader--compact .paper-reader__mobile-switch {
+  display: inline-flex;
+  margin-left: auto;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--pg-bg-soft);
+  border: 1px solid var(--pg-divider);
+}
+.paper-reader--compact .paper-reader__mobile-switch button {
+  min-width: 52px;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--pg-text-secondary);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+.paper-reader--compact .paper-reader__mobile-switch button.is-active {
+  color: var(--pg-primary);
+  background: var(--pg-surface);
+  box-shadow: var(--pg-shadow-xs);
+  font-weight: 650;
+}
+.paper-reader--compact .paper-reader__divider {
+  display: none;
+}
+.paper-reader--compact .paper-reader__pane--pdf,
+.paper-reader--compact .paper-reader__pane--chat {
+  flex: 1 1 100% !important;
+  width: 100%;
+  min-width: 0;
+}
+.paper-reader--compact .paper-reader__pane--mobile-hidden {
+  display: none;
+}
+@media (max-width: 560px) {
+  .paper-reader__toolbar {
+    gap: 6px;
+    padding-inline: 8px;
+  }
+  .paper-reader__toolbar > :first-child {
+    flex-shrink: 0;
+  }
+  .paper-reader__title {
+    display: none;
+  }
+  .paper-reader__toolbar-actions {
+    display: none;
+  }
+  .paper-reader__assistant-status {
+    display: none;
+  }
+  .paper-reader__assistant-head {
+    padding-inline: 12px;
+  }
+  .paper-reader__messages {
+    padding: 18px 12px 22px;
+  }
+  .paper-reader__bubble {
+    max-width: 90%;
+  }
+  .paper-reader__bubble--assistant {
+    max-width: calc(100% - 40px);
   }
 }
 </style>

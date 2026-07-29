@@ -1,22 +1,61 @@
-
 import logging
 import os
+import re as _re
+from functools import wraps
 from typing import Any
+from collections.abc import Callable
 
-from .client import LLMClient, ChatResult
+from hello_agents import HelloAgentsLLM
+from app.exceptions import ConfigError
 from ...settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# 历史背景：原本此处有两个 monkey-patch ——
-#   (a) _patch_hello_agents_llm_openai_chat_roles  角色归一化（summary/developer）
-#   (b) _patch_deepseek_disable_thinking           DeepSeek thinking 禁用
-# 现已由 LLMClient._normalize_messages / LLMClient._merge_extra 收敛，不再打补丁。
+# Provider quirks：部分 OpenAI 兼容模型会默认启用 thinking。PaperGraph 的意图
+# 解析、排序和 JSON 抽取更看重低延迟与稳定结构，默认关闭推理模式；可通过
+# LLM_DISABLE_THINKING=0 显式保留供应商默认行为。
 # ----------------------------------------------------------------------
 
-_llm_instance: LLMClient | None = None
+def _patch_provider_disable_thinking() -> None:
+    marker = "_papergraph_provider_thinking_disabled"
+    if getattr(HelloAgentsLLM, marker, False):
+        return
 
+    def _should_disable_thinking(llm_self: Any) -> bool:
+        configured = str(os.getenv("LLM_DISABLE_THINKING", "1") or "1").strip().lower()
+        if configured in {"0", "false", "no", "off"}:
+            return False
+        adapter = getattr(llm_self, "_adapter", None)
+        base = str(getattr(adapter, "base_url", "") or "")
+        model = str(getattr(llm_self, "model", "") or getattr(adapter, "model", "") or "")
+        return bool(_re.search(r"deepseek|aigc\.sankuai\.com", base, _re.I) or _re.search(r"^glm-5(?:$|[-.])", model, _re.I))
+
+    def _wrap(orig: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(orig)
+        def inner(self: Any, *args: Any, **kwargs: Any) -> Any:
+            if _should_disable_thinking(self):
+                kwargs = dict(kwargs)
+                extra = dict(kwargs.get("extra_body") or {})
+                if "thinking" not in extra:
+                    extra["thinking"] = {"type": "disabled"}
+                kwargs["extra_body"] = extra
+            return orig(self, *args, **kwargs)
+
+        return inner
+
+    HelloAgentsLLM.invoke = _wrap(HelloAgentsLLM.invoke)
+    if hasattr(HelloAgentsLLM, "invoke_with_tools"):
+        HelloAgentsLLM.invoke_with_tools = _wrap(HelloAgentsLLM.invoke_with_tools)
+    for _async_name in ("ainvoke", "async_invoke"):
+        if hasattr(HelloAgentsLLM, _async_name):
+            setattr(HelloAgentsLLM, _async_name, _wrap(getattr(HelloAgentsLLM, _async_name)))
+    setattr(HelloAgentsLLM, marker, True)
+    logger.debug("HelloAgentsLLM: patched invoke* to disable thinking mode for configured providers")
+
+_patch_provider_disable_thinking()
+
+_llm_instance: HelloAgentsLLM | None = None
 
 def _maybe_disable_proxy_for_llm(base_url: str) -> None:
     url = (base_url or "").strip()
@@ -98,7 +137,7 @@ def _sync_env_from_settings() -> None:
     if not os.getenv("LLM_MODEL_ID") and not os.getenv("OPENAI_MODEL") and s.openai_model:
         os.environ["LLM_MODEL_ID"] = s.openai_model
 
-def get_llm() -> LLMClient:
+def get_llm() -> HelloAgentsLLM:
     global _llm_instance
     if _llm_instance is None:
 
@@ -117,15 +156,10 @@ def get_llm() -> LLMClient:
                 model = s.openai_model
 
         if not api_key:
-            raise RuntimeError("LLM 未配置：请设置 LLM_API_KEY（或在 backend/.env 中配置）")
+            raise ConfigError("LLM 未配置：请设置 LLM_API_KEY（或在 backend/.env 中配置）",
+                              code="llm_not_configured")
 
         _maybe_disable_proxy_for_llm(base_url)
-
-        # 与原 HelloAgentsLLM 行为一致：支持 LLM_TIMEOUT env，默认 60s。
-        try:
-            timeout = int(os.getenv("LLM_TIMEOUT", "60"))
-        except ValueError:
-            timeout = 60
 
         kw = {}
         if model:
@@ -134,14 +168,14 @@ def get_llm() -> LLMClient:
             kw["api_key"] = api_key
         if base_url:
             kw["base_url"] = base_url
-        kw["timeout"] = timeout
 
         logger.info("🔧 正在初始化 LLM...")
         logger.info("   Model: %s", model or "default")
         logger.info("   Base URL: %s", base_url or "default")
 
-        _llm_instance = LLMClient(**kw)
+        _llm_instance = HelloAgentsLLM(**kw)
         logger.info("✅ LLM 已初始化")
         logger.info("   实际模型: %s", getattr(_llm_instance, "model", "") or "unknown")
+
         logger.info("   Provider: %s", getattr(_llm_instance, "provider", None) or "unknown")
     return _llm_instance

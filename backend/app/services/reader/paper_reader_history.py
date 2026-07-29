@@ -9,7 +9,7 @@ from ...utils.common import exec_sql
 
 def ensure_tables(db_path: str) -> None:
     exec_sql(db_path,
-        "CREATE TABLE IF NOT EXISTS paper_reader_turns(id INTEGER PRIMARY KEY AUTOINCREMENT,paper_id INTEGER NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL,metadata TEXT)",
+        "CREATE TABLE IF NOT EXISTS paper_reader_turns(id INTEGER PRIMARY KEY AUTOINCREMENT,paper_id INTEGER NOT NULL,user_id INTEGER NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL,metadata TEXT)",
         "CREATE INDEX IF NOT EXISTS idx_paper_reader_turns_paper ON paper_reader_turns(paper_id,created_at)",
     )
     # Migration: add metadata column if missing
@@ -18,6 +18,9 @@ def ensure_tables(db_path: str) -> None:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(paper_reader_turns)").fetchall()]
             if "metadata" not in cols:
                 conn.execute("ALTER TABLE paper_reader_turns ADD COLUMN metadata TEXT")
+            if "user_id" not in cols:
+                conn.execute("ALTER TABLE paper_reader_turns ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reader_turns_user_paper ON paper_reader_turns(user_id,paper_id,created_at)")
     except Exception:
         pass
 
@@ -32,7 +35,7 @@ def _conn(db_path: str, *, row_factory=None):
     finally:
         conn.close()
 
-def append_turn(db_path: str, *, paper_id: int, role: str, content: str, metadata: str | None = None) -> None:
+def append_turn(db_path: str, *, paper_id: int, user_id: int, role: str, content: str, metadata: str | None = None) -> None:
     ensure_tables(db_path)
     role2 = (role or "").strip().lower()
     if role2 not in ("user", "assistant"):
@@ -43,14 +46,15 @@ def append_turn(db_path: str, *, paper_id: int, role: str, content: str, metadat
     now = int(time.time())
     with _conn(db_path) as conn:
         conn.execute(
-            "INSERT INTO paper_reader_turns(paper_id,role,content,created_at,metadata) VALUES(?,?,?,?,?)",
-            (int(paper_id), role2, text, now, metadata),
+            "INSERT INTO paper_reader_turns(paper_id,user_id,role,content,created_at,metadata) VALUES(?,?,?,?,?,?)",
+            (int(paper_id), int(user_id), role2, text, now, metadata),
         )
 
 def prepend_turn(
     db_path: str,
     *,
     paper_id: int,
+    user_id: int,
     role: str,
     content: str,
     before_created_at: int,
@@ -70,17 +74,17 @@ def prepend_turn(
         ts = now - 1
     with _conn(db_path) as conn:
         conn.execute(
-            "INSERT INTO paper_reader_turns(paper_id,role,content,created_at) VALUES(?,?,?,?)",
-            (int(paper_id), role2, text, ts),
+            "INSERT INTO paper_reader_turns(paper_id,user_id,role,content,created_at) VALUES(?,?,?,?,?)",
+            (int(paper_id), int(user_id), role2, text, ts),
         )
 
-def ensure_opening_turn(db_path: str, *, paper_id: int, opening_text: str) -> None:
+def ensure_opening_turn(db_path: str, *, paper_id: int, user_id: int, opening_text: str) -> None:
     op = (opening_text or "").strip()
     if not op:
         return
-    turns = list_turns(db_path, paper_id=int(paper_id), limit=5)
+    turns = list_turns(db_path, paper_id=int(paper_id), user_id=user_id, limit=5)
     if not turns:
-        append_turn(db_path, paper_id=int(paper_id), role="assistant", content=op)
+        append_turn(db_path, paper_id=int(paper_id), user_id=user_id, role="assistant", content=op)
         return
     first = turns[0]
     r0 = (first.get("role") or "").strip().lower()
@@ -92,8 +96,8 @@ def ensure_opening_turn(db_path: str, *, paper_id: int, opening_text: str) -> No
         try:
             with _conn(db_path) as conn:
                 conn.execute(
-                    "UPDATE paper_reader_turns SET content=? WHERE paper_id=? AND role='assistant' ORDER BY created_at ASC LIMIT 1",
-                    (op, int(paper_id)),
+                    "UPDATE paper_reader_turns SET content=? WHERE paper_id=? AND user_id=? AND role='assistant' ORDER BY created_at ASC LIMIT 1",
+                    (op, int(paper_id), int(user_id)),
                 )
         except Exception:
             pass
@@ -103,7 +107,7 @@ def ensure_opening_turn(db_path: str, *, paper_id: int, opening_text: str) -> No
             ts0 = int(first.get("created_at") or 0)
         except Exception:
             ts0 = int(time.time())
-        prepend_turn(db_path, paper_id=int(paper_id), role="assistant", content=op, before_created_at=ts0)
+        prepend_turn(db_path, paper_id=int(paper_id), user_id=user_id, role="assistant", content=op, before_created_at=ts0)
         return
 
 def list_turns(db_path: str, *, paper_id: int, limit: int = 200, user_id: int | None = None) -> list[dict[str, str | None]]:

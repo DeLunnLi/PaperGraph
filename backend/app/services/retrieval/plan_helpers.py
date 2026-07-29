@@ -96,13 +96,4 @@ def should_supplement_from_proceedings_site(plan: "ResolvedSearchPlan") -> bool:
     )
 
 
-def should_supplement_from_intent_dict(intent: dict[str, Any]) -> bool:
-    venues = [str(v).strip() for v in (intent.get("venues") or []) if str(v).strip()]
-    if not venues:
-        return False
-    yf, yt = intent.get("year_from"), intent.get("year_to")
-    try:
-        pinned = yf is not None and yt is not None and int(yf) == int(yt)
-    except (TypeError, ValueError):
-        pinned = False
-    return pinned and bool(intent.get("main_conference_proceedings_only")) and tavily_configured()
+

@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 from typing import TYPE_CHECKING
+
+from ..embedding.embedding_service import cosine_similarity, embed_texts, embedding_enabled
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ...core.paper import Paper as LitPaper
@@ -120,19 +126,65 @@ def calculate_semantic_relevance(
     return min(score, 1.0)
 
 
+def _paper_embedding_text(paper: "LitPaper") -> str:
+    title = " ".join(str(getattr(paper, "title", "") or "").split())[:500]
+    abstract = " ".join(str(getattr(paper, "abstract", "") or "").split())[:3500]
+    keywords = ", ".join(str(item).strip() for item in (getattr(paper, "keywords", []) or [])[:12] if str(item).strip())
+    return f"Title: {title}\nKeywords: {keywords}\nAbstract: {abstract}".strip()
+
+
 def rank_by_semantic_relevance(
     papers: list["LitPaper"],
     query: str,
     *,
     keywords: list[str] | None = None,
+    target_titles: list[str] | None = None,
     top_k: int | None = None,
+    use_embeddings: bool = True,
 ) -> list[tuple["LitPaper", float]]:
-    """Rank papers by semantic relevance, return (paper, score) tuples."""
-    scored = [
-        (p, calculate_semantic_relevance(p, query, keywords=keywords))
+    """Rank papers with lexical signals plus optional embedding similarity.
+
+    Embeddings are a soft ranking signal only. Any endpoint failure falls back to
+    deterministic lexical scoring so search availability never depends on it.
+    """
+    lexical = [calculate_semantic_relevance(p, query, keywords=keywords) for p in papers]
+    normalized_targets = {
+        _normalize_text(title) for title in (target_titles or []) if _normalize_text(title)
+    }
+    exact_title = [
+        bool(normalized_targets and _normalize_text(getattr(p, "title", None)) in normalized_targets)
         for p in papers
     ]
-    scored.sort(key=lambda x: x[1], reverse=True)
+    # Citation authority is only a tie-breaker gated by topical evidence. This
+    # helps seminal papers survive source noise without allowing famous but
+    # unrelated papers to outrank an exact topical match.
+    citation_logs = [math.log1p(max(0, int(getattr(p, "citations", 0) or 0))) for p in papers]
+    max_citation_log = max(citation_logs, default=0.0)
+    scores = [
+        lex
+        + (0.10 * (cit_log / max_citation_log) * min(1.0, lex / 0.20) if max_citation_log else 0.0)
+        + (1.0 if exact else 0.0)
+        for lex, cit_log, exact in zip(lexical, citation_logs, exact_title)
+    ]
+    if papers and use_embeddings and embedding_enabled():
+        try:
+            expanded_query = " ".join([query, *(keywords or [])]).strip()
+            vectors = embed_texts([expanded_query, *(_paper_embedding_text(p) for p in papers)])
+            query_vector = vectors[0]
+            semantic = [max(0.0, cosine_similarity(query_vector, vector)) for vector in vectors[1:]]
+            # Keep exact lexical evidence influential while letting cross-language
+            # and synonymous matches surface through the embedding signal.
+            scores = [
+                0.35 * lex + 0.65 * sem
+                + (0.08 * (cit_log / max_citation_log) * min(1.0, lex / 0.20) if max_citation_log else 0.0)
+                + (1.0 if exact else 0.0)
+                for lex, sem, cit_log, exact in zip(lexical, semantic, citation_logs, exact_title)
+            ]
+        except Exception as exc:
+            logger.warning("embedding_ranking_fallback: %s", type(exc).__name__)
+
+    scored = list(zip(papers, scores))
+    scored.sort(key=lambda item: item[1], reverse=True)
     if top_k:
         return scored[:top_k]
     return scored

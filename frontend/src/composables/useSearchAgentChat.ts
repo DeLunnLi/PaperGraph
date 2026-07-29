@@ -1,5 +1,5 @@
 import { nextTick, type Ref } from 'vue'
-import { searchAgentChatStream, type SearchAgentStreamEvent } from '@/services/api'
+import { SearchAgentCancelledError, searchAgentChatStream, type SearchAgentStreamEvent } from '@/services/api'
 type ToolCall = {
   name: string
   status: 'running' | 'success' | 'error'
@@ -33,6 +33,7 @@ interface UseSearchAgentChatOptions {
   ensureCurrentConversationId: () => string
   scrollToBottom: () => void
   onConversationDirty?: () => void
+  onRequestStateChange?: (active: boolean) => void
 }
 export function useSearchAgentChat({
   messages,
@@ -43,10 +44,56 @@ export function useSearchAgentChat({
   ensureCurrentConversationId,
   scrollToBottom,
   onConversationDirty,
+  onRequestStateChange,
 }: UseSearchAgentChatOptions) {
+  let activeRequestSeq = 0
+  let activeAbortController: AbortController | null = null
+  let activeAssistantIndex: number | null = null
+
+  const finishActiveRequest = (requestSeq: number) => {
+    if (activeRequestSeq !== requestSeq) return
+    activeAbortController = null
+    activeAssistantIndex = null
+    isLoading.value = false
+    onRequestStateChange?.(false)
+  }
+
+  const abortActiveRequest = () => {
+    if (activeAssistantIndex != null) {
+      const msg = messages.value[activeAssistantIndex]
+      if (msg) {
+        msg.content = '已取消本次搜索'
+        msg.timestamp = Date.now()
+        msg.isError = true
+        msg.results = undefined
+        msg.total = 0
+        if (msg.searchSteps?.length) {
+          msg.searchSteps.forEach((step: SearchStep) => {
+            if (step.status === 'running') step.status = 'error'
+          })
+        }
+      }
+    }
+    activeRequestSeq += 1
+    if (activeAbortController) {
+      activeAbortController.abort()
+      activeAbortController = null
+    }
+    activeAssistantIndex = null
+    if (isLoading.value) {
+      isLoading.value = false
+      onRequestStateChange?.(false)
+    }
+    onConversationDirty?.()
+  }
+
   const sendMessage = async () => {
     const input = userInput.value.trim()
     if (!input || isLoading.value) return
+    const requestSeq = activeRequestSeq + 1
+    activeRequestSeq = requestSeq
+    const abortController = new AbortController()
+    activeAbortController = abortController
     ensureCurrentConversationId()
     userInput.value = ''
     await nextTick()
@@ -60,11 +107,13 @@ export function useSearchAgentChat({
     await nextTick()
     userInput.value = ''
     isLoading.value = true
+    onRequestStateChange?.(true)
     const pIdx = messages.value.push({
       role: 'assistant', content: '正在搜索文献…', timestamp: Date.now(),
       toolCalls: [], results: [], total: 0, isError: false,
       searchSteps: [], deepSubQueries: [],
     }) - 1
+    activeAssistantIndex = pIdx
     scrollToBottom()
     try {
       const req = {
@@ -87,6 +136,7 @@ export function useSearchAgentChat({
         }
       }
       const applyStreamEvent = (ev: SearchAgentStreamEvent) => {
+        if (activeRequestSeq !== requestSeq) return
         const msg = messages.value[pIdx]
         if (!msg) return
         const steps = ensureSteps(msg)
@@ -157,7 +207,8 @@ export function useSearchAgentChat({
           msg.total = 0
         }
       }
-      const data = await searchAgentChatStream(req, applyStreamEvent)
+      const data = await searchAgentChatStream(req, applyStreamEvent, { signal: abortController.signal })
+      if (activeRequestSeq !== requestSeq) return
       const msg = messages.value[pIdx]
       if (!msg) return
       if (data.success) {
@@ -180,6 +231,9 @@ export function useSearchAgentChat({
         msg.total = 0
       }
     } catch (error: any) {
+      if (error instanceof SearchAgentCancelledError || activeRequestSeq !== requestSeq) {
+        return
+      }
       const errText = String(error?.message || '请稍后重试')
       if (messages.value[pIdx]) {
         const msg = messages.value[pIdx]
@@ -199,11 +253,11 @@ export function useSearchAgentChat({
         })
       }
     } finally {
+      finishActiveRequest(requestSeq)
       userInput.value = ''
-      isLoading.value = false
       onConversationDirty?.()
       scrollToBottom()
     }
   }
-  return { sendMessage }
+  return { sendMessage, abortActiveRequest }
 }

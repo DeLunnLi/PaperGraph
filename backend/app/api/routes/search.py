@@ -26,7 +26,7 @@ from ...services.retrieval.search_plan import ResolvedSearchPlan
 from ...services.retrieval.search_pipeline import run_search_pipeline_async
 from ...services.retrieval.deep_search_pipeline import run_deep_search_pipeline_async
 from ..tool_events import ToolCallTracker, sse_pack
-from ..deps import check_rate_limit
+from ..deps import check_rate_limit, require_user
 from ...settings import get_settings
 
 router = APIRouter(prefix="/papers", tags=["智能搜索"])
@@ -161,7 +161,7 @@ async def _run_search_agent_core(
 ) -> SearchAgentResponse:
     tool_calls: List[ToolCallInfo] = []
 
-    intent = agent.understand_intent(merged_query, request.mode)
+    intent = await anyio.to_thread.run_sync(agent.understand_intent, merged_query, request.mode)
     with track_tool_call(tool_calls, "understand_intent", {"query": merged_query}) as tc:
         tc.result_summary = f"sort={intent.sort}, venues={intent.venues}, yf={intent.year_from}, kw={intent.keywords}"
 
@@ -192,10 +192,32 @@ async def _run_search_agent_core(
                 total=len(papers),
             )
         pip = await run_search_pipeline_async(searcher=searcher, plan=plan, max_results=mr)
-        tc.result_summary = f"ranked={len(pip.ranked or [])}"
+        tc.result_summary = (
+            f"ranked={len(pip.ranked or [])} method={pip.ranking_method} "
+            f"sources={pip.metadata.get('ranked_by_source', {})}"
+        )
 
     papers = litpapers_to_api_papers(rp.paper for rp in (pip.ranked or []))
-    prefix = f"为您找到 {len(papers)} 篇论文。" if papers else "未找到相关论文。"
+    if papers:
+        source_names = "、".join(sorted(str(key) for key in (pip.metadata.get("ranked_by_source") or {}).keys()))
+        rank_labels = {
+            "llm_rank": "Friday 模型精排",
+            "hybrid_semantic": "Friday 嵌入与词法混合排序",
+            "adaptive_semantic": "自适应语义排序",
+            "semantic_fallback_timeout": "Friday 嵌入语义降级排序",
+            "recall_fallback": "召回顺序降级",
+            "recall_fallback_timeout": "召回顺序超时降级",
+            "rrf_llm": "RRF融合 + Friday 模型精排",
+            "rrf_only": "RRF融合排序",
+            "deterministic_venue_browse": "会议论文权威性排序",
+            "empty": "无候选论文",
+        }
+        rank_label = rank_labels.get(pip.ranking_method, pip.ranking_method)
+        prefix = f"为您找到 {len(papers)} 篇论文。排序：{rank_label}。"
+        if source_names:
+            prefix += f" 结果来源：{source_names}。"
+    else:
+        prefix = "未找到相关论文。"
 
     pipeline_err = last_pipeline_tool_error(tool_calls)
     if not papers and pipeline_err:
@@ -218,7 +240,14 @@ async def _run_search_agent_core(
     return SearchAgentResponse(
         success=True,
         response=body,
-        search_params=_search_params_from_intent(intent, mode=request.mode),
+        search_params=_search_params_from_intent(
+            intent,
+            mode=request.mode,
+            ranking_method=pip.ranking_method,
+            sources=list((pip.metadata.get("ranked_by_source") or {}).keys()),
+            effective_query=pip.effective_query,
+            fallback_used=bool(pip.metadata.get("fallbacks")),
+        ),
         tool_calls=normalize_tool_calls(tool_calls),
         papers=papers,
         total=len(papers),
@@ -253,6 +282,7 @@ async def search_agent_chat_stream(
     fastapi_request: Request,
     request: SearchAgentMessage,
     searcher=Depends(get_searcher),
+    user: dict = Depends(require_user),
 ):
     check_rate_limit(fastapi_request.client.host if fastapi_request.client else "unknown", max_requests=10)
     async def gen():

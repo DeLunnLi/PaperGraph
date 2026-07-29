@@ -9,8 +9,12 @@ from urllib.parse import urlparse
 
 import requests
 
-from .conference_landing_pdf import fetch_pdf_url_from_html_page
+from .conference_landing_pdf import fetch_pdf_url_from_html_page, is_safe_public_http_url, safe_public_get
 from .paper import Paper
+
+# ── SSRF / size guards ────────────────────────────────────────
+_MAX_PDF_BYTES = 200 * 1024 * 1024   # 200 MiB hard ceiling
+_MAX_REDIRECTS = 5
 
 _log = logging.getLogger(__name__)
 
@@ -53,7 +57,7 @@ def _pdf_download_candidates(paper: Paper, email: str) -> list[str]:
 
     def _push(u: str | None) -> None:
         s = (u or "").strip()
-        if s and s.lower().startswith(("http://", "https://")):
+        if s and is_safe_public_http_url(s):
             low = s.lower()
             if low not in seen:
                 seen.add(low)
@@ -172,7 +176,7 @@ def resolve_paper_pdf_url(paper: Paper, email: str = "") -> str | None:
             mail = (email or "").strip()
             ua = f"PaperGraph/0.3 (mailto:{mail})" if mail else "PaperGraph/0.3"
             headers = {"User-Agent": ua, "Accept": "application/pdf"}
-            with requests.get(doi_u, timeout=30, headers=headers, allow_redirects=True, stream=True) as r:
+            with safe_public_get(doi_u, timeout=30, headers=headers, stream=True) as r:
                 if r.status_code == 200 and r.headers.get("content-type", "").startswith("application/pdf"):
                     return doi_u
         except Exception:
@@ -195,17 +199,32 @@ def download_paper_pdf_to_path(paper: Paper, dest_abspath: str, email: str = "")
             os.makedirs(os.path.dirname(dest_abspath) or ".", exist_ok=True)
 
         for url in urls:
+            if not is_safe_public_http_url(url):
+                _log.warning("SSRF blocked: %s", url)
+                continue
             tmp = dest_abspath + ".part"
             try:
                 headers = _headers_for_pdf_get(url, paper, email)
-                with requests.get(url, timeout=90, stream=True, headers=headers, allow_redirects=True) as r:
+                with safe_public_get(url, timeout=90, headers=headers, stream=True) as r:
                     if r.status_code != 200:
                         continue
 
+                    # Enforce size ceiling while streaming
+                    total = 0
                     with open(tmp, "wb") as f:
                         for chunk in r.iter_content(chunk_size=65536):
                             if chunk:
+                                total += len(chunk)
+                                if total > _MAX_PDF_BYTES:
+                                    _log.warning("PDF exceeded %d MiB, aborting", _MAX_PDF_BYTES // (1024 * 1024))
+                                    break
                                 f.write(chunk)
+                        else:
+                            # completed without break → size OK
+                            pass
+                        if total > _MAX_PDF_BYTES:
+                            _cleanup_temp_file(tmp)
+                            continue
 
                 if os.path.getsize(tmp) < 256 or not _file_looks_like_pdf(tmp):
                     _cleanup_temp_file(tmp)

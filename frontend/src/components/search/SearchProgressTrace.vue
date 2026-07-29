@@ -1,19 +1,35 @@
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+
 interface SearchStep {
   name: string
   label: string
   status: 'running' | 'done' | 'error'
   detail?: string
 }
-defineProps<{
+
+const props = defineProps<{
   steps: SearchStep[]
   subQueries?: string[]
   loading?: boolean
 }>()
+
 const activeKey = ref<string[]>(['trace'])
-watchEffect(() => {
-  // Auto-expand while loading, auto-collapse when done
+const hasError = computed(() => props.steps.some((step) => step.status === 'error'))
+const headerIcon = computed(() => {
+  if (props.loading) return '⟳'
+  if (hasError.value) return '✗'
+  return '✓'
 })
+const headerLabel = computed(() => {
+  if (props.loading) return '搜索进行中'
+  if (hasError.value) return '搜索已中断'
+  return '搜索路径'
+})
+
+watch([() => props.loading, hasError], ([loading, error]) => {
+  activeKey.value = loading || error ? ['trace'] : []
+}, { immediate: true })
 </script>
 
 <template>
@@ -22,15 +38,14 @@ watchEffect(() => {
       <a-collapse-panel key="trace">
         <template #header>
           <span class="trace-header">
-            <span class="trace-header__icon" :class="{ 'trace-header__icon--spin': loading }">
-              {{ loading ? '⟳' : '✓' }}
+            <span class="trace-header__icon" :class="{ 'trace-header__icon--spin': loading, 'trace-header__icon--error': hasError && !loading }">
+              {{ headerIcon }}
             </span>
-            <span class="trace-header__label">{{ loading ? '搜索进行中' : '搜索路径' }}</span>
+            <span class="trace-header__label">{{ headerLabel }}</span>
             <span v-if="subQueries?.length" class="trace-header__count">{{ subQueries.length }} 个子问题</span>
           </span>
         </template>
 
-        <!-- Sub-queries (deep search) -->
         <div v-if="subQueries?.length" class="trace-subqueries">
           <div class="trace-subqueries__title">分解的子问题：</div>
           <div class="trace-subqueries__list">
@@ -40,7 +55,6 @@ watchEffect(() => {
           </div>
         </div>
 
-        <!-- Step timeline -->
         <div class="trace-steps">
           <div
             v-for="(step, i) in steps"
@@ -64,10 +78,6 @@ watchEffect(() => {
     </a-collapse>
   </div>
 </template>
-
-<script lang="ts">
-import { ref, watchEffect } from 'vue'
-</script>
 
 <style scoped>
 .search-trace {
@@ -93,6 +103,9 @@ import { ref, watchEffect } from 'vue'
 .trace-header__icon--spin {
   animation: pg-spin 1s linear infinite;
   color: var(--pg-primary);
+}
+.trace-header__icon--error {
+  color: #ef4444;
 }
 @keyframes pg-spin {
   from { transform: rotate(0deg); }
@@ -211,6 +224,9 @@ import { ref, watchEffect } from 'vue'
 }
 .trace-step--done .trace-step__label {
   color: var(--pg-text-secondary);
+}
+.trace-step--error .trace-step__label {
+  color: #dc2626;
 }
 .trace-step__detail {
   display: block;

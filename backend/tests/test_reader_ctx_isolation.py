@@ -6,7 +6,8 @@ Verifies:
    recommendation pagination survives) and increments for the same paper_id.
 3. _prune_reco_ref_offset bounds memory by evicting old entries.
 4. _llm_chat is stateless — no _history accumulation (the original concurrency
-   bug, now fixed by architecture: SimpleAgent replaced by stateless llm.chat).
+   bug, now fixed: classify/interpreter go through stateless HelloAgentsLLM.invoke,
+   and the reader tool-loop uses a per-request SimpleAgent via _new_reader_agent).
 """
 from __future__ import annotations
 
@@ -91,8 +92,8 @@ def test_prune_noop_when_under_cap():
 
 def test_llm_chat_is_stateless():
     """The original concurrency bug: a shared SimpleAgent accumulated _history
-    across runs (0->2->4). The fix removed SimpleAgent entirely — _llm_chat is
-    stateless, so each call is independent (no history to contaminate)."""
+    across runs (0->2->4). The fix: classify/interpreter go through stateless
+    HelloAgentsLLM.invoke, so each call is independent (no history to contaminate)."""
     from app.agents.paper_analysis_agent import PaperAnalysisAgent
 
     agent = PaperAnalysisAgent.__new__(PaperAnalysisAgent)
@@ -102,7 +103,7 @@ def test_llm_chat_is_stateless():
     class _StubLLM:
         model = "stub-model"
 
-        def chat(self, messages, **kw):
+        def invoke(self, messages, **kw):
             calls.append([dict(m) for m in messages])
             return type("_R", (), {"content": "stub-reply"})()
 
@@ -120,16 +121,24 @@ def test_llm_chat_is_stateless():
     assert not any(k.startswith("_history") for k in vars(agent))
 
 
-def test_build_reader_tools_returns_four_specs():
-    """_build_reader_tools 返回 4 个 ToolSpec（reader 的 4 个工具），无需 LLM 即可构造。"""
+def test_new_reader_agent_has_four_tools():
+    """_new_reader_agent 每请求新建 SimpleAgent，注册 4 个 reader 工具，无需 LLM key 即可构造。
+
+    hello-agents Config 默认 auto-register Skill/Task/TodoWrite/DevLog 内置工具，
+    故 registry 除 4 个 reader 工具外还会包含这些 —— 这里只断言 4 个 reader 工具齐备。
+    """
     from app.agents.paper_analysis_agent import PaperAnalysisAgent
+    from hello_agents import SimpleAgent
 
     agent = PaperAnalysisAgent.__new__(PaperAnalysisAgent)
+    agent.llm = type("_StubLLM", (), {"model": "stub"})()
     ctx = ReaderCtx(snap={"paper_id": 1})
-    tools = agent._build_reader_tools(ctx)
-    names = [t.name for t in tools]
-    assert names == ["reader_paper_lookup", "reader_reference_lookup",
-                     "reader_pdf_structure", "reader_pdf_table"]
+    reader = agent._new_reader_agent(ctx)
+    assert isinstance(reader, SimpleAgent)
+    names = reader.tool_registry.list_tools()
+    for expected in ("reader_paper_lookup", "reader_reference_lookup",
+                     "reader_pdf_structure", "reader_pdf_table"):
+        assert expected in names, f"{expected} missing from {names}"
 
 
 if __name__ == "__main__":

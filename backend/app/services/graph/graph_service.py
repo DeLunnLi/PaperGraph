@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from ...api.repo import RelationRepository
 from ...models.schemas import GraphEdge, GraphNode, LibraryGraphResponse
 from ...services.papers.papers_helpers import graph_author_label, graph_author_node_id
+from ...utils.common import safe_http_500
 from .kg_relations import ensure_tables
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ def build_library_graph(
     include_keywords: bool,
     relation_edge_limit: int,
     focus_paper_id: int | None,
+    user_id: int,
 ) -> LibraryGraphResponse:
     try:
         ensure_tables(db.db_path)
@@ -29,13 +31,17 @@ def build_library_graph(
         focus_id = int(focus_paper_id) if focus_paper_id is not None else None
 
         if focus_id is not None:
-            fp = db.get_paper_by_id(int(focus_id))
+            fp = db.get_paper_by_id(int(focus_id), user_id=user_id)
             papers = [fp] if fp else []
             if not papers:
                 return LibraryGraphResponse(success=True, nodes=[], edges=[])
             paper_ids_in_view: set[int] = {int(focus_id)}
         else:
-            papers = db.get_all_papers(limit=int(limit), order_by="created_at DESC")
+            papers = db.get_all_papers(
+                limit=int(limit),
+                order_by="created_at DESC",
+                user_id=user_id,
+            )
             cat = (category or "").strip() or None
             if cat:
                 papers = [p for p in papers if (getattr(p, "category", None) or "").strip() == cat]
@@ -180,4 +186,4 @@ def build_library_graph(
         return LibraryGraphResponse(success=True, nodes=list(nodes.values()), edges=list(edges.values()))
     except Exception as e:
         logger.exception("graph_service.build_library_graph_failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_500("build_library_graph", e)

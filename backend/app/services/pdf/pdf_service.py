@@ -21,9 +21,9 @@ def _iter_file(path: str):
                 break
             yield chunk
 
-def build_library_pdf_response(*, paper_id: int, request: Request, db_path: str, logger: Any) -> Response:
+def build_library_pdf_response(*, paper_id: int, user_id: int, request: Request, db_path: str, logger: Any) -> Response:
     from ...core.storage import PaperDatabase
-    path = PaperDatabase(db_path).get_library_pdf_abspath(paper_id)
+    path = PaperDatabase(db_path).get_library_pdf_abspath(paper_id, user_id=user_id)
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="本地 PDF 不存在")
 
@@ -38,7 +38,16 @@ def build_library_pdf_response(*, paper_id: int, request: Request, db_path: str,
         )
         raise HTTPException(status_code=403, detail="非法文件路径")
 
-    st = os.stat(path)
+    try:
+        with open(real_path, "rb") as probe:
+            if probe.read(5) != b"%PDF-":
+                raise HTTPException(status_code=422, detail="本地文件不是有效的 PDF")
+    except HTTPException:
+        raise
+    except OSError:
+        raise HTTPException(status_code=404, detail="本地 PDF 暂时不可读")
+
+    st = os.stat(real_path)
     file_size = int(st.st_size)
     mtime = int(st.st_mtime)
     range_header = request.headers.get("range") or request.headers.get("Range")
@@ -55,11 +64,10 @@ def build_library_pdf_response(*, paper_id: int, request: Request, db_path: str,
     common_headers: dict[str, str] = {
         "Content-Disposition": f"inline; filename=paper-{int(paper_id)}.pdf",
         "Accept-Ranges": "bytes",
-        "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "*",
         "Access-Control-Expose-Headers": "Accept-Ranges, Content-Range, Content-Length, ETag, Last-Modified",
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": "private, max-age=300",
         "ETag": etag,
         "Last-Modified": last_modified,
     }
@@ -77,7 +85,7 @@ def build_library_pdf_response(*, paper_id: int, request: Request, db_path: str,
 
     if not range_header:
         return StreamingResponse(
-            _iter_file(path),
+            _iter_file(real_path),
             media_type="application/pdf",
             headers={**common_headers, "Content-Length": str(file_size)},
         )
@@ -105,7 +113,7 @@ def build_library_pdf_response(*, paper_id: int, request: Request, db_path: str,
     length = end - start + 1
 
     def iter_range():
-        with open(path, "rb") as f:
+        with open(real_path, "rb") as f:
             f.seek(start)
             remaining = length
             while remaining > 0:

@@ -26,13 +26,15 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ....models.schemas import PaperSource
 from ....settings import get_settings
 from ...author import Author
 from ...paper import Paper
+from ..normalize import strip_arxiv_version
+from .base import register_source
+from .source_common import safe_int
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +68,14 @@ def _resolve_storage_path() -> str:
 def _parse_year(published: str | None) -> int | None:
     if not published:
         return None
-    try:
-        return int(published[:4])
-    except (TypeError, ValueError):
-        return None
+    return safe_int(published[:4])
 
 
 def _clean_arxiv_id(raw: str | None) -> str | None:
     if not raw:
         return None
-    aid = str(raw).strip()
     # MCP returns ids like "2412.16738v1"; strip the version suffix.
-    aid = re.sub(r"v\d+$", "", aid, flags=re.I)
+    aid = strip_arxiv_version(raw)
     return aid or None
 
 
@@ -163,7 +161,8 @@ async def _mcp_search_papers(query: str, max_results: int, **kwargs: Any) -> Lis
         await stack.aclose()
 
 
-async def _search_mcp_src(searcher: Any, query: str, max_results: int, **kwargs: Any) -> List[Paper]:
+@register_source("mcp")
+async def _search_mcp_src(searcher: Any, query: str, max_results: int = 10, **kwargs: Any) -> List[Paper]:
     """MCP arxiv source — opt-in. Returns Papers with source=mcp."""
     if not _mcp_enabled() or not (query or "").strip():
         return []

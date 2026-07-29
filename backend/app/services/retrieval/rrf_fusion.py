@@ -25,6 +25,12 @@ def _paper_identity(p: LitPaper) -> str:
     doi = (p.doi or "").strip().lower()
     if doi:
         return f"doi:{doi}"
+    pmid = (p.pmid or "").strip()
+    if pmid:
+        return f"pmid:{pmid}"
+    pmc_id = (p.pmc_id or "").strip().upper()
+    if pmc_id:
+        return f"pmc:{pmc_id}"
     nt = _normalize_title_for_dedupe(p.title)
     if not nt:
         return f"empty:{id(p)}"
@@ -55,42 +61,6 @@ def rrf_fuse(
         for rank, paper in enumerate(lst, start=1):
             key = identity(paper)
             scores[key] += 1.0 / (k + rank)
-            if key not in best:
-                best[key] = paper
-
-    fused = sorted(
-        ((best[key], score) for key, score in scores.items()),
-        key=lambda x: x[1],
-        reverse=True,
-    )
-    return fused
-
-
-def rrf_fuse_weighted(
-    ranked_lists: list[tuple[list[LitPaper], float]],
-    *,
-    k: int = 60,
-    identity_fn: Callable[[LitPaper], str] | None = None,
-) -> list[tuple[LitPaper, float]]:
-    """Weighted RRF - allows giving different weights to different source lists.
-
-    Args:
-        ranked_lists: list of (papers, weight) tuples. Each paper list is already ranked.
-        k: smoothing constant (default 60).
-        identity_fn: function to derive stable paper identity.
-
-    Returns:
-        [(paper, rrf_score)] sorted by rrf_score descending.
-    """
-    identity = identity_fn or _paper_identity
-    scores: dict[str, float] = defaultdict(float)
-    best: dict[str, LitPaper] = {}
-
-    for lst, weight in ranked_lists:
-        for rank, paper in enumerate(lst, start=1):
-            key = identity(paper)
-            # Weighted contribution: weight * 1/(k + rank)
-            scores[key] += weight * (1.0 / (k + rank))
             if key not in best:
                 best[key] = paper
 

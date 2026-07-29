@@ -33,21 +33,11 @@ export async function getDailyPapers(body?: {
 }): Promise<DailyPapersApiResponse> {
   const cached = await getCachedDailyPapers().catch(() => null)
 
-  if (!body?.force_refresh) {
-    if (dailyPayloadCount(cached) > 0) return cached as DailyPapersApiResponse
-  }
-
-  // Show cache while a forced refresh runs in the background.
-  if (body?.force_refresh && dailyPayloadCount(cached) > 0) {
-    apiClient.post<DailyPapersApiResponse>('/api/papers/daily', body, {
-      timeout: DAILY_PAPERS_REQUEST_MS,
-    }).then(postRes => {
-      if (dailyPayloadCount(postRes.data) > 0) {
-        return postRes.data
-      }
-      return null
-    }).catch(() => null)
-    return { ...(cached as DailyPapersApiResponse), message: '正在后台刷新…当前显示最近缓存。' }
+  if (!body?.force_refresh && cached) {
+    // A successful empty response is still a valid daily result. Reusing it
+    // prevents every page visit from repeating the expensive external fetch;
+    // users can explicitly request a refresh from the empty state.
+    return cached
   }
 
   try {

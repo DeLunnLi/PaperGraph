@@ -12,7 +12,11 @@ logger = logging.getLogger(__name__)
 from app.core.search.paper_searcher import _sanitize_author_list_for_query
 
 
-from .arxiv_normalization import sanitize_arxiv_categories, sanitize_arxiv_id_list
+from .arxiv_normalization import (
+    extract_arxiv_ids_from_text,
+    sanitize_arxiv_categories,
+    sanitize_arxiv_id_list,
+)
 from ...utils.common import dedupe_strings_preserve_order
 from .venue_phrases import sanitize_venue_tokens
 
@@ -141,6 +145,8 @@ def search_intent_from_dict(d: dict[str, Any]) -> SearchIntent:
     intent.main_conference_proceedings_only = bool(
         _intent_flag_merge(flags, d, "main_conference_proceedings_only")
     )
+    domain = str(_intent_flag_merge(flags, d, "research_domain") or "general").strip().lower()
+    intent.research_domain = domain if domain in {"general", "computer_science", "biomedical"} else "general"
     ut = _intent_use_tavily_raw(nested, flags, d)
     intent.use_tavily = None if ut is None else bool(ut)
 
@@ -293,15 +299,17 @@ def build_intent_retry_correction_hint(
     return " ".join(parts)
 
 
-def apply_llm_intent_hygiene(intent: SearchIntent, _raw_user_text: str | None = None) -> None:
-    """Clean parsed fields without changing venue/year semantics."""
-    _ = _raw_user_text
+def apply_llm_intent_hygiene(intent: SearchIntent, raw_user_text: str | None = None) -> None:
+    """Clean parsed fields and preserve deterministic explicit identifiers."""
     if intent is None:
         return
     intent.venues = sanitize_venue_tokens(list(intent.venues or []))[:8]
     intent.keywords = dedupe_strings_preserve_order(list(intent.keywords or []), max_n=16)
     intent.arxiv_categories = sanitize_arxiv_categories(list(intent.arxiv_categories or []))
-    intent.arxiv_id_list = sanitize_arxiv_id_list(list(intent.arxiv_id_list or []))
+    explicit_ids = extract_arxiv_ids_from_text(raw_user_text)
+    intent.arxiv_id_list = sanitize_arxiv_id_list(
+        list(intent.arxiv_id_list or []) + explicit_ids
+    )
 
 
 __all__ = [

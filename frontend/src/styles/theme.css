@@ -4,20 +4,21 @@
  */
 :root {
   /* 品牌强调 —— 深靛色系,克制不浮夸 */
-  --pg-primary: #1e1b4b;
-  --pg-primary-hover: #312e81;
+  --pg-primary: #4f46e5;
+  --pg-primary-hover: #4338ca;
   --pg-primary-soft: #eef2ff;
-  --pg-primary-softer: #f5f6ff;
-  --pg-accent: #4338ca;
-  --pg-gradient: linear-gradient(135deg, #1e1b4b 0%, #4338ca 100%);
+  --pg-primary-softer: #f7f7ff;
+  --pg-accent: #6366f1;
+  --pg-gradient: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
 
   /* 背景 —— 亮色高级底,非纯白 */
-  --pg-bg: #fafafa;
-  --pg-bg-soft: #f6f6f8;
+  --pg-bg: #f8f8fb;
+  --pg-bg-soft: #f3f4f8;
   --pg-surface: #ffffff;
   --pg-sider: rgba(255, 255, 255, 0.72);
-  --pg-bg-aurora: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.08), transparent),
-                  radial-gradient(ellipse 60% 50% at 100% 100%, rgba(67, 56, 202, 0.05), transparent);
+  --pg-bg-aurora: radial-gradient(ellipse 70% 46% at 44% -18%, rgba(99, 102, 241, 0.12), transparent 72%),
+                  radial-gradient(ellipse 54% 42% at 105% 96%, rgba(67, 56, 202, 0.07), transparent 72%),
+                  radial-gradient(ellipse 42% 32% at -8% 72%, rgba(129, 140, 248, 0.05), transparent 70%);
 
   /* 玻璃拟态容器 */
   --pg-glass-bg: rgba(255, 255, 255, 0.55);
@@ -35,8 +36,8 @@
   --pg-text-heading: #0c0a1d;
 
   /* 边框 —— 细线分割,极淡 */
-  --pg-border: #ebebee;
-  --pg-border-soft: #f2f2f4;
+  --pg-border: #e5e6ed;
+  --pg-border-soft: #eff0f5;
   --pg-divider: rgba(24, 24, 27, 0.06);
 
   /* 圆角 */
@@ -49,8 +50,8 @@
   /* 阴影 —— 柔和层次,不硬边 */
   --pg-shadow-xs: 0 1px 2px rgba(12, 10, 29, 0.03);
   --pg-shadow-sm: 0 1px 3px rgba(12, 10, 29, 0.04), 0 1px 2px rgba(12, 10, 29, 0.02);
-  --pg-shadow-md: 0 4px 20px rgba(12, 10, 29, 0.06);
-  --pg-shadow-lg: 0 12px 40px rgba(12, 10, 29, 0.08);
+  --pg-shadow-md: 0 8px 28px rgba(12, 10, 29, 0.065), 0 2px 8px rgba(12, 10, 29, 0.025);
+  --pg-shadow-lg: 0 20px 60px rgba(12, 10, 29, 0.11), 0 4px 16px rgba(12, 10, 29, 0.04);
   --pg-shadow-primary: 0 8px 24px rgba(67, 56, 202, 0.18);
 
   /* 字体 —— 衬线标题 + 无衬线正文,学术感 */
@@ -67,6 +68,8 @@
   --pg-space-lg: 16px;
   --pg-space-xl: 24px;
   --pg-space-2xl: 40px;
+  --pg-content-max: 1240px;
+  --pg-transition: 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 html,
@@ -85,6 +88,27 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  text-rendering: optimizeLegibility;
+}
+
+button,
+a,
+input,
+textarea,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+button,
+a {
+  touch-action: manipulation;
+}
+*:focus-visible {
+  outline: 2px solid rgba(67, 56, 202, 0.55);
+  outline-offset: 2px;
+}
+::selection {
+  background: rgba(67, 56, 202, 0.16);
+  color: var(--pg-text-heading);
 }
 
 /* 全局滚动条柔化 */
@@ -119,4 +143,36 @@ body {
   border: 1px solid var(--pg-border);
   border-radius: var(--pg-radius-lg);
   box-shadow: var(--pg-shadow-xs);
+}
+
+.ant-btn,
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-select-selector {
+  transition: border-color var(--pg-transition), box-shadow var(--pg-transition), background var(--pg-transition), color var(--pg-transition) !important;
+}
+.ant-btn-primary {
+  background: #5b5ce2;
+  border-color: #5b5ce2;
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.14) !important;
+}
+.ant-btn-primary:hover:not(:disabled) {
+  background: #4f46d8 !important;
+  border-color: #4f46d8 !important;
+  box-shadow: 0 6px 16px rgba(79, 70, 229, 0.2) !important;
+  transform: translateY(-1px);
+}
+.ant-tag {
+  border-radius: var(--pg-radius-pill);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -1,5 +1,16 @@
 <template>
   <div class="library-page">
+    <section class="library-overview">
+      <div>
+        <div class="library-overview__eyebrow">PERSONAL RESEARCH ARCHIVE</div>
+        <h1>我的文献库</h1>
+        <p>集中管理已收藏的论文，快速检索、批量导出并进入深度阅读。</p>
+      </div>
+      <div class="library-overview__stat">
+        <strong>{{ pagination.total }}</strong>
+        <span>篇论文</span>
+      </div>
+    </section>
     <a-layout class="library-layout">
       <a-layout-sider width="200" theme="light" class="library-sider">
         <div class="library-sider__title">文献库分类</div>
@@ -33,7 +44,7 @@
         <a-card :bordered="false" class="library-card">
           <template #title>
             <div class="library-card__title">
-              <span class="library-card__title-text">我的文献库</span>
+              <span class="library-card__title-text">文献列表</span>
               <a-tag color="processing">{{ selectedCategoryLabel }}</a-tag>
             </div>
           </template>
@@ -60,6 +71,9 @@
               </a-button>
               <a-button size="small" danger :disabled="selectedRowKeys.length === 0" :loading="batchDeleting" @click="batchDelete">
                 删除 ({{ selectedRowKeys.length }})
+              </a-button>
+              <a-button type="primary" class="library-import-button" @click="openImportDialog">
+                <UploadOutlined /> 本地导入
               </a-button>
               <a-button :loading="loading" @click="load">刷新</a-button>
             </a-space>
@@ -127,16 +141,99 @@
         </a-card>
       </a-layout-content>
     </a-layout>
+
+    <a-modal
+      v-model:open="importDialogOpen"
+      title="导入本地论文"
+      width="600px"
+      :footer="null"
+      :mask-closable="!importing"
+      :closable="!importing"
+      class="library-import-modal"
+    >
+      <div class="import-dialog">
+        <div class="import-dialog__intro">
+          <div class="import-dialog__icon"><InboxOutlined /></div>
+          <div>
+            <strong>上传 PDF，自动补全论文信息</strong>
+            <p>系统会解析标题、DOI、arXiv ID 和页数，并尝试从 Crossref、arXiv、OpenAlex 等来源补全作者、摘要与期刊信息。</p>
+          </div>
+        </div>
+        <a-upload-dragger
+          :file-list="importFileList"
+          :before-upload="beforePdfUpload"
+          :custom-request="handlePdfUpload"
+          :multiple="false"
+          :max-count="1"
+          accept="application/pdf,.pdf"
+          :disabled="importing"
+          @remove="removeImportFile"
+        >
+          <p class="ant-upload-drag-icon"><FilePdfOutlined /></p>
+          <p class="ant-upload-text">点击或拖拽一篇 PDF 到这里</p>
+          <p class="ant-upload-hint">单文件最大 200 MiB；加密或损坏的 PDF 无法导入</p>
+        </a-upload-dragger>
+        <div class="import-dialog__category">
+          <span><strong>导入到</strong><small>可指定当前分类，也可以交给系统自动归类</small></span>
+          <a-select v-model:value="importCategory" :disabled="importing" style="min-width: 220px">
+            <a-select-option value="__auto__">自动选择分类</a-select-option>
+            <a-select-option v-for="option in importCategoryOptions" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </a-select-option>
+          </a-select>
+        </div>
+        <div class="import-dialog__options">
+          <label class="import-option">
+            <span><strong>联网补全元数据</strong><small>通过 DOI、arXiv ID 或标题查找可信来源</small></span>
+            <a-switch v-model:checked="importAutoEnrich" :disabled="importing" aria-label="联网补全元数据" />
+          </label>
+          <label class="import-option">
+            <span><strong>自动归类</strong><small>根据论文内容放入合适的文献库分类</small></span>
+            <a-switch v-model:checked="importAutoClassify" :disabled="importing || importCategory !== '__auto__'" aria-label="自动归类" />
+          </label>
+        </div>
+        <div v-if="importing" class="import-processing" role="status" aria-live="polite">
+          <a-progress v-if="importStage === 'uploading'" :percent="importProgress" status="active" />
+          <a-spin v-else size="small" />
+          <span>{{ importStage === 'uploading' ? `正在上传 PDF（${importProgress}%）` : '文件已上传，正在解析并补全论文信息…' }}</span>
+          <a-button type="link" danger size="small" @click="cancelImport">取消</a-button>
+        </div>
+        <a-alert v-if="importError" type="error" show-icon :message="importError" role="alert">
+          <template #action><a-button size="small" @click="resetImportState">选择其他文件</a-button></template>
+        </a-alert>
+        <div v-if="importResult" class="import-result" role="status" aria-live="polite">
+          <div class="import-result__status">{{ importResultStatus }}</div>
+          <strong>{{ importResult.paper.title }}</strong>
+          <div class="import-result__meta">
+            <a-tag color="green">{{ importResult.page_count }} 页</a-tag>
+            <a-tag color="blue">{{ importSourceLabel(importResult.metadata_source) }}</a-tag>
+            <a-tag v-if="importResult.detected_doi">DOI 已识别</a-tag>
+            <a-tag v-if="importResult.detected_arxiv_id">arXiv 已识别</a-tag>
+          </div>
+          <div class="import-result__actions">
+            <a-button @click="resetImportState">继续导入</a-button>
+            <a-button v-if="importResult.paper.id" type="primary" @click="goReader(importResult.paper)">开始阅读</a-button>
+            <a-button @click="importDialogOpen = false">完成</a-button>
+          </div>
+        </div>
+      </div>
+    </a-modal>
   </div>
 </template>
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { message, Modal } from 'ant-design-vue'
-import { ExportOutlined } from '@ant-design/icons-vue'
-import { getLibrary, getLibraryCategoryFolders, deletePaper } from '@/services/api'
+import { message, Modal, Upload } from 'ant-design-vue'
+import type { UploadFile, UploadProps } from 'ant-design-vue'
+import type { UploadRequestOption } from 'ant-design-vue/es/vc-upload/interface'
+import { ExportOutlined, FilePdfOutlined, InboxOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { getLibrary, getLibraryCategoryFolders, deletePaper, importLocalPdf } from '@/services/api'
+import type { LocalPdfImportResponse } from '@/services/api/papers'
 import apiClient from '@/services/api/client'
 import type { LibraryCategoryFolder, Paper } from '@/types'
+import { toBibTeX } from '@/utils/citation'
+import { downloadBlob, downloadText, todayStamp } from '@/utils/download'
+import { isAbortError } from '@/utils/error'
 const router = useRouter()
 const papers = ref<Paper[]>([])
 const folders = ref<LibraryCategoryFolder[]>([])
@@ -148,6 +245,107 @@ const searchQuery = ref('')
 const selectedRowKeys = ref<string[]>([])
 const batchDeleting = ref(false)
 const exporting = ref(false)
+const importDialogOpen = ref(false)
+const importing = ref(false)
+const importProgress = ref(0)
+const importStage = ref<'idle' | 'uploading' | 'processing'>('idle')
+const importError = ref('')
+let libraryLoadSeq = 0
+const importCategory = ref('__auto__')
+const importAutoEnrich = ref(true)
+const importAutoClassify = ref(true)
+const importFileList = ref<UploadFile[]>([])
+const importResult = ref<LocalPdfImportResponse | null>(null)
+let importAbortController: AbortController | null = null
+const importCategoryOptions = computed(() => folders.value.flatMap((folder) => [
+  { value: folder.category, label: folder.category },
+  ...(folder.children || []).map((child) => ({ value: child.category, label: `　${child.label || child.category}` })),
+]))
+const importResultStatus = computed(() => {
+  const result = importResult.value
+  if (!result) return ''
+  if (result.added) return '已添加到文献库'
+  if (result.pdf_attached) return '已匹配现有文献并关联 PDF'
+  return '文献已存在，已保留原有 PDF'
+})
+const resetImportState = () => {
+  importResult.value = null
+  importError.value = ''
+  importProgress.value = 0
+  importStage.value = 'idle'
+  importFileList.value = []
+}
+const cancelImport = () => {
+  importAbortController?.abort()
+  importAbortController = null
+}
+const openImportDialog = () => {
+  importDialogOpen.value = true
+  resetImportState()
+  importCategory.value = selectedKey.value === '__all__' ? '__auto__' : selectedKey.value
+}
+const beforePdfUpload: UploadProps['beforeUpload'] = (file) => {
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
+  if (!isPdf) {
+    message.error('仅支持 PDF 文件')
+    return Upload.LIST_IGNORE
+  }
+  if (file.size > 200 * 1024 * 1024) {
+    message.error('PDF 文件不能超过 200 MiB')
+    return Upload.LIST_IGNORE
+  }
+  return true
+}
+const removeImportFile = () => {
+  if (importing.value) return false
+  resetImportState()
+  return true
+}
+const importSourceLabel = (source: string) => ({
+  crossref: 'Crossref 补全', arxiv: 'arXiv 补全', openalex: 'OpenAlex 补全',
+  dblp: 'DBLP 补全', pdf: 'PDF 解析', local: '本地解析',
+}[source] || `${source} 补全`)
+const handlePdfUpload = async (options: UploadRequestOption) => {
+  const file = options.file as File
+  importing.value = true
+  importProgress.value = 1
+  importStage.value = 'uploading'
+  importResult.value = null
+  importError.value = ''
+  importAbortController = new AbortController()
+  importFileList.value = [{ uid: (file as File & { uid?: string }).uid || String(Date.now()), name: file.name, status: 'uploading', originFileObj: file as any }]
+  try {
+    const result = await importLocalPdf(file, {
+      category: importCategory.value === '__auto__' ? undefined : importCategory.value,
+      auto_enrich: importAutoEnrich.value,
+      auto_classify: importCategory.value === '__auto__' && importAutoClassify.value,
+      signal: importAbortController.signal,
+      onProgress: (percent) => {
+        importProgress.value = percent
+        if (percent >= 99) importStage.value = 'processing'
+      },
+    })
+    importResult.value = result
+    importFileList.value = importFileList.value.map((item) => ({ ...item, status: 'done' }))
+    options.onSuccess?.(result)
+    pagination.value.current = 1
+    await loadFolders()
+    await load()
+    message.success(result.message || 'PDF 已导入文献库')
+  } catch (error) {
+    const cancelled = isAbortError(error)
+    importFileList.value = importFileList.value.map((item) => ({ ...item, status: 'error' }))
+    importError.value = cancelled
+      ? '已取消等待。若文件已上传完成，服务端可能仍在处理，请稍后刷新文献库。'
+      : ((error as Error).message || 'PDF 导入失败')
+    options.onError?.(error as Error)
+    if (!cancelled) message.error(importError.value)
+  } finally {
+    importing.value = false
+    importStage.value = 'idle'
+    importAbortController = null
+  }
+}
 const onExportKnowledge = async ({ key }: { key: string }) => {
   exporting.value = true
   try {
@@ -157,14 +355,9 @@ const onExportKnowledge = async ({ key }: { key: string }) => {
       timeout: 60000,
     })
     const blob = new Blob([resp.data], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
     const disposition = resp.headers['content-disposition'] || ''
     const match = disposition.match(/filename="?([^"]+)"?/)
-    a.download = match ? match[1] : `papergraph_export_${key}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    downloadBlob(blob, match ? match[1] : `papergraph_export_${key}.json`)
     message.success('知识库已导出')
   } catch (e: unknown) {
     message.error((e as Error).message || '导出失败')
@@ -218,10 +411,8 @@ const loadFolders = async () => {
   } catch {
   }
 }
-let _loading = false
 const load = async () => {
-  if (_loading) return
-  _loading = true
+  const requestSeq = ++libraryLoadSeq
   loading.value = true
   try {
     const sk = selectedKey.value
@@ -235,15 +426,18 @@ const load = async () => {
       ...(cat ? { category: cat } : {}),
       ...(q ? { q } : {}),
     })
+    if (requestSeq !== libraryLoadSeq) return
     if (res.success) {
       papers.value = res.papers ?? []
       pagination.value = { ...pagination.value, total: typeof res.total === 'number' ? res.total : papers.value.length }
     }
   } catch (e: unknown) {
+    if (requestSeq !== libraryLoadSeq) return
     message.error((e as Error).message || '加载失败')
   } finally {
-    loading.value = false
-    _loading = false
+    if (requestSeq === libraryLoadSeq) {
+      loading.value = false
+    }
   }
 }
 const onTableChange = (pag: { current?: number; pageSize?: number }) => {
@@ -337,42 +531,14 @@ const batchDelete = () => {
     },
   })
 }
-function escapeBibTeX(s: string): string {
-  return String(s || '').replace(/([&%$#_{}~^\\])/g, '\\$1')
-}
-function paperToBibTeX(p: Paper): string {
-  const authors = (p.authors || []).map((a) => a.name).filter(Boolean).join(' and ')
-  const year = p.year ?? ''
-  const title = escapeBibTeX(p.title || 'Untitled')
-  const journal = escapeBibTeX(String(p.journal || p.venue || ''))
-  const doi = p.doi || ''
-  const arxiv = p.arxiv_id || ''
-  const key = `${(p.authors?.[0]?.name || 'unknown').split(' ').pop()?.toLowerCase() || 'unknown'}${year}${title.slice(0, 3).toLowerCase()}`
-  const lines = [`@article{${key},`]
-  if (authors) lines.push(`  author = {${escapeBibTeX(authors)}},`)
-  if (title) lines.push(`  title = {${title}},`)
-  if (journal) lines.push(`  journal = {${journal}},`)
-  if (year) lines.push(`  year = {${year}},`)
-  if (doi) lines.push(`  doi = {${doi}},`)
-  if (arxiv) lines.push(`  eprint = {${arxiv}},`)
-  if (p.source_url) lines.push(`  url = {${p.source_url}},`)
-  lines.push('}')
-  return lines.join('\n')
-}
 const exportBibTeX = () => {
   const selected = papers.value.filter((p) => p.id != null && selectedRowKeys.value.includes(String(p.id)))
   if (selected.length === 0) {
     message.warning('请先选择要导出的文献')
     return
   }
-  const bib = selected.map(paperToBibTeX).join('\n\n')
-  const blob = new Blob([bib], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `papergraph_library_${new Date().toISOString().slice(0, 10)}.bib`
-  a.click()
-  URL.revokeObjectURL(url)
+  const bib = selected.map(toBibTeX).join('\n\n')
+  downloadText(bib, `papergraph_library_${todayStamp()}.bib`)
   message.success(`已导出 ${selected.length} 篇文献为 BibTeX`)
 }
 onMounted(async () => {
@@ -380,6 +546,7 @@ onMounted(async () => {
   await load()
 })
 onBeforeUnmount(() => {
+  importAbortController?.abort()
   if (searchDebounceTimer != null) {
     clearTimeout(searchDebounceTimer)
     searchDebounceTimer = null
@@ -387,14 +554,83 @@ onBeforeUnmount(() => {
 })
 </script>
 <style scoped>
+.library-import-button { box-shadow: var(--pg-shadow-primary); }
+.import-dialog { display: flex; flex-direction: column; gap: 18px; padding-top: 4px; }
+.import-dialog__intro { display: flex; align-items: flex-start; gap: 14px; padding: 16px; border-radius: 16px; background: var(--pg-primary-soft); border: 1px solid #dfe3ff; }
+.import-dialog__icon { width: 42px; height: 42px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 13px; color: var(--pg-primary); background: #fff; font-size: 21px; box-shadow: var(--pg-shadow-xs); }
+.import-dialog__intro strong { color: var(--pg-text-heading); font-size: 15px; }
+.import-dialog__intro p { margin: 5px 0 0; color: var(--pg-text-secondary); font-size: 12px; line-height: 1.65; }
+.import-dialog__category { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 14px; border: 1px solid var(--pg-divider); border-radius: 13px; }
+.import-dialog__category > span { display: flex; flex-direction: column; gap: 3px; }
+.import-dialog__category strong { color: var(--pg-text-heading); font-size: 13px; }
+.import-dialog__category small { color: var(--pg-text-tertiary); font-size: 10px; }
+.import-dialog__options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.import-option { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 1px solid var(--pg-divider); border-radius: 13px; background: var(--pg-bg-soft); }
+.import-option > span { display: flex; flex-direction: column; gap: 3px; }
+.import-option strong { color: var(--pg-text-heading); font-size: 13px; }
+.import-option small { color: var(--pg-text-tertiary); font-size: 10px; line-height: 1.4; }
+.import-result { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 16px; border-radius: 15px; border: 1px solid #b7ebc6; background: #f4fbf6; }
+.import-result__status { color: #16803a; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.import-result > strong { color: var(--pg-text-heading); font-family: var(--pg-font-serif); font-size: 17px; }
+.import-result__meta { display: flex; flex-wrap: wrap; gap: 5px; }
+.import-result__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.import-processing { display: flex; align-items: center; gap: 10px; color: var(--pg-text-secondary); font-size: 12px; }
+.import-processing :deep(.ant-progress) { flex: 1; margin: 0; }
+@media (max-width: 640px) {
+  .import-dialog__options { grid-template-columns: 1fr; }
+  .import-dialog__category { align-items: stretch; flex-direction: column; }
+  .import-dialog__category :deep(.ant-select) { width: 100%; }
+  .import-result__actions { width: 100%; flex-direction: column; }
+  .import-result__actions :deep(.ant-btn) { width: 100%; }
+}
 .library-page {
-  max-width: min(1200px, 100%);
+  max-width: min(var(--pg-content-max), 100%);
   margin: 0 auto;
   width: 100%;
 }
-.library-card {
+.library-overview {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 4px 30px;
+}
+.library-overview__eyebrow {
+  color: var(--pg-accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .15em;
+  margin-bottom: 8px;
+}
+.library-overview h1 {
+  margin: 0;
+  color: var(--pg-text-heading);
+  font: 700 clamp(24px, 3vw, 34px)/1.2 var(--pg-font-serif);
+}
+.library-overview p {
+  margin: 8px 0 0;
+  color: var(--pg-text-secondary);
+}
+.library-overview__stat {
+  min-width: 98px;
+  padding: 13px 16px;
+  border: 1px solid var(--pg-border);
   border-radius: var(--pg-radius-lg);
-  box-shadow: var(--pg-shadow-xs);
+  background: rgba(255,255,255,.78);
+  box-shadow: var(--pg-shadow-sm);
+  backdrop-filter: blur(12px);
+  text-align: center;
+}
+.library-overview__stat strong {
+  display: block;
+  color: var(--pg-primary);
+  font-size: 24px;
+  line-height: 1.1;
+}
+.library-overview__stat span { color: var(--pg-text-tertiary); font-size: 11px; }
+.library-card {
+border-radius: var(--pg-radius-xl);
+  box-shadow: var(--pg-shadow-md);
   border: 1px solid var(--pg-border);
 }
 .library-card :deep(.ant-card-head) {
@@ -428,17 +664,18 @@ onBeforeUnmount(() => {
 }
 .library-layout {
   background: transparent;
-  gap: 16px;
+  gap: 20px;
   flex-direction: row;
   align-items: flex-start;
 }
 .library-sider {
   flex: 0 0 200px;
   max-width: 200px;
-  border-radius: var(--pg-radius-lg);
+  border-radius: var(--pg-radius-xl);
   border: 1px solid var(--pg-border);
-  background: var(--pg-surface);
-  box-shadow: var(--pg-shadow-xs);
+  background: rgba(255,255,255,.86);
+  box-shadow: var(--pg-shadow-sm);
+  overflow: hidden;
   height: fit-content;
   padding-top: 10px;
 }
@@ -486,7 +723,7 @@ onBeforeUnmount(() => {
 }
 .library-table :deep(.ant-table-tbody > tr > td) {
   vertical-align: middle;
-  padding: 14px 16px !important;
+  padding: 16px !important;
   border-bottom: 1px solid var(--pg-border-soft) !important;
   transition: background 0.15s ease;
 }
@@ -518,7 +755,12 @@ onBeforeUnmount(() => {
 .lib-title-text {
   font-weight: 600;
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  line-height: 1.5;
   color: var(--pg-text-heading);
   font-size: 14px;
 }
@@ -561,7 +803,16 @@ onBeforeUnmount(() => {
   }
 }
 @media (max-width: 640px) {
-  .library-card :deep(.ant-table) {
+.library-overview {
+  align-items: flex-start;
+  padding: 2px 2px 18px;
+}
+.library-overview__stat { min-width: 72px; padding: 10px; }
+.library-overview__stat strong { font-size: 20px; }
+.library-overview p { font-size: 12px; }
+.library-card :deep(.ant-card-head) { padding: 0 14px; }
+.library-card :deep(.ant-card-body) { padding: 14px; }
+.library-card :deep(.ant-table) {
   font-size: 12px;
   }
   .lib-title-text {

@@ -37,12 +37,9 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks(id) {
-            if (id.includes('node_modules/ant-design-vue')) {
-              if (id.includes('/vc-table/') || id.includes('/table/')) return 'antd-table'
-              if (id.includes('/vc-select/') || id.includes('/select/')) return 'antd-select'
-              if (id.includes('/vc-picker/') || id.includes('/date-picker/')) return 'antd-picker'
-              return 'antd'
-            }
+            if (id.includes('node_modules/ant-design-vue')) return 'antd'
+            if (id.includes('node_modules/pdfjs-dist')) return 'pdfjs'
+            if (id.includes('node_modules/d3')) return 'd3'
             if (id.includes('node_modules/katex')) return 'katex'
           },
         },

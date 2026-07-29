@@ -28,7 +28,9 @@ from ..feedback.negative_feedback_memory import (
     record_skip_negative_pref,
 )
 from ..llm.llm_service import get_llm, is_llm_configured
+from ..llm.agent_runtime import stateless_llm_chat
 from ..retrieval.recall_jobs import dedupe_papers
+from ...utils.common import safe_http_500
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +85,8 @@ def _select_personalized_and_general(
                 ensure_ascii=False,
             )
             pick_temp = 0.55 if diversify else 0.2
-            raw = get_llm().chat([{"role": "user", "content": prompt}], temperature=pick_temp, max_tokens=400).content
-            data = json.loads(raw.strip().lstrip("```json").rstrip("```").strip())
+            raw = stateless_llm_chat(get_llm(), None, prompt, temperature=pick_temp, max_tokens=400)
+            data = json.loads(_strip_json_fence(raw))
             llm_p = [int(i) for i in (data.get("personalized") or [])[:personalized_k] if 0 <= int(i) < len(pool)]
             llm_g = [
                 int(i)
@@ -193,7 +195,7 @@ def summarize_daily_theme_keywords_sync(
 {{\\"personalized\\":[\\"\u2026\\"],\\"general\\":[\\"\u2026\\"]}}
 \u952e\u540d\u5fc5\u987b\u4e3a\u82f1\u6587\uff1b\u82e5\u67d0\u7ec4\u65e0\u6709\u6548\u6807\u9898\u5219\u5bf9\u5e94\u6570\u7ec4\u4e3a []\u3002"""
     try:
-        raw = llm.chat([{"role": "user", "content": prompt}], temperature=0.15, max_tokens=420).content
+        raw = stateless_llm_chat(llm, None, prompt, temperature=0.15, max_tokens=420)
     except Exception as e:
         logger.warning("daily_theme_keywords: invoke failed: %s", e)
         return [], []
@@ -222,7 +224,7 @@ def _build_strategy_explanation(
         f"候选池{n_candidates}篇，记忆词{n_memory_kw}条参与"
     )
     try:
-        return agent.llm.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=80).content.strip()[:200]
+        return stateless_llm_chat(agent.llm, None, prompt, temperature=0.3, max_tokens=80).strip()[:200]
     except Exception:
         return fallback
 
@@ -256,10 +258,12 @@ async def _build_daily_response(
     daily_paper_identity_sig_fn,
     papergraph_to_api_fn,
     db_path,
+    user_id: int,
 ) -> DailyPapersResponse:
     _to_api = papergraph_to_api_fn
     _identity = daily_paper_identity_sig_fn
-    strategy_explanation = _build_strategy_explanation(
+    strategy_explanation = await run_in_threadpool(
+        _build_strategy_explanation,
         agent=agent,
         n_personalized=len(personalized_final),
         n_general=len(general_selected),
@@ -314,13 +318,13 @@ async def _build_daily_response(
                 shown.append({"identity_key": str(_identity(p)), "title": title})
         if shown:
             logger.info("记录 %d 篇已推荐论文，下次刷新将排除", len(shown))
-            await run_in_threadpool(record_daily_shown_papers, str(db_path), date_key, shown)
+            await run_in_threadpool(record_daily_shown_papers, str(db_path), date_key, shown, user_id)
     except Exception as ex:
         logger.warning("记录已推荐论文失败: %s", ex)
 
     try:
         await run_in_threadpool(
-            set_cache, db_path, date_key=date_key, cache_key="default", payload=resp.model_dump(mode="json")
+            set_cache, db_path, date_key=date_key, cache_key=f"user:{user_id}", payload=resp.model_dump(mode="json")
         )
     except Exception as ex:
         logger.warning("每日论文缓存写入失败: %s", ex)
@@ -328,17 +332,29 @@ async def _build_daily_response(
     return resp
 
 
-async def read_daily_cached_or_204(*, db_path: str) -> Response:
+async def read_daily_cached_or_204(*, db_path: str, user_id: int) -> Response:
     import datetime as _dt
 
     date_key = _dt.datetime.now().strftime("%Y-%m-%d")
     try:
-        cached = await run_in_threadpool(get_cache, db_path, date_key=date_key, cache_key="default")
-        if not cached:
-            return Response(status_code=204)
-        return DailyPapersResponse(**cached)
+        cache_key = f"user:{user_id}"
+        cached = await run_in_threadpool(get_cache, db_path, date_key=date_key, cache_key=cache_key)
+        if cached:
+            return DailyPapersResponse(**cached)
+
+        # On a cold start or a new calendar day, prefer a recent successful
+        # recommendation set over an empty page while today's refresh runs.
+        for days_ago in range(1, 4):
+            stale_date = (_dt.datetime.now() - _dt.timedelta(days=days_ago)).strftime("%Y-%m-%d")
+            stale = await run_in_threadpool(get_cache, db_path, date_key=stale_date, cache_key=cache_key)
+            if stale and (stale.get("arxiv_selected") or stale.get("personalized")):
+                stale = dict(stale)
+                stale["stale_cache"] = True
+                stale["message"] = "今日推荐正在准备中，暂时展示最近一次可用结果"
+                return DailyPapersResponse(**stale)
+        return Response(status_code=204)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_http_500("read_daily_cached", e)
 
 
 async def compute_daily_papers(
@@ -350,6 +366,7 @@ async def compute_daily_papers(
     logger: Any,
     daily_arxiv_cs_categories: list[str],
     papergraph_to_api_fn: Any,
+    user_id: int,
 ) -> DailyPapersResponse:
     _identity = daily_paper_identity_sig_fn
     try:
@@ -361,7 +378,7 @@ async def compute_daily_papers(
             _dbv = int(body.days_back if body.days_back is not None else 0)
         except (TypeError, ValueError):
             _dbv = 0
-        days_back = max(0, min(9999, _dbv)) if _dbv > 0 else 1
+        days_back = max(0, min(9999, _dbv)) if _dbv > 0 else 5
         total_target = 30
         try:
             personalized_k = max(0, min(int(body.personalized_k if body.personalized_k is not None else 20), total_target))
@@ -383,19 +400,20 @@ async def compute_daily_papers(
             from .daily_support import invalidate_user_profile_cache
             from .daily_recommend_feedback import clear_daily_shown_for_date
 
-            invalidate_user_profile_cache()
-            cleared = await run_in_threadpool(clear_daily_shown_for_date, str(db_path), date_key)
+            invalidate_user_profile_cache(user_id)
+            cleared = await run_in_threadpool(clear_daily_shown_for_date, str(db_path), date_key, user_id)
             if cleared:
                 logger.info("每日论文：force_refresh 已清除当日 shown 记录 %s 条", cleared)
 
         library_papers = await run_in_threadpool(
-            PaperDatabase(db_path).get_all_papers, limit=lib_lim, order_by="created_at DESC",
+            PaperDatabase(db_path).get_all_papers, limit=lib_lim, order_by="created_at DESC", user_id=user_id,
         )
         lib_ids = [int(getattr(p, "id", 0) or 0) for p in library_papers if int(getattr(p, "id", 0) or 0) > 0]
 
         (mem_kw, mem_kw_n, mem_kw_list, skipped_papers), (_, lib_kw) = await asyncio.gather(
             get_or_load_user_context(
                 db_path=db_path,
+                user_id=user_id,
                 lib_ids=lib_ids,
                 log=logger,
                 force_reload=force_refresh,
@@ -403,7 +421,9 @@ async def compute_daily_papers(
             ),
             run_in_threadpool(extract_library_characteristics, library_papers),
         )
-        llm_categories = llm_arxiv_categories(agent, mem_kw_list, daily_arxiv_cs_categories)
+        llm_categories = await run_in_threadpool(
+            llm_arxiv_categories, agent, mem_kw_list, daily_arxiv_cs_categories
+        )
 
         all_external, source_counts, _arxiv_query = await fetch_external_candidates(
             searcher=searcher,
@@ -443,7 +463,7 @@ async def compute_daily_papers(
             logger.info("每日论文：补充拉取后候选=%s", len(candidates))
 
         if not candidates:
-            return DailyPapersResponse(
+            empty_response = DailyPapersResponse(
                 success=True,
                 date_key=date_key,
                 arxiv_latest_total=0,
@@ -452,17 +472,28 @@ async def compute_daily_papers(
                 arxiv_latest=[],
                 arxiv_selected=[],
                 personalized=[],
-                message="暂无可用论文推荐",
+                message="暂无可用论文推荐，稍后可再次刷新",
                 memory_keywords_used=mem_kw_list,
                 strategy_explanation="\n".join(
                     [
-                        "候选不足，未形成当日推荐池",
+                        "外部来源暂未返回可用候选",
                         (f"记忆词约 {mem_kw_n} 个（下列为短词优先）" if mem_kw_n else "记忆词：无"),
                     ]
                 ),
                 personalized_pick_hints=[],
                 general_pick_hints=[],
             )
+            try:
+                await run_in_threadpool(
+                    set_cache,
+                    db_path,
+                    date_key=date_key,
+                    cache_key=f"user:{user_id}",
+                    payload=empty_response.model_dump(mode="json"),
+                )
+            except Exception as ex:
+                logger.warning("每日论文空结果缓存写入失败: %s", ex)
+            return empty_response
 
         personalized_final, general_selected = await run_in_threadpool(
             _select_personalized_and_general,
@@ -498,13 +529,14 @@ async def compute_daily_papers(
             daily_paper_identity_sig_fn=_identity,
             papergraph_to_api_fn=papergraph_to_api_fn,
             db_path=db_path,
+            user_id=user_id,
         )
     except Exception:
         logger.exception("daily_service.compute_daily_papers_failed")
         raise HTTPException(status_code=500, detail="daily papers failed")
 
 
-async def record_user_daily_feedback(*, body, db_path) -> Any:
+async def record_user_daily_feedback(*, body, db_path, user_id: int) -> Any:
     import datetime
     from .daily_recommend_feedback import FeedbackAction
     from ...models.schemas import DailyRecommendFeedbackResponse
@@ -522,6 +554,7 @@ async def record_user_daily_feedback(*, body, db_path) -> Any:
     ok = await run_in_threadpool(
         record_feedback,
         db_path,
+        user_id=user_id,
         date_key=date_key,
         paper_identity_key=identity_key,
         identity_type=identity_type,

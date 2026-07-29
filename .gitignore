@@ -12,6 +12,8 @@ backend/downloads/
 *.db-journal
 *.db-wal
 *.db-shm
+*.part
+*.env.production
 
 # Python
 __pycache__/

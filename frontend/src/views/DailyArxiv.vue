@@ -11,6 +11,14 @@
       <span class="daily-page__loading-text">加载论文中…</span>
     </div>
     <template v-else>
+      <section class="daily-hero">
+        <div>
+          <div class="daily-hero__eyebrow">DAILY RESEARCH BRIEFING</div>
+          <h1>今天，读点新的</h1>
+          <p>结合你的文献库与研究偏好，筛选值得关注的新论文。</p>
+        </div>
+        <div class="daily-hero__count"><strong>{{ searchResults.length }}</strong><span>今日候选</span></div>
+      </section>
       <div v-if="!loading" class="daily-toolbar">
         <div class="daily-toolbar__row">
           <div class="daily-toolbar__left">
@@ -112,6 +120,7 @@ const randomIds = ref<Set<string>>(new Set())
 const loading = ref(true)
 const refreshing = ref(false)
 const emptyHint = ref<string | null>(null)
+let dailyRequestSeq = 0
 const metaDateKey = ref('')
 const dailyPersonalizedTotal = ref<number | null>(null)
 const dailyArxivSelectedTotal = ref<number | null>(null)
@@ -235,6 +244,7 @@ function dailyPayloadHasPapers(r: DailyPapersApiResponse): boolean {
   return (r.arxiv_selected?.length ?? 0) + (r.personalized?.length ?? 0) > 0
 }
 async function reloadDaily(forceRefresh: boolean) {
+  const requestSeq = ++dailyRequestSeq
   if (forceRefresh) refreshing.value = true
   else if (searchResults.value.length === 0) loading.value = true
   emptyHint.value = null
@@ -245,6 +255,7 @@ async function reloadDaily(forceRefresh: boolean) {
     const params: Record<string, any> = {}
     if (forceRefresh) params.force_refresh = true
     const r = await getDailyPapers(params)
+    if (requestSeq !== dailyRequestSeq) return
     if (!r?.success) throw new Error(r?.message || '加载失败')
     if (forceRefresh && !dailyPayloadHasPapers(r) && searchResults.value.length > 0) {
       skippedIds.value = previousSkipped
@@ -268,14 +279,17 @@ async function reloadDaily(forceRefresh: boolean) {
       }
     }
   } catch (e: unknown) {
+    if (requestSeq !== dailyRequestSeq) return
     skippedIds.value = previousSkipped
     message.error((e as Error).message || '请求失败')
     emptyHint.value = searchResults.value.length > 0
       ? '刷新失败，已保留当前列表。'
       : '加载失败，请检查网络与后端日志。'
   } finally {
-    loading.value = false
-    refreshing.value = false
+    if (requestSeq === dailyRequestSeq) {
+      loading.value = false
+      refreshing.value = false
+    }
   }
 }
 onMounted(() => {
@@ -388,7 +402,7 @@ const onPaperClick = async (paper: Paper) => {
 </script>
 <style scoped>
 .daily-page {
-  max-width: min(1100px, 100%);
+  max-width: min(1160px, 100%);
   margin: 0 auto;
   width: 100%;
   flex: 1 1 auto;
@@ -396,13 +410,45 @@ const onPaperClick = async (paper: Paper) => {
   flex-direction: column;
   box-sizing: border-box;
 }
-.daily-toolbar {
-  padding: 18px 20px;
-  background: var(--pg-surface);
+.daily-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 4px 30px;
+}
+.daily-hero__eyebrow {
+  margin-bottom: 8px;
+  color: var(--pg-accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .15em;
+}
+.daily-hero h1 {
+  margin: 0;
+  color: var(--pg-text-heading);
+  font: 700 clamp(25px, 3vw, 36px)/1.2 var(--pg-font-serif);
+}
+.daily-hero p { margin: 8px 0 0; color: var(--pg-text-secondary); }
+.daily-hero__count {
+  min-width: 98px;
+  padding: 13px 16px;
   border: 1px solid var(--pg-border);
   border-radius: var(--pg-radius-lg);
-  box-shadow: var(--pg-shadow-xs);
-  margin-bottom: 16px;
+  background: rgba(255,255,255,.78);
+  box-shadow: var(--pg-shadow-sm);
+  backdrop-filter: blur(12px);
+  text-align: center;
+}
+.daily-hero__count strong { display: block; color: var(--pg-primary); font-size: 24px; line-height: 1.1; }
+.daily-hero__count span { color: var(--pg-text-tertiary); font-size: 11px; }
+.daily-toolbar {
+padding: 20px 22px;
+  background: rgba(255,255,255,.86);
+  border: 1px solid var(--pg-border);
+  border-radius: var(--pg-radius-xl);
+  box-shadow: var(--pg-shadow-sm);
+  margin-bottom: 20px;
 }
 .daily-toolbar__row {
   display: grid;
@@ -515,7 +561,11 @@ const onPaperClick = async (paper: Paper) => {
   justify-content: flex-start;
 }
 @media (max-width: 640px) {
-  .daily-toolbar__kw-panel {
+.daily-hero { align-items: flex-start; padding: 2px 2px 18px; }
+.daily-hero p { font-size: 12px; }
+.daily-hero__count { min-width: 72px; padding: 10px; }
+.daily-hero__count strong { font-size: 20px; }
+.daily-toolbar__kw-panel {
   flex: 1 1 100%;
   max-width: 100%;
   }
@@ -578,9 +628,9 @@ const onPaperClick = async (paper: Paper) => {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--pg-border);
-  border-radius: var(--pg-radius-lg);
-  background: var(--pg-surface);
-  box-shadow: var(--pg-shadow-xs);
+  border-radius: var(--pg-radius-xl);
+  background: rgba(255,255,255,.9);
+  box-shadow: var(--pg-shadow-md);
   margin-top: 0;
 }
 .daily-results-card__title {

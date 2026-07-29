@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from ...author import Author
 from ...paper import Paper
+from .base import register_source
 from .source_common import author_names_for_api, pick_best_name_match
 from ..normalize import (
     _arxiv_pdf_url_from_id,
@@ -281,6 +282,7 @@ async def _openalex_resolve_venue_id_async(
         return None
 
 
+@register_source("openalex")
 async def search_openalex(
     searcher, query: str, max_results: int = 10, **kwargs
 ) -> List[Paper]:
@@ -302,7 +304,10 @@ async def search_openalex(
         venue_s and yf_int and yt_int and yf_int == yt_int and 1900 <= yf_int <= 2100
     )
 
-    base_q = (plain_query_for_text_apis(query, kwargs) or "").strip()
+    openalex_query_kwargs = dict(kwargs)
+    if (query or "").strip() and not pinned_venue_single_year:
+        openalex_query_kwargs["text_api_query_expansion"] = False
+    base_q = (plain_query_for_text_apis(query, openalex_query_kwargs) or "").strip()
     if pinned_venue_single_year:
         pin_q = f"{venue_s} {yf_int}".strip()
         topic_raw = kwargs.get("pinned_topic_terms") or []
@@ -419,6 +424,10 @@ async def search_openalex(
         params = searcher._openalex_params({
             "search": qtext_clean or qtext,
             "per_page": per_page,
+            # Make upstream relevance deterministic. OpenAlex's implicit ordering
+            # differed from its explicit relevance endpoint in live comparisons
+            # and omitted canonical surveys/foundational papers.
+            "sort": "relevance_score:desc",
         })
         if year_filt:
             params["filter"] = year_filt
@@ -436,11 +445,12 @@ async def search_openalex(
             if vid:
                 prev = (local_params.get("filter") or "").strip()
                 local_params["filter"] = f"{prev},host_venue.id:{vid}" if prev else f"host_venue.id:{vid}"
-        resp = await searcher._async_client.get(
-            url="https://api.openalex.org/works",
+        resp = await searcher._async_http_get_with_retry(
+            "https://api.openalex.org/works",
             params=local_params,
             headers=headers,
-            timeout=45.0,
+            timeout=float(kwargs.get("openalex_timeout_sec") or 18.0),
+            max_attempts=max(1, min(2, int(kwargs.get("http_max_attempts") or 1))),
         )
         if resp.status_code == 400 and (local_params.get("search") or local_params.get("filter")):
             lp2 = dict(local_params)
@@ -448,11 +458,12 @@ async def search_openalex(
             lp2.pop("filter", None)
             if year_filt:
                 lp2["filter"] = year_filt
-            resp = await searcher._async_client.get(
-                url="https://api.openalex.org/works",
+            resp = await searcher._async_http_get_with_retry(
+                "https://api.openalex.org/works",
                 params=lp2,
                 headers=headers,
                 timeout=45.0,
+                max_attempts=2,
             )
         resp.raise_for_status()
         return list((resp.json() or {}).get("results") or [])

@@ -21,6 +21,17 @@ class SearchRecipe(str, Enum):
     DEEP = "deep"
 
 
+def _is_title(plan: "ResolvedSearchPlan") -> bool:
+    return bool([title for title in (plan.target_titles or []) if str(title).strip()])
+
+
+def _apply_title(plan: "ResolvedSearchPlan") -> None:
+    # 标题查询的目标是找原文而非扩展主题；保留多源交叉验证，关闭昂贵且
+    # 非确定的 LLM 微调，由精确标题信号与引用权威性完成排序。
+    plan.ranking_profile = "classic"
+    plan.use_llm_rank = False
+
+
 def _is_venue_method(plan: "ResolvedSearchPlan") -> bool:
     return bool(_venues(plan) and resolve_method_acronym(plan.query or "", _keywords(plan)))
 
@@ -44,12 +55,10 @@ def _normalize_venue_years(plan: "ResolvedSearchPlan") -> None:
         plan.sort = "date"
         from ..search_intent.parsing import infer_target_edition_year_for_recent
 
-        pin_y = infer_target_edition_year_for_recent(is_latest=True)
+        # “最新”只在用户未给出任何年份时推断会议届次。显式年份或区间
+        # 是硬约束，不能因为 LLM 同时设置 wants_recent 而被当前年份覆盖。
         if yf is None and yt is None:
-            yf = yt = pin_y
-        elif yf is not None and (yt is None or int(yt) - int(yf) > 1):
-            yf = yt = pin_y
-        elif yf is not None and yt is not None and int(yf) != int(yt):
+            pin_y = infer_target_edition_year_for_recent(is_latest=True)
             yf = yt = pin_y
 
     if yf is not None and yt is None:
@@ -58,8 +67,11 @@ def _normalize_venue_years(plan: "ResolvedSearchPlan") -> None:
 
     pinned_single_year = isinstance(yf, int) and isinstance(yt, int) and yf == yt
     has_topic = bool(_keywords(plan) or (plan.query or "").strip())
-    if pinned_single_year and not has_topic and not plan.authors and not plan.target_titles:
+    # 明确写出“会议 + 单年份”时，会议归属与年份都是硬约束；不仅限于
+    # 无主题的 proceedings 浏览，否则主题检索会混入同年 arXiv/其他会论文。
+    if pinned_single_year:
         plan.main_conference_proceedings_only = True
+    if pinned_single_year and not has_topic and not plan.authors and not plan.target_titles:
         if not (plan.sort or "").strip() or plan.sort == "relevance":
             plan.sort = "date"
 
@@ -87,7 +99,7 @@ def _apply_venue_year(plan: "ResolvedSearchPlan", *, skip_browse_limits: bool = 
     orig_q = (plan.query or "").strip()
     v_blob = " ".join(v.lower() for v in venues)
 
-    if not orig_q or any(v.lower() in orig_q.lower() for v in venues):
+    if not orig_q or any(v.lower() == orig_q.lower() for v in venues):
         plan.query = ""
 
     plan.keywords = [
@@ -101,7 +113,7 @@ def _apply_venue_year(plan: "ResolvedSearchPlan", *, skip_browse_limits: bool = 
     from ...core.search.normalize import extract_pinned_topic_terms
 
     query_only_topic = extract_pinned_topic_terms(
-        query=orig_q, merged_kw=[], venue=venue, year=year
+        query=orig_q, merged_kw=list(plan.keywords or []), venue=venue, year=year
     ).strip()
     if not (plan.query or "").strip():
         if query_only_topic:
@@ -134,6 +146,7 @@ RecipeApplyFn = Callable[["ResolvedSearchPlan"], None]
 RecipeRule = tuple[Callable[["ResolvedSearchPlan"], bool], SearchRecipe, RecipeApplyFn]
 
 RECIPE_RULES: list[RecipeRule] = [
+    (_is_title, SearchRecipe.TITLE, _apply_title),
     (_is_venue_method, SearchRecipe.METHOD, _apply_method_at_venue),
     (_is_venue_year, SearchRecipe.VENUE_YEAR, _apply_venue_year),
     (_is_method, SearchRecipe.METHOD, _apply_method),

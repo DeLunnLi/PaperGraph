@@ -10,7 +10,6 @@ from .search_recipe import SearchRecipe, finalize_plan_recipe
 @dataclass
 class FallbackPolicy:
     allow_arxiv_only: bool = True
-    reason: str = "auto"
 
 
 @dataclass
@@ -38,6 +37,7 @@ class ResolvedSearchPlan:
     max_results: int = 10
     recipe: SearchRecipe = SearchRecipe.GENERAL
     method_acronym: str | None = None
+    research_domain: str = "general"
     deep_search: bool = False
     sub_queries: list[str] = field(default_factory=list)
     max_iterations: int = 2
@@ -51,7 +51,7 @@ class ResolvedSearchPlan:
             venues=list(intent.venues or []),
             year_from=_norm_year(intent.year_from),
             year_to=_norm_year(intent.year_to),
-            sources=_resolve_sources(intent),
+            sources=_resolve_sources(intent, targeted_arxiv=bool(getattr(intent, "arxiv_id_list", None))),
             sort=_resolve_sort(intent),
             ranking_profile=_resolve_profile(intent),
             use_llm_rank=bool(getattr(intent, "use_llm_rank", True)),
@@ -63,6 +63,7 @@ class ResolvedSearchPlan:
             wants_recent=bool(getattr(intent, "wants_recent", False)),
             wants_classic=bool(getattr(intent, "wants_classic", False)),
             use_tavily=_resolve_use_tavily(intent),
+            research_domain=str(getattr(intent, "research_domain", "general") or "general").strip().lower(),
             max_results=max(5, min(30, int(getattr(intent, "max_results", 10) or 10))),
         )
         return _finalize_plan_for_retrieval(plan)
@@ -94,14 +95,16 @@ def _resolve_profile(intent) -> str:
     return "accuracy"
 
 
-def _resolve_sources(intent) -> list[str]:
-    llm_src = getattr(intent, "sources", []) or []
-    allowed = {"arxiv", "dblp", "openalex"}
-    if llm_src:
-        resolved = [s for s in llm_src if s in allowed]
-        if resolved:
-            return resolved
-    return ["arxiv", "dblp", "openalex"]
+def _resolve_sources(intent, *, targeted_arxiv: bool = False) -> list[str]:
+    """Resolve source priority while preserving a true exact-ID fast path."""
+    preferred = [
+        str(source).strip().lower()
+        for source in (getattr(intent, "sources", []) or [])
+        if str(source).strip().lower() in {"arxiv", "dblp", "openalex"}
+    ]
+    if targeted_arxiv:
+        return ["arxiv"]
+    return preferred + [source for source in ("arxiv", "dblp", "openalex") if source not in preferred]
 
 
 def _resolve_use_tavily(intent) -> bool:

@@ -4,6 +4,7 @@ import { FilePdfOutlined, SaveOutlined } from '@ant-design/icons-vue'
 import LatexInline from '@/components/LatexInline.vue'
 import type { Paper } from '@/types'
 import { clipTextAvoidBreakingMath } from '@/utils/markdown'
+import { paperVenue } from '@/utils/citation'
 import { resultSourceMeta } from '@/utils/paperSourceMeta'
 
 const props = defineProps<{
@@ -65,7 +66,7 @@ function abstractPreview(abs: string, length = 280): string {
       <div class="paper-number">{{ pIndex + 1 }}.</div>
       <div class="paper-content">
         <div class="paper-title-line">
-          <a v-if="paper.source_url" :href="paper.source_url" target="_blank" class="paper-title-link">
+          <a v-if="paper.source_url" :href="paper.source_url" target="_blank" rel="noopener noreferrer" class="paper-title-link">
             <LatexInline :text="paper.title" />
           </a>
           <span v-else class="paper-title-text">
@@ -84,7 +85,7 @@ function abstractPreview(abs: string, length = 280): string {
           <span class="paper-meta__dot">·</span>
           <LatexInline
             class="paper-meta__venue"
-            :text="`${paper.journal || paper.venue || (paper.source ? resultSourceMeta(paper.source).label + ' 预印本' : '—')} · ${paper.year ?? '—'}`"
+            :text="`${paperVenue(paper) || (paper.source ? resultSourceMeta(paper.source).label + ' 预印本' : '—')} · ${paper.year ?? '—'}`"
           />
         </div>
         <div v-if="paper.abstract" class="paper-abstract">
@@ -96,12 +97,12 @@ function abstractPreview(abs: string, length = 280): string {
             <a-tag v-if="paper.citations" color="cyan" size="small">{{ paper.citations }} 引用</a-tag>
           </span>
           <span class="paper-actions">
-            <a v-if="paper.pdf_url" :href="paper.pdf_url" target="_blank">
+            <a v-if="paper.pdf_url" :href="paper.pdf_url" target="_blank" rel="noopener noreferrer">
               <a-button type="link" size="small">
                 <FilePdfOutlined /> PDF
               </a-button>
             </a>
-            <a v-else-if="paper.doi" :href="'https://doi.org/' + paper.doi" target="_blank">
+            <a v-else-if="paper.doi" :href="'https://doi.org/' + paper.doi" target="_blank" rel="noopener noreferrer">
               <a-button type="link" size="small">DOI</a-button>
             </a>
             <a-button type="link" size="small" @click="emit('saveOne', paper)">

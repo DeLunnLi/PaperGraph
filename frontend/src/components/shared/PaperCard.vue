@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import LatexInline from '@/components/LatexInline.vue'
 import type { Paper } from '@/types'
+import { paperVenue } from '@/utils/citation'
 const props = withDefaults(defineProps<{
   paper: Paper
   index?: number
@@ -34,7 +35,7 @@ function authors(paper: Paper): string {
 }
 const metaLine = computed(() => {
   const parts: string[] = []
-  const j = String(props.paper.journal || props.paper.venue || '').trim()
+  const j = paperVenue(props.paper)
   if (j) parts.push(j)
   if (props.paper.year != null) parts.push(String(props.paper.year))
   return parts.join(' · ')
@@ -77,7 +78,7 @@ const metaLine = computed(() => {
         <div class="paper-card__footer-left">
           <slot name="actions" />
         </div>
-        <a v-if="paper.pdf_url" :href="paper.pdf_url" target="_blank" @click="emit('click', paper)">
+        <a v-if="paper.pdf_url" :href="paper.pdf_url" target="_blank" rel="noopener noreferrer" @click="emit('click', paper)">
           <a-button type="link" size="small" class="paper-card__pdf">查看 PDF</a-button>
         </a>
       </div>

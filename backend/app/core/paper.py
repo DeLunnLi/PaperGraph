@@ -37,12 +37,14 @@ class Paper:
     read_status: str = "unread"
     importance: str = "normal"
     id: int | None = None
+    user_id: int | None = None
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "user_id": self.user_id,
             "title": self.title,
             "authors": [a.to_dict() if hasattr(a, "to_dict") else {"name": str(a)} for a in self.authors],
             "abstract": self.abstract,
@@ -168,6 +170,7 @@ class Paper:
             read_status=data.get("read_status", "unread"),
             importance=data.get("importance", "normal"),
             id=_safe_id(data.get("id")),
+            user_id=_safe_id(data.get("user_id")),
             created_at=created_at or datetime.now(),
             updated_at=updated_at or datetime.now(),
         )

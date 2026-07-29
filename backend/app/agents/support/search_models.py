@@ -35,6 +35,7 @@ class SearchIntent:
     ranking_strategy: str = "hybrid"
 
     main_conference_proceedings_only: bool = False
+    research_domain: str = "general"
 
 
 __all__ = [

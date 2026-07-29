@@ -1,16 +1,16 @@
 <template>
   <div class="kg-page">
     <div class="kg-toolbar">
-      <a-space wrap>
+      <a-space wrap class="kg-toolbar__controls">
         <a-button type="primary" :loading="loading" @click="load">刷新图谱</a-button>
         <a-button @click="exportPNG" :disabled="rawNodes.length === 0">导出 PNG</a-button>
         <a-input
           v-model:value="filterText"
           allow-clear
           placeholder="过滤节点（标题/作者/关键词）"
-          style="width: 280px"
+          class="kg-filter"
         />
-        <a-select v-model:value="nodeType" style="width: 120px" allow-clear placeholder="类型">
+        <a-select v-model:value="nodeType" class="kg-type-select" allow-clear placeholder="类型">
           <a-select-option value="paper">论文</a-select-option>
           <a-select-option value="author">作者</a-select-option>
           <a-select-option value="keyword">关键词</a-select-option>
@@ -22,7 +22,7 @@
           :max="yearExtent[1]"
           v-model:value="yearRange"
           :tip-formatter="(v: number) => String(v)"
-          style="width: 200px; margin: 0 8px;"
+          class="kg-year-slider"
         />
       </a-space>
       <div class="kg-meta">
@@ -108,6 +108,7 @@ import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import * as d3 from 'd3'
 import apiClient, { getPaper } from '@/services/api'
+import { downloadBlob, todayStamp } from '@/utils/download'
 type GraphNode = {
   id: string
   type: 'paper' | 'author' | 'keyword' | string
@@ -193,12 +194,7 @@ const exportPNG = () => {
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
       canvas.toBlob((blob) => {
         if (!blob) return
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `knowledge_graph_${new Date().toISOString().slice(0, 10)}.png`
-        a.click()
-        URL.revokeObjectURL(url)
+        downloadBlob(blob, `knowledge_graph_${todayStamp()}.png`)
         message.success('图谱已导出为 PNG')
       })
     }
@@ -220,6 +216,9 @@ const edgeTypeLabel = (t: string): string => {
   if (k.startsWith('paper_')) {
     const rel = k.slice('paper_'.length).trim().toLowerCase()
     if (!rel) return '论文 ↔ 论文（关系）'
+    // Strip "rev_" prefix so that reverse edges map to the forward label.
+    const isReverse = rel.startsWith('rev_')
+    const lookupRel = isReverse ? rel.slice(4) : rel
     const map: Record<string, string> = {
       related: '相关/相似',
       similar: '相似',
@@ -238,7 +237,8 @@ const edgeTypeLabel = (t: string): string => {
       contradicts: '反驳/矛盾',
       background: '背景/基础',
     }
-    return `论文 ↔ 论文（${map[rel] || rel}）`
+    const label = map[lookupRel] || lookupRel
+    return `论文 ↔ 论文（${label}${isReverse ? '（反向）' : ''}）`
   }
   return '（自定义关系）'
 }
@@ -483,20 +483,27 @@ onBeforeUnmount(() => {
 .kg-page {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 18px;
+  max-width: var(--pg-content-max);
+  width: 100%;
+  margin: 0 auto;
 }
 .kg-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 12px 16px;
-  background: var(--pg-surface);
+  gap: 12px;
+  padding: 14px 16px;
+  background: rgba(255,255,255,.86);
   border: 1px solid var(--pg-border);
-  border-radius: var(--pg-radius-lg);
-  box-shadow: var(--pg-shadow-xs);
+  border-radius: var(--pg-radius-xl);
+  box-shadow: var(--pg-shadow-sm);
 }
+.kg-toolbar__controls { min-width: 0; }
+.kg-filter { width: min(280px, 32vw); }
+.kg-type-select { width: 120px; }
+.kg-year-slider { width: 200px; margin: 0 8px; }
 .kg-meta {
   display: flex;
   gap: 6px;
@@ -507,26 +514,26 @@ onBeforeUnmount(() => {
 }
 .kg-body {
   display: grid;
-  grid-template-columns: 1fr clamp(260px, 25vw, 340px);
-  gap: 14px;
+  grid-template-columns: 1fr clamp(280px, 25vw, 350px);
+  gap: 18px;
   min-height: 70vh;
 }
 .kg-canvas {
   border: 1px solid var(--pg-border);
-  border-radius: var(--pg-radius-lg);
+  border-radius: var(--pg-radius-xl);
   overflow: hidden;
   min-height: 70vh;
   position: relative;
-  background: var(--pg-surface);
-  box-shadow: var(--pg-shadow-xs);
+  background: radial-gradient(circle at 50% 40%, #fff 0, #fafaff 58%, #f5f6fb 100%);
+  box-shadow: var(--pg-shadow-md);
 }
 .kg-side {
   min-height: 70vh;
 }
 .kg-side :deep(.ant-card) {
   border: 1px solid var(--pg-border);
-  border-radius: var(--pg-radius-lg);
-  box-shadow: var(--pg-shadow-xs);
+  border-radius: var(--pg-radius-xl);
+  box-shadow: var(--pg-shadow-sm);
 }
 .kg-side :deep(.ant-card-head) {
   border-bottom: 1px solid var(--pg-border-soft);
@@ -608,8 +615,13 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 640px) {
   .kg-toolbar {
-    padding: 10px 12px;
+    padding: 12px;
+    align-items: flex-start;
   }
+  .kg-toolbar__controls { width: 100%; }
+  .kg-filter { width: 100%; }
+  .kg-type-select { width: 110px; }
+  .kg-year-slider { width: min(180px, 46vw); margin: 0 4px; }
   .kg-canvas {
     min-height: 50vh;
   }

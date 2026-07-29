@@ -11,6 +11,14 @@ _RE_ARXIV_DOI = re.compile(r"10\.48550/arxiv\.?([\d.]+\d)", re.I)
 _RE_ARXIV_URL_IN_DOI = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w./]+)", re.I)
 _RE_ARXIV_VERSION_SUFFIX = re.compile(r"v\d+$", re.I)
 _RE_TITLE_ENTITY = re.compile(r"&amp;|&lt;|&gt;|&quot;|&#\d+;")
+
+
+def strip_arxiv_version(arxiv_id: str | None) -> str:
+    """Remove a trailing ``vN`` version suffix from an arXiv id (e.g. ``2401.12345v3``).
+
+    Returns the input unchanged (as a stripped string) when there is no suffix.
+    """
+    return _RE_ARXIV_VERSION_SUFFIX.sub("", (arxiv_id or "").strip())
 _RE_TITLE_NON_ALNUM = re.compile(r"[^a-z0-9\u4e00-\u9fff]+", re.I)
 
 
@@ -71,6 +79,18 @@ def _normalize_title_for_dedupe(title: str | None) -> str:
     return _RE_MULTIPLE_SPACES.sub(" ", t).strip()
 
 
+def titles_match_strict(left: str | None, right: str | None) -> bool:
+    """Confirm the same title while tolerating harmless source formatting noise."""
+    ln = _normalize_title_for_dedupe(left)
+    rn = _normalize_title_for_dedupe(right)
+    if not ln or not rn:
+        return False
+    if ln == rn:
+        return True
+    shorter, longer = sorted((ln, rn), key=len)
+    return len(shorter) >= 18 and shorter in longer and len(shorter) / len(longer) >= 0.92
+
+
 def arxiv_id_from_doi(doi: str | None) -> str | None:
     if not doi:
         return None
@@ -81,11 +101,11 @@ def arxiv_id_from_doi(doi: str | None) -> str | None:
         return None
     m = _RE_ARXIV_DOI.search(d)
     if m:
-        return _RE_ARXIV_VERSION_SUFFIX.sub("", m.group(1)).lower()
+        return strip_arxiv_version(m.group(1)).lower()
     m2 = _RE_ARXIV_URL_IN_DOI.search(d)
     if m2:
         raw = m2.group(1).split("/")[-1]
-        return _RE_ARXIV_VERSION_SUFFIX.sub("", raw).lower()
+        return strip_arxiv_version(raw).lower()
     return None
 
 
@@ -115,7 +135,7 @@ def _arxiv_canonical_from_paper(paper: Any) -> str | None:
     if aid.lower().startswith("arxiv:"):
         aid = aid[6:]
     aid = aid.strip().rstrip("/")
-    aid = _RE_ARXIV_VERSION_SUFFIX.sub("", aid)
+    aid = strip_arxiv_version(aid)
     if aid and re.search(r"\d", aid):
         return aid.lower()
     return arxiv_id_from_doi(paper.doi)
@@ -209,24 +229,34 @@ def plain_query_for_text_apis(query: str, kwargs: dict[str, Any]) -> str:
     lk = sanitize_search_keyword_list(kwargs.get("llm_keywords"))
     if not lk:
         return normalized_query_for_text_apis(query)
-    if len(lk) >= 2:
-        q0 = ((query or "").strip() or str(lk[0]).strip())
-        venue_kw = (kwargs.get("venue") or "").strip()
 
-        if venue_kw and len(q0) <= 16:
-            tail: list[str] = []
-            for x in lk[1:8]:
-                t = str(x).strip()
-                if not t or t.lower() == q0.lower():
-                    continue
-                tail.append(t)
-                if len(tail) >= 4:
-                    break
-            if tail:
-                merged = f"{q0} {' '.join(tail)}".strip()
-                return merged[:200]
-        return q0[:200] if q0 else str(lk[0]).strip()[:200]
-    return (str(lk[0]).strip() or normalized_query_for_text_apis(query))[:200]
+    q0 = normalized_query_for_text_apis(query) or str(lk[0]).strip()
+    if not q0:
+        return ""
+
+    # Text APIs benefit from a small number of intent-parser expansions. Previously
+    # only venue searches received them, so translated/synonymous keywords were
+    # silently discarded for normal OpenAlex/DBLP recall.
+    tail: list[str] = []
+    qlow = q0.lower()
+    tail_cap = 4 if (kwargs.get("venue") or "").strip() else 3
+    # OpenAlex full-text search treats all appended terms as one broad bag of
+    # words. Expanding a well-formed topic there hurts precision and displaced
+    # seminal exact-phrase papers in live comparisons. Source adapters may opt
+    # out while arXiv/DBLP retain expansion for recall.
+    if kwargs.get("text_api_query_expansion") is False:
+        return q0[:200]
+    for item in lk:
+        term = normalized_query_for_text_apis(str(item))
+        if not term:
+            continue
+        term_low = term.lower()
+        if term_low == qlow or term_low in qlow:
+            continue
+        tail.append(term)
+        if len(tail) >= tail_cap:
+            break
+    return " ".join([q0, *tail]).strip()[:200]
 
 
 def topic_terms_excluding_venue_year(
