@@ -37,25 +37,13 @@ from .support.reader_reference_lookup_tool import (
     paper_matches_reader_snap, parse_reader_recommendation_intent,
     prioritize_reader_related_pairs_refs_first, reader_user_allows_external_paper_lookup,
     rerank_reader_pairs_by_anchor_refs_first, resolve_references_via_openalex,
-    strip_reader_reco_boilerplate, user_message_may_need_reference_lookup,
+    user_message_may_need_reference_lookup,
     READER_RELATED_FROM_PRE_SEARCH,
 )
 
 from .prompts.paper_analysis import ANALYSIS_SYSTEM, READER_CHAT_SYSTEM
 
 logger = logging.getLogger(__name__)
-
-def _reader_resolve_user_hint(user_message: str, snap: Dict[str, Any], *, want_reco: bool) -> str:
-    um = (user_message or "").strip()
-    if not want_reco:
-        return um[:900]
-    core = strip_reader_reco_boilerplate(um) or um
-    if len(core) >= 28:
-        return um[:900]
-    title = str(snap.get("title") or "").strip()
-    ab = str(snap.get("abstract") or "").strip()[:520]
-    bits = [x for x in (core, title, ab) if x]
-    return "\n".join(bits).strip()[:900] or um[:900]
 
 _MAJOR_LOCK = threading.Lock()
 _MAJOR_WHITELIST: Optional[Tuple[str, ...]] = None
@@ -614,7 +602,6 @@ class PaperAnalysisAgent(BaseAgent):
                 extra = resolve_references_via_openalex(
                     snap_res,
                     max_results=resolve_mr,
-                    user_hint=_reader_resolve_user_hint(um, snap, want_reco=want_reco),
                 )
                 if extra and want_reco and reco_pid:
                     self._reader_reco_ref_offset[reco_pid] = off + max(1, len(extra))
@@ -657,7 +644,6 @@ class PaperAnalysisAgent(BaseAgent):
                         extra = resolve_references_via_openalex(
                             snap_fb,
                             max_results=resolve_mr,
-                            user_hint=_reader_resolve_user_hint(um, snap, want_reco=want_reco),
                         )
                         rb = str(snap.get("references_section_raw") or "").strip()
                         if extra and len(rb) >= 140 and not (snap.get("references") or []):
