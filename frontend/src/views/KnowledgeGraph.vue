@@ -289,14 +289,25 @@ async function expandPaper(paperId: number) {
     loading.value = false
   }
 }
+let paperDetailSeq = 0
 watch(selected, (node) => {
   paperDetail.value = null
   if (node?.type === 'paper' && node?.paper_id) {
+    const seq = ++paperDetailSeq
     paperDetailLoading.value = true
     getPaper(Number(node.paper_id))
-      .then((d) => { paperDetail.value = d })
-      .catch(() => { paperDetail.value = null })
-      .finally(() => { paperDetailLoading.value = false })
+      .then((d) => {
+        // Drop stale responses: a newer selection may already be in flight.
+        if (seq !== paperDetailSeq) return
+        paperDetail.value = d
+      })
+      .catch(() => {
+        if (seq !== paperDetailSeq) return
+        paperDetail.value = null
+      })
+      .finally(() => {
+        if (seq === paperDetailSeq) paperDetailLoading.value = false
+      })
   } else {
     paperDetailLoading.value = false
   }
@@ -469,8 +480,18 @@ function render() {
     sim.stop()
   }
 }
-watch([filterText, nodeType], () => {
+watch([filterText, nodeType, yearRange], () => {
   render()
+})
+// Align yearRange to the loaded data extent so the slider bounds and filter
+// start in sync (otherwise yearRange stays [1990, now] and the upper bound
+// never constrains). Clamp the current range into the new extent rather than
+// resetting, so a user's filter survives expandPaper adding more nodes.
+watch(yearExtent, ([lo, hi]) => {
+  if (lo >= hi) return
+  const cur = yearRange.value
+  const cl = (v: number) => Math.max(lo, Math.min(hi, v))
+  yearRange.value = [cl(cur[0]), cl(cur[1])]
 })
 onMounted(() => {
   load()

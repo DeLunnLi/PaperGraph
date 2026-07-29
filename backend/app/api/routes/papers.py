@@ -4,6 +4,7 @@ import logging
 
 import anyio
 from fastapi import APIRouter, Query, BackgroundTasks, Request, Depends, Header, HTTPException, UploadFile, File, Form
+from starlette.concurrency import run_in_threadpool
 from ...utils.common import route_errors, safe_http_500
 from ...models.schemas import (
     DeletePaperResponse,
@@ -129,7 +130,10 @@ async def save_papers(
     user: dict = Depends(require_user),
 ):
     with route_errors("save_papers"):
-        return await save_papers_service(
+        # save_papers runs synchronous LLM/HTTP/PDF work (classify, Tavily, KG,
+        # download) — run it off the event loop so other requests stay responsive.
+        return await run_in_threadpool(
+            save_papers_service,
             db=db,
             request=request,
             background_tasks=background_tasks,

@@ -58,11 +58,16 @@ export function toBibTeX(p: Paper): string {
 
 export function toAPA(p: Paper): string {
   const authors = (p.authors || []).map((a) => a.name).filter(Boolean)
-  const authorStr = authors.length > 0
-    ? authors.length <= 3
-      ? authors.join(', ') + (authors.length === 2 ? ' & ' : authors.length === 1 ? '' : ', & ')
-      : authors[0] + ', et al.'
-    : ''
+  let authorStr = ''
+  if (authors.length === 1) {
+    authorStr = authors[0]
+  } else if (authors.length === 2) {
+    authorStr = `${authors[0]} & ${authors[1]}`
+  } else if (authors.length === 3) {
+    authorStr = `${authors[0]}, ${authors[1]}, & ${authors[2]}`
+  } else if (authors.length > 3) {
+    authorStr = `${authors[0]}, et al.`
+  }
   const year = p.year ? `(${p.year})` : ''
   const title = p.title || ''
   const venue = paperVenue(p)

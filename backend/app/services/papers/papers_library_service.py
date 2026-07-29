@@ -117,7 +117,7 @@ def get_library(
     except Exception as e:
         raise safe_http_500("papers_library_service", e)
 
-async def save_papers(
+def save_papers(
     *,
     db,
     request: SavePapersRequest,

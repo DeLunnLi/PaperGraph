@@ -394,6 +394,12 @@ async def fetch_arxiv_candidates(
     exclude_sigs = exclude_sigs or set()
     q = (arxiv_query or "").strip()
     http_kw = daily_arxiv_http_kw()
+    # Skip arXiv entirely when its circuit breaker is open (the main search path
+    # already records failures); avoid burning days_tiers × cats timeout requests.
+    breaker = getattr(searcher, "_circuit_breaker", None)
+    if breaker is not None and breaker.is_open("arxiv"):
+        log.warning("每日论文：arXiv 熔断中，直接走 OpenAlex 兜底")
+        return [], 0
     arxiv_results: list[Any] = []
     seen_titles: set[str] = set()
     n_fail = 0
@@ -435,6 +441,11 @@ async def fetch_openalex_daily_fallback(
 ) -> list[Any]:
     import datetime as _dt
 
+    # OpenAlex breaker open → no point attempting the fallback.
+    breaker = getattr(searcher, "_circuit_breaker", None)
+    if breaker is not None and breaker.is_open("openalex"):
+        log.warning("每日论文：OpenAlex 熔断中，跳过兜底")
+        return []
     try:
         q = await run_in_threadpool(build_daily_arxiv_query, mem_kw, lib_kw, log=log)
         if len(q) < 4:
