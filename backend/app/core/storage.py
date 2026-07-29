@@ -361,46 +361,64 @@ class PaperDatabase:
                     self._sync_saved_meta(cursor, eid, paper)
                     return eid, False
 
-        cursor.execute(
-            """
-            INSERT INTO papers (
-                title, abstract, doi, pmid, arxiv_id, pmc_id,
-                journal, year, volume, issue, pages, publisher,
-                pdf_url, source_url, local_pdf_path, keywords, mesh_terms, "references",
-                citations, source, notes, tags, category, venue_type, rating, read_status, importance, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                paper.title,
-                paper.abstract,
-                doi,
-                pmid,
-                arxiv_id,
-                pmc_id,
-                paper.journal,
-                paper.year,
-                paper.volume,
-                paper.issue,
-                paper.pages,
-                paper.publisher,
-                paper.pdf_url,
-                paper.source_url,
-                getattr(paper, "local_pdf_path", None),
-                json.dumps(paper.keywords, ensure_ascii=False),
-                json.dumps(paper.mesh_terms, ensure_ascii=False),
-                json.dumps(paper.references, ensure_ascii=False),
-                paper.citations,
-                paper.source,
-                paper.notes,
-                json.dumps(paper.tags, ensure_ascii=False),
-                getattr(paper, "category", None),
-                getattr(paper, "venue_type", None),
-                paper.rating,
-                paper.read_status,
-                paper.importance,
-                int(paper.user_id or 0),
-            ),
-        )
+        try:
+            cursor.execute(
+                """
+                INSERT INTO papers (
+                    title, abstract, doi, pmid, arxiv_id, pmc_id,
+                    journal, year, volume, issue, pages, publisher,
+                    pdf_url, source_url, local_pdf_path, keywords, mesh_terms, "references",
+                    citations, source, notes, tags, category, venue_type, rating, read_status, importance, user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    paper.title,
+                    paper.abstract,
+                    doi,
+                    pmid,
+                    arxiv_id,
+                    pmc_id,
+                    paper.journal,
+                    paper.year,
+                    paper.volume,
+                    paper.issue,
+                    paper.pages,
+                    paper.publisher,
+                    paper.pdf_url,
+                    paper.source_url,
+                    getattr(paper, "local_pdf_path", None),
+                    json.dumps(paper.keywords, ensure_ascii=False),
+                    json.dumps(paper.mesh_terms, ensure_ascii=False),
+                    json.dumps(paper.references, ensure_ascii=False),
+                    paper.citations,
+                    paper.source,
+                    paper.notes,
+                    json.dumps(paper.tags, ensure_ascii=False),
+                    getattr(paper, "category", None),
+                    getattr(paper, "venue_type", None),
+                    paper.rating,
+                    paper.read_status,
+                    paper.importance,
+                    int(paper.user_id or 0),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # Concurrent insert of the same DOI/arXiv/pmid/pmc raced past the
+            # check-then-insert above. Re-SELECT the now-existing row (staying
+            # user_id-scoped) and treat it as an update so the caller doesn't
+            # surface a spurious -1 / failure.
+            for field, val in (("doi", doi), ("arxiv_id", arxiv_id), ("pmid", pmid), ("pmc_id", pmc_id)):
+                if val:
+                    cursor.execute(
+                        f"SELECT id FROM papers WHERE {field} = ? AND user_id = ?",
+                        (val, int(paper.user_id or 0)),
+                    )
+                    existing = cursor.fetchone()
+                    if existing:
+                        eid = int(existing[0])
+                        self._sync_saved_meta(cursor, eid, paper)
+                        return eid, False
+            raise
 
         paper_id = cursor.lastrowid
         self._add_authors(conn, paper_id, paper.authors)
@@ -693,22 +711,41 @@ class PaperDatabase:
     def delete_paper(self, paper_id: int, user_id: int) -> bool:
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            # Capture the PDF path (user-scoped ownership check) before deleting.
             cursor.execute(
                 "SELECT local_pdf_path FROM papers WHERE id = ? AND user_id = ?",
                 (paper_id, int(user_id)),
             )
             row = cursor.fetchone()
-            if row and row[0]:
-                abspath = self._abs_local_pdf(row[0])
-                if abspath and os.path.isfile(abspath):
-                    with suppress(OSError):
-                        os.remove(abspath)
+            if not row:
+                return False
+            pdf_rel = (row[0] or "").strip()
+            # Delete DB dependents + the paper row in one transaction; a failure
+            # here rolls back so we never remove the file for a still-owned paper.
             cursor.execute("DELETE FROM paper_authors WHERE paper_id = ?", (paper_id,))
+            for stmt, params in (
+                ("DELETE FROM paper_relations WHERE source_paper_id = ? OR target_paper_id = ?", (paper_id, paper_id)),
+                ("DELETE FROM paper_reader_turns WHERE paper_id = ?", (paper_id,)),
+            ):
+                try:
+                    cursor.execute(stmt, params)
+                except sqlite3.OperationalError:
+                    # Optional tables created lazily by other modules; absent is fine.
+                    pass
             cursor.execute(
                 "DELETE FROM papers WHERE id = ? AND user_id = ?",
                 (paper_id, int(user_id)),
             )
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+
+        # Remove the PDF file only after the DB transaction committed. A failure
+        # here just logs — the row is gone, so a dangling file is harmless.
+        if deleted and pdf_rel:
+            abspath = self._abs_local_pdf(pdf_rel)
+            if abspath and os.path.isfile(abspath):
+                with suppress(OSError):
+                    os.remove(abspath)
+        return deleted
 
     def repair_library_local_pdf_paths_batch(self, paper_ids: list[int], user_id: int) -> dict[int, str]:
         want = {int(x) for x in paper_ids if x is not None and int(x) >= 0}

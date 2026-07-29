@@ -298,6 +298,10 @@ function expandPaper(paperId: number) {
     } finally {
       if (seq === expandSeq) loading.value = false
     }
+  }).catch((e) => {
+    // A single failed expand must not poison the chain and make every later
+    // paper-click a silent no-op until reload.
+    console.warn('expandPaper failed', e)
   })
 }
 let paperDetailSeq = 0

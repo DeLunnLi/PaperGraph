@@ -1,8 +1,15 @@
-"""Memory observability endpoints: stats + list for debugging."""
+"""Memory observability endpoints: stats + list for debugging.
+
+These endpoints expose raw agent memory (which contains other users' Q&A
+content) and are NOT user-scoped. They default to OFF and require
+``PAPERGRAPH_MEMORY_DEBUG=1`` to enable, so a production deployment does not
+leak cross-user memory to any authenticated user.
+"""
 from __future__ import annotations
 import logging
+import os
 from typing import Any
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..deps import require_user
 from ...services.memory.agent_memory import get_agent_memory, _shared_user_id, _agent_user_id
@@ -11,9 +18,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/memory", tags=["记忆系统"])
 
 
+def _memory_debug_enabled() -> bool:
+    return os.getenv("PAPERGRAPH_MEMORY_DEBUG", "").strip() in ("1", "true", "yes")
+
+
 @router.get("/stats", dependencies=[Depends(require_user)])
 async def memory_stats() -> dict[str, Any]:
     """Return memory statistics: counts by type, shared vs agent."""
+    if not _memory_debug_enabled():
+        raise HTTPException(status_code=404, detail="memory debug endpoints disabled")
     am = get_agent_memory()
     return am.stats()
 
@@ -25,6 +38,8 @@ async def memory_list(
     limit: int = 50,
 ) -> dict[str, Any]:
     """List memories for debugging."""
+    if not _memory_debug_enabled():
+        raise HTTPException(status_code=404, detail="memory debug endpoints disabled")
     am = get_agent_memory()
     uid = _shared_user_id() if scope == "shared" else _agent_user_id(scope)
     rows = am.store.search_memories(
@@ -58,3 +73,4 @@ async def memory_list(
         "count": len(items),
         "items": items,
     }
+

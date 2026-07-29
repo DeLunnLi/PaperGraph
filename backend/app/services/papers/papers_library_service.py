@@ -243,12 +243,11 @@ def save_papers(
                             if len(_it.get("content","")) > 100:
                                 lit_p.abstract = _it["content"][:2000]
                                 break
-                except Exception: pass
+                except Exception as exc:
+                    logger.debug("save_papers.tavily_backfill_failed title=%r: %s", lit_p.title, exc)
 
         ids, added_new, updated_existing = db.add_papers(lit_list)
         t_after_db = time.perf_counter()
-
-        t_after_memory = time.perf_counter()
 
         for pid in ids or []:
             try:
@@ -257,6 +256,7 @@ def save_papers(
                 build_relations_for_new_paper(db.db_path, int(pid))
             except Exception:
                 continue
+        t_after_kg = time.perf_counter()
 
         pdf_downloaded = 0
         if request.download_pdfs and lit_list and ids:
@@ -310,16 +310,17 @@ def save_papers(
             msg = "未能写入本地 PDF：请确认含 arXiv / pdf_url 等可下载链接。"
 
         logger.info(
-            "POST /api/papers/save timing total=%.3fs classify=%.3fs db=%.3fs memory=%.3fs pdf=%.3fs"
-            " papers=%d llm_classify=%s download_pdfs=%s",
+            "POST /api/papers/save timing total=%.3fs classify=%.3fs db=%.3fs kg=%.3fs pdf=%.3fs"
+            " papers=%d llm_classify=%s download_pdfs=%s user_id=%s",
             (t_after_pdf - t0),
             (t_after_classify - t0),
             (t_after_db - t_after_classify),
-            (t_after_memory - t_after_db),
-            (t_after_pdf - t_after_memory),
+            (t_after_kg - t_after_db),
+            (t_after_pdf - t_after_kg),
             len(lit_list),
             getattr(request, "llm_classify", True),
             getattr(request, "download_pdfs", False),
+            user_id,
         )
 
         return SavePapersResponse(

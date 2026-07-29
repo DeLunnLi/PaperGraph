@@ -379,12 +379,22 @@ const { sendMessage, abortActiveRequest } = useSearchAgentChat({
     searchRequestActive.value = active
   },
 })
+const savingPaperIds = ref<Set<number>>(new Set())
 const saveOne = async (paper: Paper) => {
+  const pid = (paper as { id?: number }).id
+  if (pid != null && savingPaperIds.value.has(pid)) return
+  if (pid != null) savingPaperIds.value = new Set(savingPaperIds.value).add(pid)
   try {
     const res = await savePapers([paper])
     message.success(`已新增 ${res.added} 条到文献库`)
   } catch (e: unknown) {
     message.error((e as Error).message || '保存失败')
+  } finally {
+    if (pid != null) {
+      const next = new Set(savingPaperIds.value)
+      next.delete(pid)
+      savingPaperIds.value = next
+    }
   }
 }
 const saveAllFromMessage = async (msg: Message) => {

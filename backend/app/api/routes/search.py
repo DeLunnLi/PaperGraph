@@ -54,10 +54,23 @@ def _emit_deep_progress(tool_calls: list, event_type: str, payload: dict) -> Non
 logger = logging.getLogger(__name__)
 
 _SSE_QUEUE_SIZE = 128
-_SEARCH_AGENT_WALL_SEC = max(
-    120.0,
-    min(900.0, float(os.getenv("PAPERGRAPH_SEARCH_AGENT_WALL_SEC") or 420.0)),
-)
+
+
+def _env_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    """Parse a float env var, clamped to [minimum, maximum], falling back to
+    ``default`` (clamped) on missing/non-numeric values. Avoids a bad deployment
+    knob crashing the app at import."""
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return max(minimum, min(maximum, default))
+    try:
+        return max(minimum, min(maximum, float(raw)))
+    except (TypeError, ValueError):
+        logger.warning("non-numeric %s=%r, using default %s", name, raw, default)
+        return max(minimum, min(maximum, default))
+
+
+_SEARCH_AGENT_WALL_SEC = _env_float("PAPERGRAPH_SEARCH_AGENT_WALL_SEC", 420.0, 120.0, 900.0)
 _SEARCH_AGENT_INIT_SEC = 25.0
 _PREFIX_CONFLICT_MARKER = "为您找到"
 

@@ -423,7 +423,7 @@ const ensureOpeningAndHistory = async (reloadHistory = false, showError = true, 
     if (!res.success || !res.opening) return
     if (res.pdf_parsing) pdfParsing.value = true
     if (reloadHistory) {
-      const h = await getPaperReaderHistory(paperId.value, 200)
+      const h = await getPaperReaderHistory(paperId.value, 200).catch(() => null)
       if (loadSeq != null && loadSeq !== paperLoadSeq) return
       if (h?.success && Array.isArray(h.turns) && h.turns.length > 0) {
         const restored = mapHistoryTurns(h.turns)

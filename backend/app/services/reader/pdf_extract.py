@@ -25,7 +25,6 @@ _OCR_DEFAULT_ENDPOINT = "https://aigc.sankuai.com/v1/openai/native/chat/completi
 _OCR_CACHE_MAX_ITEMS = 128
 _ocr_cache: OrderedDict[str, str] = OrderedDict()
 _ocr_cache_lock = threading.Lock()
-_ocr_remote_slots = threading.BoundedSemaphore(max(1, int(os.getenv("PAPERGRAPH_OCR_CONCURRENCY", "2"))))
 
 
 def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -33,6 +32,9 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
         return max(minimum, min(maximum, int(os.getenv(name, str(default)))))
     except (TypeError, ValueError):
         return default
+
+
+_ocr_remote_slots = threading.BoundedSemaphore(max(1, _env_int("PAPERGRAPH_OCR_CONCURRENCY", 2, 1, 16)))
 
 
 def _is_scanned_page(page: Any) -> bool:

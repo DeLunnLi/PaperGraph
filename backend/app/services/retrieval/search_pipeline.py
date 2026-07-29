@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections import Counter
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
 
 import anyio
+
+logger = logging.getLogger(__name__)
 
 from ...core.paper import Paper as LitPaper
 from ...settings import get_settings
@@ -399,6 +402,15 @@ async def run_search_pipeline_async(
     }
     if ranking_metadata:
         metadata["ranking"] = ranking_metadata
+
+    logger.info(
+        "search.pipeline.done effective_query=%r recipe=%s candidates=%d ranked=%d ranking_method=%s",
+        ctx.effective_query,
+        plan.recipe.value,
+        len(candidates),
+        len(ranked),
+        ranking_method,
+    )
 
     return SearchPipelineResult(
         effective_query=ctx.effective_query,
