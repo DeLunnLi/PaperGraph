@@ -207,9 +207,10 @@ def test_filter_and_rerank_pairs_caps_results():
     papers, _ = agent._filter_and_rerank_pairs(
         ctx, pairs, um="推荐相关", want_reco=True, reco_max=3, history_lines=""
     )
-    # want_reco=True → capped at reco_max (3), but rerank may need LLM;
-    # if LLM path fails it falls back to anchor rerank. Either way <= cap-ish.
-    assert len(papers) <= 10  # sanity; exact cap depends on rerank path
+    # want_reco=True → exactly capped at reco_max (3); the LLM rerank path is
+    # skipped (no llm on the __new__ agent) so anchor fallback preserves all 10
+    # before the cap. A regression that drops the cap surfaces up to 80.
+    assert len(papers) == 3
 
 
 # ── _prune_reco_ref_offset ──────────────────────────────────────────
@@ -266,7 +267,7 @@ def test_classify_for_library_cache_hits_skip_llm():
     import app.agents.paper_analysis_agent as mod
     mod._MAJOR_WHITELIST = ("AI", "未分类")
     try:
-        agent.classify_for_library("Title", "abs", None, [], existing_categories=[])
+        r1 = agent.classify_for_library("Title", "abs", None, [], existing_categories=[])
         first = calls["n"]
         r2 = agent.classify_for_library("Title", "abs", None, [], existing_categories=[])
     finally:
@@ -274,6 +275,9 @@ def test_classify_for_library_cache_hits_skip_llm():
     # No additional LLM calls on the cached second invocation.
     assert calls["n"] == first
     assert r2[0]  # category is non-empty
+    # Cached value equals the first result (catches cache-key collisions / corruption).
+    assert r2[0] == r1[0]
+    assert list(r2[1]) == list(r1[1])
 
 
 if __name__ == "__main__":

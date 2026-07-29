@@ -23,6 +23,11 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [vue()],
     resolve: { alias: { '@': resolve(process.cwd(), 'src') } },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      include: ['src/**/*.test.ts'],
+    },
     server: {
       host: '127.0.0.1',
       port: frontendPort,

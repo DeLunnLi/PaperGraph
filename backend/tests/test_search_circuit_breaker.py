@@ -79,6 +79,22 @@ def test_breaker_factory_reads_settings():
     assert b.recovery_timeout >= 10
 
 
+def test_breaker_factory_reflects_custom_settings(monkeypatch):
+    """Hard-coding the tuning knobs would ship undetected; vary them explicitly."""
+    from types import SimpleNamespace
+    import app.settings as settings_mod
+
+    fake_settings = SimpleNamespace(
+        papergraph_search_circuit_failure_threshold=7,
+        papergraph_search_circuit_recovery_timeout_sec=120,
+    )
+    monkeypatch.setattr(settings_mod, "get_settings", lambda: fake_settings)
+
+    b = _new_circuit_breaker()
+    assert b.failure_threshold == 7
+    assert b.recovery_timeout == 120
+
+
 def test_run_one_skips_when_breaker_open(monkeypatch):
     """熔断开启时，_run_one fast-skip 返回 [] 不调源。"""
     from app.core.search.paper_searcher import PaperSearcher
