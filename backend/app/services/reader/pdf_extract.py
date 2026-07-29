@@ -254,6 +254,12 @@ def extract_pdf_text_enhanced(abspath: str | None) -> str:
         logger.debug("pdf_extract: pymupdf4llm strategy failed: %s", exc, exc_info=False)
 
     # Priority 2: fitz plain text with scanned-page detection
+    # When pymupdf4llm already produced enough text (best >= 500 chars), the
+    # fitz result can never replace it (the condition below requires
+    # len(best) < 500), so OCR on scanned pages would be pure waste — skip it.
+    # OCR still runs when pymupdf4llm came up short, which is the only case
+    # fitz_text can win.
+    ocr_worthwhile = not best or len(best) < 500
     try:
         import fitz
         doc = fitz.open(abspath)
@@ -263,7 +269,7 @@ def extract_pdf_text_enhanced(abspath: str | None) -> str:
         max_ocr_pages = _env_int("PAPERGRAPH_OCR_MAX_PAGES", 30, 0, 100)
         for page in doc:
             t = (page.get_text("text") or "").strip()
-            if _is_scanned_page(page) and ocr_pages < max_ocr_pages:
+            if ocr_worthwhile and _is_scanned_page(page) and ocr_pages < max_ocr_pages:
                 ocr_pages += 1
                 ocr_text = _ocr_page(page)
                 if len(ocr_text) > len(t):

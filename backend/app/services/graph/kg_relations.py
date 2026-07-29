@@ -16,8 +16,6 @@ from ...utils import normalize_arxiv_id as _norm_arxiv_id
 
 logger = logging.getLogger(__name__)
 
-_kg_infer_lock = threading.Lock()
-
 _kg_recent_fingerprints: dict[str, float] = {}
 _kg_fingerprints_lock = threading.Lock()
 _KG_DEDUP_WINDOW_SEC = 180.0
@@ -353,9 +351,12 @@ def build_relations_for_new_paper(db_path: str, new_paper_id: int) -> int:
         )
 
     edges: list[dict[str, Any]] = []
-    with _kg_infer_lock:
-        agent = get_knowledge_graph_agent()
-        edges, _ = agent.infer_edges(new_paper=new_meta, candidates=cands)
+    # infer_edges is stateless (per-call messages, local merge dict, read-only
+    # config) and the DB write below is SQLite-serialized, so a process-global
+    # lock here only serializes concurrent saves of *different* papers — pure
+    # tail-latency. The fingerprint dedup guard above handles re-saves.
+    agent = get_knowledge_graph_agent()
+    edges, _ = agent.infer_edges(new_paper=new_meta, candidates=cands)
 
     n = upsert_relations(db_path, int(new_paper_id), edges)
     if n:

@@ -187,9 +187,11 @@ def save_papers(
                     existing_categories = []
 
                 from ...agents import get_paper_analysis_agent
+                from concurrent.futures import ThreadPoolExecutor
 
                 agent = get_paper_analysis_agent()
-                for lit_p in lit_list:
+
+                def _classify_one(lit_p):
                     cat, extra = agent.classify_for_library(
                         lit_p.title,
                         lit_p.abstract,
@@ -197,11 +199,22 @@ def save_papers(
                         getattr(lit_p, "keywords", None) or [],
                         existing_categories=existing_categories,
                     )
-                    lit_p.category = cat
-                    lit_p.tags = _merge_tag_lists(lit_p.tags or [], extra)
+                    venue = None
                     if not getattr(lit_p, "venue_type", None):
-                        lit_p.venue_type = agent.classify_venue_type(lit_p.journal)
-                    llm_classified += 1
+                        venue = agent.classify_venue_type(lit_p.journal)
+                    return lit_p, cat, extra, venue
+
+                # classify_for_library is stateless w.r.t. ReaderCtx (it uses
+                # stateless_llm_chat + a locked cache), so we can run the
+                # per-paper LLM round-trips concurrently instead of sequentially.
+                max_workers = min(8, max(1, len(lit_list)))
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    for lit_p, cat, extra, venue in ex.map(_classify_one, lit_list):
+                        lit_p.category = cat
+                        lit_p.tags = _merge_tag_lists(lit_p.tags or [], extra)
+                        if venue:
+                            lit_p.venue_type = venue
+                        llm_classified += 1
             except Exception as e:
                 logger.warning("大模型归类未执行：%s", e)
                 for lit_p in lit_list:
@@ -283,11 +296,7 @@ def save_papers(
 
         ids_ok = [int(x) for x in ids if x is not None and int(x) >= 0]
         if ids_ok:
-            need_repair = []
-            for pid in ids_ok:
-                row = db.get_paper_by_id(pid, user_id=user_id)
-                if row and not (getattr(row, "local_pdf_path", None) or "").strip():
-                    need_repair.append(pid)
+            need_repair = db.paper_ids_missing_local_pdf(ids_ok, user_id=user_id)
             if need_repair:
                 db.repair_library_local_pdf_paths_batch(need_repair, user_id=user_id)
 

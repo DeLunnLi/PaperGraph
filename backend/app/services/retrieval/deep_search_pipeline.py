@@ -236,7 +236,9 @@ async def run_deep_search_pipeline_async(
 
     # --- Step 1: Decompose ---
     _emit("deep:decompose", {"phase": "decompose"})
-    sub_queries = decompose_query(llm, user_query, plan, max_sub_queries=max_sub, timeout_sec=decomp_timeout)
+    sub_queries = await asyncio.to_thread(
+        decompose_query, llm, user_query, plan, max_sub_queries=max_sub, timeout_sec=decomp_timeout
+    )
     _emit("deep:decompose", {"sub_queries": sub_queries, "round": 0})
 
     all_candidates: list[RecordedCandidate] = []
@@ -261,7 +263,8 @@ async def run_deep_search_pipeline_async(
         if round_idx + 1 < max_iter and all_candidates:
             unique_count = len(set(_paper_identity_short(c.paper) for c in all_candidates))
             sample_titles = [str(c.paper.title or "")[:100] for c in all_candidates[:10]]
-            should_cont, new_subs = _should_continue_iteration(
+            should_cont, new_subs = await asyncio.to_thread(
+                _should_continue_iteration,
                 llm, user_query, all_used_subqueries, unique_count, round_idx, sample_titles,
                 threshold=mr * 3,
             )
@@ -326,7 +329,9 @@ async def run_deep_search_pipeline_async(
     synthesis = ""
     if synth_enabled and ranked:
         _emit("deep:synthesis", {"phase": "synthesis"})
-        synthesis = synthesize_brief(llm, user_query, ranked, timeout_sec=synth_timeout)
+        synthesis = await asyncio.to_thread(
+            synthesize_brief, llm, user_query, ranked, timeout_sec=synth_timeout
+        )
 
     result = DeepSearchPipelineResult(
         effective_query=user_query,

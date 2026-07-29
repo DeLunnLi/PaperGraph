@@ -52,15 +52,26 @@ def _export_papers(conn: sqlite3.Connection, user_id: int | None = None) -> list
         "read_status", "importance", "notes", "citations", "created_at", "updated_at",
     ]
     out = []
+    paper_ids = [r[0] for r in rows]
+    # Batch author lookup: one JOIN for all papers instead of N per-paper queries.
+    authors_by_paper: dict[int, list[str]] = {}
+    if paper_ids:
+        for i in range(0, len(paper_ids), 900):
+            chunk = paper_ids[i : i + 900]
+            placeholders = ",".join(["?"] * len(chunk))
+            arows = conn.execute(
+                f"""
+                SELECT pa.paper_id, a.name FROM authors a
+                JOIN paper_authors pa ON a.id = pa.author_id
+                WHERE pa.paper_id IN ({placeholders}) ORDER BY pa.paper_id, pa.author_order
+                """,
+                chunk,
+            ).fetchall()
+            for pid, name in arows:
+                authors_by_paper.setdefault(pid, []).append(name)
     for r in rows:
         d = dict(zip(cols, r))
-        # Authors
-        authors = conn.execute("""
-            SELECT a.name FROM authors a
-            JOIN paper_authors pa ON a.id = pa.author_id
-            WHERE pa.paper_id = ? ORDER BY pa.author_order
-        """, (d["id"],)).fetchall()
-        d["authors"] = [a[0] for a in authors]
+        d["authors"] = authors_by_paper.get(d["id"], [])
         # Strip heavy/internal
         d.pop("id", None)
         if d.get("abstract") and len(d["abstract"]) > 500:

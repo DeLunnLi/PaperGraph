@@ -110,17 +110,33 @@ def ensure_opening_turn(db_path: str, *, paper_id: int, user_id: int, opening_te
         prepend_turn(db_path, paper_id=int(paper_id), user_id=user_id, role="assistant", content=op, before_created_at=ts0)
         return
 
-def list_turns(db_path: str, *, paper_id: int, limit: int = 200, user_id: int | None = None) -> list[dict[str, str | None]]:
+def list_turns(
+    db_path: str,
+    *,
+    paper_id: int,
+    limit: int = 200,
+    user_id: int | None = None,
+    recent: bool = False,
+) -> list[dict[str, str | None]]:
+    """Return turns for a paper.
+
+    By default the earliest ``limit`` turns are returned (ASC), which
+    ``ensure_opening_turn`` relies on to inspect the opening. Pass
+    ``recent=True`` for the chat history view: it fetches the most recent
+    ``limit`` turns (DESC) and reverses to chronological order, so papers with
+    more than ``limit`` turns do not silently lose the latest conversation.
+    """
     ensure_tables(db_path)
+    order = "created_at DESC, id DESC" if recent else "created_at ASC, id ASC"
     with _conn(db_path, row_factory=sqlite3.Row) as conn:
         if user_id is not None:
             rows = conn.execute(
-                "SELECT role,content,created_at FROM paper_reader_turns WHERE paper_id=? AND user_id=? ORDER BY created_at ASC,id ASC LIMIT ?",
+                f"SELECT role,content,created_at FROM paper_reader_turns WHERE paper_id=? AND user_id=? ORDER BY {order} LIMIT ?",
                 (int(paper_id), int(user_id), int(limit)),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT role,content,created_at FROM paper_reader_turns WHERE paper_id=? ORDER BY created_at ASC,id ASC LIMIT ?",
+                f"SELECT role,content,created_at FROM paper_reader_turns WHERE paper_id=? ORDER BY {order} LIMIT ?",
                 (int(paper_id), int(limit)),
             ).fetchall()
         out: list[dict[str, str | None]] = []
@@ -130,4 +146,6 @@ def list_turns(db_path: str, *, paper_id: int, limit: int = 200, user_id: int | 
                 "content": (r["content"] or "").strip(),
                 "created_at": int(r["created_at"] or 0),
             })
+        if recent:
+            out.reverse()
         return out

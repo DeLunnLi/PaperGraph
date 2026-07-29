@@ -7,6 +7,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from cachetools import TTLCache
+
 from app.core.paper_paths import normalize_library_category_display
 from app.exceptions import LLMError
 
@@ -74,6 +76,11 @@ class PaperAnalysisAgent(BaseAgent):
         self._reco_offset_max_papers = 200
         # Venue-type cache is read-only after populate; safe to share.
         self._venue_type_cache: dict[str, str] = {}
+        # (title, abstract, journal, keywords) -> (category, tags) cache so
+        # re-saving / re-importing an already-classified paper skips the 2 LLM
+        # round-trips. Process-wide singleton, guarded by a lock.
+        self._classify_cache: TTLCache = TTLCache(maxsize=1024, ttl=7 * 86400)
+        self._classify_cache_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # LLM 调用 —— hello-agents 原语复用。
@@ -373,8 +380,9 @@ class PaperAnalysisAgent(BaseAgent):
         j = str(journal).strip()
         if j.startswith("arXiv:"):
             return "preprint"
-        if j in self._venue_type_cache:
-            return self._venue_type_cache[j]
+        with self._classify_cache_lock:
+            if j in self._venue_type_cache:
+                return self._venue_type_cache[j]
         try:
             prompt = f'判断以下学术来源名称是会议(conference)还是期刊(journal)。只回复一个单词：conference 或 journal。\n\n名称：{j}'
             resp = self._llm_chat(ANALYSIS_SYSTEM, prompt)
@@ -388,10 +396,39 @@ class PaperAnalysisAgent(BaseAgent):
         except Exception:
             vt = None
         if vt:
-            self._venue_type_cache[j] = vt
+            with self._classify_cache_lock:
+                self._venue_type_cache[j] = vt
         return vt
 
     def classify_for_library(
+        self,
+        title: str,
+        abstract: Optional[str],
+        journal: Optional[str],
+        keywords: Optional[List[str]] = None,
+        existing_categories: Optional[List[str]] = None,
+    ) -> Tuple[str, List[str]]:
+        # Cache by content hash so re-save / re-import skips the 2 LLM calls.
+        # existing_categories only narrows candidates; same paper → same result,
+        # so it is intentionally NOT part of the key.
+        cache_key = (
+            (title or "").strip().lower(),
+            (abstract or "").strip()[:800].lower(),
+            (journal or "").strip().lower(),
+            tuple(str(k).strip().lower() for k in (keywords or []) if str(k).strip()),
+        )
+        with self._classify_cache_lock:
+            cached = self._classify_cache.get(cache_key)
+        if cached is not None:
+            return cached[0], list(cached[1])
+        result = self._classify_for_library_uncached(
+            title, abstract, journal, keywords, existing_categories
+        )
+        with self._classify_cache_lock:
+            self._classify_cache[cache_key] = (result[0], tuple(result[1]))
+        return result
+
+    def _classify_for_library_uncached(
         self,
         title: str,
         abstract: Optional[str],

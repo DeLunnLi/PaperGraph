@@ -286,6 +286,27 @@ class PaperDatabase:
                 except sqlite3.OperationalError as e:
                     logger.warning("FTS5 不可用或未启用，跳过全文索引: %s", e)
                 cursor.execute("PRAGMA user_version = 3")
+                db_version = 3
+
+            if db_version < 4:
+                # Hot user-scoped reads (list/count/search/category) all filter
+                # ``WHERE user_id = ?``; the pre-existing indexes led on
+                # category/year and force full table scans across all tenants.
+                # Add user_id-leading indexes plus authors lookups (save path
+                # resolves authors by name/orcid per paper). All IF NOT EXISTS so
+                # this is a no-op for fresh installs that already created them.
+                cursor.executescript(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_papers_user_id ON papers(user_id);
+                    CREATE INDEX IF NOT EXISTS idx_papers_user_created ON papers(user_id, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_papers_user_category ON papers(user_id, category);
+                    CREATE INDEX IF NOT EXISTS idx_authors_name ON authors(name);
+                    CREATE INDEX IF NOT EXISTS idx_authors_orcid ON authors(orcid) WHERE orcid IS NOT NULL AND orcid <> '';
+                    CREATE INDEX IF NOT EXISTS idx_paper_authors_paper ON paper_authors(paper_id);
+                    CREATE INDEX IF NOT EXISTS idx_paper_authors_author ON paper_authors(author_id);
+                    """
+                )
+                cursor.execute("PRAGMA user_version = 4")
 
     @staticmethod
     def _norm_id_field(val: str | None) -> str | None:
@@ -724,6 +745,30 @@ class PaperDatabase:
             best_rel = rows[0][1]
             if self.set_local_pdf_path(pid, best_rel, user_id=user_id):
                 out[pid] = best_rel
+        return out
+
+    def paper_ids_missing_local_pdf(self, paper_ids: list[int], user_id: int) -> list[int]:
+        """Return the subset of ``paper_ids`` whose local_pdf_path is empty/null.
+
+        Single batched query replacing a per-paper get_paper_by_id loop on the
+        save path. Respects user_id scoping.
+        """
+        want = [int(x) for x in paper_ids if x is not None and int(x) >= 0]
+        if not want:
+            return []
+        out: list[int] = []
+        # SQLite limits 999 bound variables per statement; chunk the IN-list.
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for i in range(0, len(want), 900):
+                chunk = want[i : i + 900]
+                placeholders = ",".join(["?"] * len(chunk))
+                cursor.execute(
+                    f"SELECT id FROM papers WHERE user_id = ? AND id IN ({placeholders}) "
+                    f"AND (local_pdf_path IS NULL OR TRIM(local_pdf_path) = '')",
+                    (int(user_id), *chunk),
+                )
+                out.extend(int(r[0]) for r in cursor.fetchall())
         return out
 
     def get_library_pdf_abspath(self, paper_id: int, user_id: int | None = None) -> str | None:

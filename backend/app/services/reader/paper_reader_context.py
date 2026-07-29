@@ -356,6 +356,13 @@ def _cache_delete(db_path: str, paper_id: int) -> None:
         pass
 
 def compute_and_cache_excerpt(db_path: str, paper_id: int, pdf_abspath: str) -> None:
+    # Skip the (seconds-level) full re-parse when a fresh cached excerpt for
+    # this exact PDF already exists. _schedule_pdf_excerpt fires this on every
+    # reader chat message, so without this guard each message re-runs
+    # pymupdf4llm + fitz + per-page OCR.
+    cached, _pages = _cache_get(db_path, int(paper_id), pdf_abspath, max_age_days=45)
+    if cached:
+        return
     ex = extract_pdf_text_full(pdf_abspath)
     if ex.strip():
         pages = extract_pdf_text_with_pages(pdf_abspath)

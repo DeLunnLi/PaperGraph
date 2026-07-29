@@ -32,10 +32,14 @@ from app.agents.support.reader_reference_lookup_tool import (
 
 def _make_agent() -> PaperAnalysisAgent:
     """Bypass __init__ (which calls get_llm); set only what the tested methods need."""
+    from cachetools import TTLCache
+    import threading
     agent = PaperAnalysisAgent.__new__(PaperAnalysisAgent)
     agent._reader_reco_ref_offset = {}
     agent._reco_offset_max_papers = 200
     agent._venue_type_cache = {}
+    agent._classify_cache = TTLCache(maxsize=64, ttl=3600)
+    agent._classify_cache_lock = threading.Lock()
     return agent
 
 
@@ -244,6 +248,32 @@ def test_new_reader_agent_binds_tools_to_ctx():
     for expected in ("reader_paper_lookup", "reader_reference_lookup",
                      "reader_pdf_structure", "reader_pdf_table"):
         assert expected in names
+
+
+def test_classify_for_library_cache_hits_skip_llm():
+    """A second classify call with the same content returns the cached result
+    without invoking the LLM again."""
+    agent = _make_agent()
+    calls = {"n": 0}
+
+    class _StubLLM:
+        def invoke(self, messages, **kw):
+            calls["n"] += 1
+            return SimpleNamespace(content='{"major":"AI"}')
+
+    agent.llm = _StubLLM()
+    # Prime the whitelist so _get_major_whitelist doesn't bootstrap via LLM.
+    import app.agents.paper_analysis_agent as mod
+    mod._MAJOR_WHITELIST = ("AI", "未分类")
+    try:
+        agent.classify_for_library("Title", "abs", None, [], existing_categories=[])
+        first = calls["n"]
+        r2 = agent.classify_for_library("Title", "abs", None, [], existing_categories=[])
+    finally:
+        mod._MAJOR_WHITELIST = None
+    # No additional LLM calls on the cached second invocation.
+    assert calls["n"] == first
+    assert r2[0]  # category is non-empty
 
 
 if __name__ == "__main__":

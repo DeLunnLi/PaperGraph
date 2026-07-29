@@ -263,4 +263,5 @@ class PaperReaderService:
             paper_id=int(paper_id),
             limit=int(limit),
             user_id=user_id,
+            recent=True,
         )
