@@ -246,6 +246,7 @@ async function load() {
   loading.value = true
   selected.value = null
   selectedEdge.value = null
+  expandSeq += 1  // invalidate any in-flight expandPaper responses
   try {
     const r = await apiClient.get<GraphResponse>('/api/papers/graph/library', {
       params: { limit: 250, include_authors: false, include_keywords: false, relation_edge_limit: 450 },
@@ -262,32 +263,41 @@ async function load() {
     loading.value = false
   }
 }
-async function expandPaper(paperId: number) {
-  loading.value = true
-  try {
-    const r = await apiClient.get<GraphResponse>('/api/papers/graph/library', {
-      params: {
-        limit: 250,
-        focus_paper_id: paperId,
-        include_authors: true,
-        include_keywords: true,
-        relation_edge_limit: 800,
-      },
-    })
-    if (!r.data?.success) return
-    const existingN = new Set(rawNodes.value.map((n) => n.id))
-    for (const n of r.data.nodes || []) {
-      if (!existingN.has(n.id)) rawNodes.value.push(n)
+let expandSeq = 0
+let expandChain: Promise<void> = Promise.resolve()
+function expandPaper(paperId: number) {
+  // Serialize expansions so concurrent clicks can't both read a stale node set
+  // and push duplicate nodes/edges, and so the loading flag is owned by the
+  // currently-active request only.
+  expandChain = expandChain.then(async () => {
+    const seq = ++expandSeq
+    loading.value = true
+    try {
+      const r = await apiClient.get<GraphResponse>('/api/papers/graph/library', {
+        params: {
+          limit: 250,
+          focus_paper_id: paperId,
+          include_authors: true,
+          include_keywords: true,
+          relation_edge_limit: 800,
+        },
+      })
+      // Drop stale responses (a newer expand or a full reload started).
+      if (seq !== expandSeq || !r.data?.success) return
+      const existingN = new Set(rawNodes.value.map((n) => n.id))
+      for (const n of r.data.nodes || []) {
+        if (!existingN.has(n.id)) rawNodes.value.push(n)
+      }
+      const existingE = new Set(rawEdges.value.map((e) => `${e.source}|${e.target}|${e.type}`))
+      for (const e of r.data.edges || []) {
+        const k = `${e.source}|${e.target}|${e.type}`
+        if (!existingE.has(k)) rawEdges.value.push(e)
+      }
+      render()
+    } finally {
+      if (seq === expandSeq) loading.value = false
     }
-    const existingE = new Set(rawEdges.value.map((e) => `${e.source}|${e.target}|${e.type}`))
-    for (const e of r.data.edges || []) {
-      const k = `${e.source}|${e.target}|${e.type}`
-      if (!existingE.has(k)) rawEdges.value.push(e)
-    }
-    render()
-  } finally {
-    loading.value = false
-  }
+  })
 }
 let paperDetailSeq = 0
 watch(selected, (node) => {

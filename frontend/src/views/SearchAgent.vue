@@ -324,6 +324,10 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   abortActiveRequest()
+  if (scrollFrame) {
+    cancelAnimationFrame(scrollFrame)
+    scrollFrame = 0
+  }
   window.removeEventListener('beforeunload', flushConversationState)
   flushConversationState()
 })

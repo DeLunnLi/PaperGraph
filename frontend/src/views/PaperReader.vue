@@ -360,6 +360,7 @@ const onChatWheel = (e: WheelEvent) => {
 }
 onBeforeUnmount(() => {
   cancelActiveChat('已取消当前提问')
+  resetPdfStreamUrl()
   cleanupSplitPane()
   void flushReadingSession()
 })
@@ -615,10 +616,6 @@ watch(
 )
 onMounted(() => {
   setupSplitPane()
-})
-onBeforeUnmount(() => {
-  cancelActiveChat('已取消当前提问')
-  resetPdfStreamUrl()
 })
 </script>
 <style scoped>

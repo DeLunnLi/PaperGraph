@@ -91,6 +91,14 @@ async def lifespan(app: FastAPI):
             pass
         except Exception:
             logger.debug("trace 清理后台任务结束异常", exc_info=True)
+
+    # Close the shared searcher's httpx.AsyncClient connection pool.
+    try:
+        from ..api.dependencies import _searcher
+        if _searcher is not None:
+            await _searcher.aclose()
+    except Exception:
+        logger.debug("searcher 关闭异常", exc_info=True)
     logger.info("%s", "=" * 60)
 
 app = FastAPI(
