@@ -3,6 +3,7 @@ import {
   escapeBib,
   paperVenue,
   paperExternalUrl,
+  formatAuthors,
   toBibTeX,
   toAPA,
   toPlain,
@@ -52,6 +53,33 @@ describe('paperExternalUrl', () => {
   })
   it('returns null when nothing available', () => {
     expect(paperExternalUrl(paper({}))).toBeNull()
+  })
+})
+
+describe('formatAuthors', () => {
+  it('returns empty default when no authors', () => {
+    expect(formatAuthors(paper({}))).toBe('—')
+    expect(formatAuthors(null)).toBe('—')
+  })
+  it('joins all authors when no max', () => {
+    const p = paper({ authors: [{ name: 'A' }, { name: 'B' }, { name: 'C' }] })
+    expect(formatAuthors(p)).toBe('A, B, C')
+  })
+  it('truncates with suffix when over max', () => {
+    const p = paper({ authors: [{ name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' }] })
+    expect(formatAuthors(p, { max: 3, suffix: ' et al.' })).toBe('A, B, C et al.')
+    expect(formatAuthors(p, { max: 2, suffix: ' 等' })).toBe('A, B 等')
+  })
+  it('does not truncate when at or under max', () => {
+    const p = paper({ authors: [{ name: 'A' }, { name: 'B' }] })
+    expect(formatAuthors(p, { max: 2, suffix: '…' })).toBe('A, B')
+  })
+  it('filters undefined/empty names', () => {
+    const p = paper({ authors: [{ name: 'A' }, { name: '' }, { name: undefined }, { name: 'D' }] } as never)
+    expect(formatAuthors(p)).toBe('A, D')
+  })
+  it('respects custom empty', () => {
+    expect(formatAuthors(paper({}), { empty: '' })).toBe('')
   })
 })
 

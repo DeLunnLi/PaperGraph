@@ -10,6 +10,30 @@ export function paperVenue(p: Paper | null | undefined): string {
   return String(p?.journal || '').trim()
 }
 
+export interface FormatAuthorsOptions {
+  /** Max authors to show before truncating (0/undefined = all). */
+  max?: number
+  /** Suffix appended when authors are truncated (e.g. ' 等', ' et al.', '…'). */
+  suffix?: string
+  /** Value returned when there are no authors (default '—'). */
+  empty?: string
+}
+
+/** Format a paper's author list for UI display. Dedupes the per-view hand-rolled
+ *  variants (PaperCard / SearchResultPapers / PaperReader / KnowledgeGraph / Library). */
+export function formatAuthors(
+  p: Paper | null | undefined,
+  opts: FormatAuthorsOptions = {},
+): string {
+  const { max, suffix = '', empty = '—' } = opts
+  const names = (p?.authors || []).map((a) => a?.name).filter((n): n is string => !!n)
+  if (!names.length) return empty
+  if (max && max > 0 && names.length > max) {
+    return `${names.slice(0, max).join(', ')}${suffix}`
+  }
+  return names.join(', ')
+}
+
 /** Best external link for a paper: source_url → pdf_url → arXiv abs → DOI. */
 export function paperExternalUrl(p: Paper | null | undefined): string | null {
   if (!p) return null

@@ -251,6 +251,20 @@ def test_new_reader_agent_binds_tools_to_ctx():
         assert expected in names
 
 
+def test_new_reader_agent_exposes_no_builtin_tools():
+    """The reader agent is a bounded loop over the 4 reader tools; hello-agents
+    builtins (Task/TodoWrite/DevLog) must NOT leak into the reader chat
+    (papergraph_agent_config disables them). Regression guard for a P0-4
+    isolation gap fixed in round-5."""
+    agent = _make_agent()
+    agent.llm = SimpleNamespace(model="stub")
+    ctx = ReaderCtx(snap={"paper_id": 1, "title": "T"})
+    names = set(agent._new_reader_agent(ctx).tool_registry.list_tools())
+    expected = {"reader_paper_lookup", "reader_reference_lookup",
+                "reader_pdf_structure", "reader_pdf_table"}
+    assert names == expected, f"unexpected extra tools: {names - expected}"
+
+
 def test_classify_for_library_cache_hits_skip_llm():
     """A second classify call with the same content returns the cached result
     without invoking the LLM again."""

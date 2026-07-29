@@ -85,7 +85,7 @@
             <template v-if="selected!.type === 'paper' && selected!.paper_id">
               <div v-if="paperDetailLoading" class="kg-info__kg-info__kv" style="color: var(--pg-text-tertiary);">加载论文详情中…</div>
               <template v-else-if="paperDetail">
-                <div v-if="paperDetail.authors?.length" class="kg-info__kv"><strong>authors</strong>：{{ paperDetail.authors.map((a: any) => a.name).join(', ') }}</div>
+                <div v-if="paperDetail.authors?.length" class="kg-info__kv"><strong>authors</strong>：{{ formatAuthors(paperDetail, { empty: '' }) }}</div>
                 <div v-if="paperDetail.journal" class="kg-info__kv"><strong>{{ paperDetail.venue_type === 'conference' ? 'conference' : paperDetail.venue_type === 'preprint' ? 'preprint' : 'journal' }}</strong>：{{ paperDetail.journal }}</div>
                 <div v-if="paperDetail.doi" class="kg-info__kv"><strong>doi</strong>：{{ paperDetail.doi }}</div>
                 <div v-if="paperDetail.abstract" class="kg-info__kv">
@@ -108,6 +108,7 @@ import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import * as d3 from 'd3'
 import apiClient, { getPaper } from '@/services/api'
+import { formatAuthors } from '@/utils/citation'
 import { downloadBlob, todayStamp } from '@/utils/download'
 type GraphNode = {
   id: string

@@ -59,6 +59,13 @@ def papergraph_agent_config(*, max_tokens: int | None = None) -> Config:
         session_dir=str(memory_root / "sessions"),
         tool_output_dir=str(memory_root / "tool-output"),
         skills_enabled=False,
+        # The reader SimpleAgent is a bounded loop over the 4 reader tools; the
+        # hello-agents builtins (Task/TodoWrite/DevLog/Subagent) are meant for
+        # general agent workflows and would leak unrelated capabilities into the
+        # reader chat. Disable them so the LLM only sees the reader toolset.
+        todowrite_enabled=False,
+        devlog_enabled=False,
+        subagent_enabled=False,
         todowrite_persistence_dir=str(memory_root / "todos"),
         devlog_persistence_dir=str(memory_root / "devlogs"),
         max_tokens=max_tokens,

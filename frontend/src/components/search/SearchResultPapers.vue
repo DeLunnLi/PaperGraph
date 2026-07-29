@@ -4,7 +4,7 @@ import { FilePdfOutlined, SaveOutlined } from '@ant-design/icons-vue'
 import LatexInline from '@/components/LatexInline.vue'
 import type { Paper } from '@/types'
 import { clipTextAvoidBreakingMath } from '@/utils/markdown'
-import { paperVenue } from '@/utils/citation'
+import { formatAuthors, paperVenue } from '@/utils/citation'
 import { resultSourceMeta } from '@/utils/paperSourceMeta'
 
 const props = defineProps<{
@@ -76,7 +76,7 @@ function abstractPreview(abs: string, length = 280): string {
         </div>
         <div class="paper-meta">
           <span v-if="paper.authors?.length" class="paper-meta__authors">
-            {{ paper.authors.map(a => a.name).slice(0, 5).join(', ') }}<span v-if="paper.authors.length > 5"> 等</span>
+            {{ formatAuthors(paper, { max: 5, suffix: ' 等', empty: '' }) }}
           </span>
           <span class="paper-meta__dot">·</span>
           <LatexInline

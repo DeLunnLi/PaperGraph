@@ -2,7 +2,8 @@
 import { ref, computed } from 'vue'
 import LatexInline from '@/components/LatexInline.vue'
 import type { Paper } from '@/types'
-import { paperVenue } from '@/utils/citation'
+import { formatAuthors, paperVenue } from '@/utils/citation'
+import { clipTextAvoidBreakingMath } from '@/utils/markdown'
 const props = withDefaults(defineProps<{
   paper: Paper
   index?: number
@@ -27,11 +28,12 @@ function needsToggle(text?: string): boolean {
   return (text?.length ?? 0) > props.abstractPreviewChars
 }
 function preview(text?: string): string {
-  const t = (text ?? '').trim()
-  return t.length <= props.abstractPreviewChars ? t : t.slice(0, props.abstractPreviewChars) + '…'
+  // Use math-safe truncation so we never cut inside a $...$ span (which would
+  // leave a dangling $ and break LatexInline's regex).
+  return clipTextAvoidBreakingMath((text ?? '').trim(), props.abstractPreviewChars)
 }
 function authors(paper: Paper): string {
-  return (paper.authors || []).map((a) => a.name).filter(Boolean).join(', ') || '—'
+  return formatAuthors(paper, { empty: '—' })
 }
 const metaLine = computed(() => {
   const parts: string[] = []

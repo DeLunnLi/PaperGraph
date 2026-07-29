@@ -226,7 +226,7 @@ import type { PaperReaderCitation } from '@/services/api/reader'
 import type { Paper } from '@/types'
 import PdfJsViewer from '@/components/PdfJsViewer.vue'
 import { renderMarkdown } from '@/utils/markdown'
-import { paperExternalUrl, paperVenue, toAPA, toBibTeX, toPlain } from '@/utils/citation'
+import { formatAuthors, paperExternalUrl, paperVenue, toAPA, toBibTeX, toPlain } from '@/utils/citation'
 import { isAbortError } from '@/utils/error'
 import { useImeGuard } from '@/composables/useImeGuard'
 import { useSplitPane } from '@/composables/useSplitPane'
@@ -515,8 +515,8 @@ const send = async () => {
 }
 const relatedPaperMetaLine = (p: Paper): string => {
   const parts: string[] = []
-  const names = (p.authors || []).map((a: { name?: string }) => a?.name).filter(Boolean) as string[]
-  if (names.length) parts.push(names.slice(0, 4).join(', ') + (names.length > 4 ? '…' : ''))
+  const authorStr = formatAuthors(p, { max: 4, suffix: '…', empty: '' })
+  if (authorStr) parts.push(authorStr)
   if (p.year != null) parts.push(String(p.year))
   const j = paperVenue(p)
   if (j) parts.push(j)

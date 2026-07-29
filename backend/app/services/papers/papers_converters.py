@@ -8,7 +8,7 @@ from pydantic import TypeAdapter
 from app.core.paper import Paper as LitPaper
 from app.core.search.paper_searcher import abbreviate_journal as _abbrev
 
-from ...models.schemas import Author, Paper, PaperSource, ReadStatus
+from ...models.schemas import Paper, PaperSource, ReadStatus
 
 logger = logging.getLogger(__name__)
 _paper_list_adapter = TypeAdapter(list[Paper])
@@ -21,6 +21,15 @@ def _coerce_paper_source(val: Any) -> PaperSource:
         return PaperSource(str(val or "unknown").lower().strip())
     except ValueError:
         return PaperSource.UNKNOWN
+
+
+def _coerce_read_status(val: Any) -> ReadStatus:
+    if isinstance(val, ReadStatus):
+        return val
+    try:
+        return ReadStatus(str(val or "unread").lower().strip())
+    except ValueError:
+        return ReadStatus.UNREAD
 
 
 def _normalize_author_entries(authors_in: list[Any]) -> list[dict[str, Any]]:
@@ -38,53 +47,14 @@ def _normalize_author_entries(authors_in: list[Any]) -> list[dict[str, Any]]:
 def litpaper_to_api_paper(p: LitPaper) -> Paper:
     d = p.to_dict()
     d["journal"] = _abbrev(d.get("journal"))
-    try:
-        return Paper.model_validate(d)
-    except Exception:
-        d = p.to_dict()
-        src = d.get("source") or "unknown"
-        try:
-            ps = PaperSource(src)
-        except ValueError:
-            ps = PaperSource.UNKNOWN
-        rs = d.get("read_status") or "unread"
-        try:
-            rse = ReadStatus(rs)
-        except ValueError:
-            rse = ReadStatus.UNREAD
-        return Paper(
-            id=d.get("id"),
-            title=d.get("title", ""),
-            authors=[
-                Author(**a) if isinstance(a, dict) else Author(name=str(a)) for a in d.get("authors", [])
-            ],
-            abstract=d.get("abstract"),
-            doi=d.get("doi"),
-            pmid=d.get("pmid"),
-            arxiv_id=d.get("arxiv_id"),
-            pmc_id=d.get("pmc_id"),
-            journal=_abbrev(d.get("journal")),
-            year=d.get("year"),
-            volume=d.get("volume"),
-            issue=d.get("issue"),
-            pages=d.get("pages"),
-            publisher=d.get("publisher"),
-            pdf_url=d.get("pdf_url"),
-            source_url=d.get("source_url"),
-            local_pdf_path=d.get("local_pdf_path"),
-            keywords=d.get("keywords") or [],
-            mesh_terms=d.get("mesh_terms") or [],
-            references=d.get("references") or [],
-            citations=d.get("citations") or 0,
-            source=ps,
-            relevance_score=d.get("relevance_score") or 0,
-            notes=d.get("notes"),
-            tags=d.get("tags") or [],
-            category=d.get("category"),
-            rating=d.get("rating"),
-            read_status=rse,
-            importance=d.get("importance") or "normal",
-        )
+    # Coerce the enum + numeric fields that can make model_validate raise, so a
+    # single validate call covers both paths (previously the except branch
+    # hand-re-mapped ~30 fields, duplicating LitPaper.to_dict / the Paper model).
+    d["source"] = _coerce_paper_source(d.get("source"))
+    d["read_status"] = _coerce_read_status(d.get("read_status"))
+    d["relevance_score"] = d.get("relevance_score") or 0
+    d["citations"] = d.get("citations") or 0
+    return Paper.model_validate(d)
 
 
 def api_paper_to_litpaper(p: Paper) -> LitPaper:
@@ -129,4 +99,6 @@ def normalize_papers_for_api(papers: Iterable[Any] | None) -> list[Paper]:
 
 
 def litpapers_to_api_papers(papers: Iterable[LitPaper]) -> list[Paper]:
-    return normalize_papers_for_api([litpaper_to_api_paper(p) for p in papers])
+    # normalize_papers_for_api already converts LitPaper via litpaper_to_api_paper
+    # (its LitPaper branch); mapping twice re-validated every paper for no benefit.
+    return normalize_papers_for_api(papers)

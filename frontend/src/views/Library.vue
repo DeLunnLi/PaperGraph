@@ -114,7 +114,7 @@
                 </span>
               </template>
               <template v-if="column.key === 'authors'">
-                <span class="lib-authors-cell">{{ formatAuthorsEtAl(record.authors) }}</span>
+                <span class="lib-authors-cell">{{ formatAuthors(record, { max: 3, suffix: ' et al.', empty: '—' }) }}</span>
               </template>
               <template v-if="column.key === 'year'">
                 <span class="lib-year">{{ record.year ?? '—' }}</span>
@@ -231,7 +231,7 @@ import { getLibrary, getLibraryCategoryFolders, deletePaper, importLocalPdf } fr
 import type { LocalPdfImportResponse } from '@/services/api/papers'
 import apiClient from '@/services/api/client'
 import type { LibraryCategoryFolder, Paper } from '@/types'
-import { toBibTeX } from '@/utils/citation'
+import { formatAuthors, toBibTeX } from '@/utils/citation'
 import { downloadBlob, downloadText, todayStamp } from '@/utils/download'
 import { isAbortError } from '@/utils/error'
 const router = useRouter()
@@ -392,12 +392,6 @@ const columns = [
   { title: '领域', key: 'category', width: '24%', align: 'left' as const, ellipsis: true },
   { title: '操作', key: 'actions', width: '10%', align: 'center' as const },
 ]
-function formatAuthorsEtAl(authors: Paper['authors'] | undefined): string {
-  const names = (authors || []).map((a) => String(a?.name || '').trim()).filter(Boolean)
-  if (names.length === 0) return '—'
-  if (names.length <= 3) return names.join(', ')
-  return `${names.slice(0, 3).join(', ')} et al.`
-}
 const loadFolders = async () => {
   try {
     const res = await getLibraryCategoryFolders()
