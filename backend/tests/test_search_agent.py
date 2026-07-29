@@ -70,7 +70,8 @@ def _make_agent(llm: _StubLLM) -> SearchAgent:
 
 
 def _clear_intent_cache() -> None:
-    search_agent_module._INTENT_CACHE.clear()
+    with search_agent_module._INTENT_CACHE_LOCK:
+        search_agent_module._INTENT_CACHE.clear()
 
 
 def _intent_json(**overrides) -> str:

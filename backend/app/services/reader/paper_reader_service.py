@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 from collections.abc import Iterable
 
@@ -13,6 +14,12 @@ from ...agents.support.reader_reference_lookup_tool import READER_RELATED_FROM_B
 from ...utils.common import suppress_exceptions_async
 
 logger = logging.getLogger(__name__)
+
+# Process-level guard for in-flight opening refreshes. PaperReaderService is
+# instantiated per request, so an instance-level set never dedupes across the
+# concurrent stale-cache (>72h) openings it is meant to protect.
+_REFRESHING_OPENINGS: set[int] = set()
+_REFRESHING_OPENINGS_LOCK = threading.Lock()
 
 _OPENING_PROMPT = (
     "请用中文写一段不超过 380 字的导读：研究问题、核心方法、实验与结论的阅读要点。"
@@ -117,14 +124,6 @@ class PaperReaderService:
             metadata=metadata,
         )
 
-    @suppress_exceptions_async(default_return=None, log_level="warning", log_message="paper_reader.memory_update_failed")
-    async def _update_memory(self, *, store: Any, paper_id: int, user_message: str, reply: str) -> None:
-        await run_in_threadpool(
-            _update_memory_from_turn,
-            store=store, paper_id=paper_id,
-            user_message=user_message, assistant_reply=reply,
-        )
-
     async def get_opening(self, *, paper_id: int, user_id: int, background_tasks: BackgroundTasks) -> dict:
         from .reader_opening_cache import get_cached_opening, set_cached_opening
 
@@ -149,11 +148,14 @@ class PaperReaderService:
             return {"opening": op, "pdf_parsing": pdf_parsing}
 
         if cached and not fresh:
-            # Prevent concurrent refresh: use a process-level set of paper_ids being refreshed
-            if not hasattr(self, '_refreshing_openings'):
-                self._refreshing_openings: set[int] = set()
-            if paper_id not in self._refreshing_openings:
-                self._refreshing_openings.add(paper_id)
+            # Prevent concurrent refresh of the same stale paper: a process-level
+            # set (the service is per-request, so an instance set never dedupes).
+            schedule_refresh = False
+            with _REFRESHING_OPENINGS_LOCK:
+                if paper_id not in _REFRESHING_OPENINGS:
+                    _REFRESHING_OPENINGS.add(paper_id)
+                    schedule_refresh = True
+            if schedule_refresh:
                 def _refresh() -> None:
                     try:
                         opening2, _, _, _ = self._agent.paper_reader_reply(
@@ -163,7 +165,8 @@ class PaperReaderService:
                     except Exception as exc:
                         logger.warning("paper_reader.opening_refresh_failed", extra={"paper_id": paper_id}, exc_info=exc)
                     finally:
-                        self._refreshing_openings.discard(paper_id)
+                        with _REFRESHING_OPENINGS_LOCK:
+                            _REFRESHING_OPENINGS.discard(paper_id)
 
                 background_tasks.add_task(_refresh)
             op = cached.strip()
@@ -239,7 +242,15 @@ class PaperReaderService:
             "citation_count": len(citations or []),
         })
         await self._append_history(paper_id=paper_id, user_id=user_id, user_message=user_message, reply=reply, metadata=_meta)
-        await self._update_memory(store=store, paper_id=paper_id, user_message=user_message, reply=reply)
+        # Memory extraction runs an LLM call (extract_memory_via_llm via
+        # stateless_llm_chat — no agent singleton / ReaderCtx involvement), so
+        # defer it off the reply critical path. History append above stays
+        # awaited so the user's turn is recorded before the response returns.
+        background_tasks.add_task(
+            _update_memory_from_turn,
+            store=store, paper_id=paper_id,
+            user_message=user_message, assistant_reply=reply,
+        )
         background_tasks.add_task(store.compress_working, scope="paper", paper_id=int(paper_id), min_entries=6)
 
         return {

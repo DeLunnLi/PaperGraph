@@ -35,6 +35,8 @@ function normalizeLatexDelimiters(text: string): string {
 }
 export function renderMarkdownWithLatex(text: string): string {
   if (!text) return ''
+  const cached = _RENDER_CACHE.get(text)
+  if (cached !== undefined) return cached
   const raw = normalizeLatexDelimiters(text)
   const katexHtml: string[] = []
   const withPlaceholders = raw.replace(/\$([^$]+)\$/g, (_, tex) => {
@@ -46,7 +48,22 @@ export function renderMarkdownWithLatex(text: string): string {
   })
   let html = renderMarkdown(withPlaceholders)
   for (let i = 0; i < katexHtml.length; i++) { html = html.split(`[[[LATEXPH${i}]]]`).join(katexHtml[i]) }
-  return sanitizeHtml(html)
+  const result = sanitizeHtml(html)
+  cacheRender(text, result)
+  return result
+}
+
+// Memoize the rendered HTML per input string so streaming re-renders of a
+// message list don't re-run katex + DOMPurify over already-finalized turns.
+// Bounded so long/streaming content can't grow it without limit.
+const _RENDER_CACHE = new Map<string, string>()
+const _RENDER_CACHE_MAX = 128
+function cacheRender(key: string, value: string): void {
+  if (_RENDER_CACHE.size >= _RENDER_CACHE_MAX) {
+    const first = _RENDER_CACHE.keys().next().value
+    if (first !== undefined) _RENDER_CACHE.delete(first)
+  }
+  _RENDER_CACHE.set(key, value)
 }
 export function repairTabSeparatedPseudoTables(text: string): string {
   const raw = String(text || '').replace(/\r\n/g, '\n')

@@ -315,11 +315,15 @@ const resetPdfStreamUrl = () => {
 const isPaperContextCurrent = (targetPaperId: number, loadSeq?: number) => (
   paperId.value === targetPaperId && (loadSeq == null || loadSeq === paperLoadSeq)
 )
-const loadLocalPdf = async (targetPaperId?: number) => {
+const loadLocalPdf = async (targetPaperId?: number, loadSeq?: number) => {
   const resolvedPaperId = targetPaperId ?? paperId.value
   if (resolvedPaperId == null || !hasLocalPdfForViewer.value) return
   resetPdfStreamUrl()
-  pdfStreamUrl.value = await getLibraryPdfStreamUrl(resolvedPaperId)
+  const url = await getLibraryPdfStreamUrl(resolvedPaperId)
+  // A rapid paper switch during the await would leave this stale URL
+  // overwriting the new paper's pdfStreamUrl — drop it if we've moved on.
+  if (loadSeq != null && loadSeq !== paperLoadSeq) return
+  pdfStreamUrl.value = url
 }
 const acquirePdf = async (showSuccess = true, loadSeq?: number) => {
   const targetPaperId = paperId.value
@@ -330,7 +334,7 @@ const acquirePdf = async (showSuccess = true, loadSeq?: number) => {
     const ensuredPaper = await ensurePaperPdf(targetPaperId)
     if (!isPaperContextCurrent(targetPaperId, loadSeq)) return
     paper.value = ensuredPaper
-    await loadLocalPdf(targetPaperId)
+    await loadLocalPdf(targetPaperId, loadSeq)
     if (!isPaperContextCurrent(targetPaperId, loadSeq)) return
     if (showSuccess) message.success('PDF 已获取，正在加载原文')
   } catch (e: unknown) {
@@ -564,11 +568,18 @@ const loadPaper = async () => {
   }
   readingSession.value = { paperId: paperId.value, startedAtMs: Date.now() }
   try {
-    paper.value = await getPaper(paperId.value)
+    // Fetch paper metadata and chat history in parallel — history only needs
+    // the route paperId, not paper.value. The PDF branch still waits on
+    // getPaper because it depends on paper.value.local_pdf_path / source_url.
+    const [paperData, histData] = await Promise.all([
+      getPaper(paperId.value),
+      getPaperReaderHistory(paperId.value, 200).catch(() => null),
+    ])
     if (loadSeq !== paperLoadSeq) return
+    paper.value = paperData
     if (hasLocalPdfForViewer.value) {
       try {
-        await loadLocalPdf(paperId.value)
+        await loadLocalPdf(paperId.value, loadSeq)
         if (loadSeq !== paperLoadSeq) return
       } catch (e: unknown) {
         if (loadSeq !== paperLoadSeq) return
@@ -582,7 +593,7 @@ const loadPaper = async () => {
       if (loadSeq !== paperLoadSeq) return
     }
     try {
-      const h = await getPaperReaderHistory(paperId.value, 200)
+      const h = histData
       if (loadSeq !== paperLoadSeq) return
       if (h?.success && Array.isArray(h.turns) && h.turns.length > 0) {
         const restored = mapHistoryTurns(h.turns)

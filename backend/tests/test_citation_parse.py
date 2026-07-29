@@ -78,6 +78,30 @@ def test_dedupes_repeated_page():
     assert cites[0]["page"] == 3
 
 
+def test_parses_dash_range_markers():
+    """[pN-M] / [pN–M] (en/em dash) expand to the inclusive page range."""
+    agent = _make_agent()
+    ctx = _ctx_with_pages([1, 2, 3, 4, 5, 6, 7, 8])
+    for dash in ("-", "–", "—"):
+        cites = agent._parse_citations_from_reply(f"见 [p3{dash}p5] 的讨论。", ctx)
+        pages = sorted(c["page"] for c in cites)
+        assert pages == [3, 4, 5], f"dash {dash!r} got {pages}"
+
+
+def test_parses_dash_range_without_p_prefix_on_second():
+    agent = _make_agent()
+    ctx = _ctx_with_pages([1, 2, 3, 4, 5, 6])
+    cites = agent._parse_citations_from_reply("见 [p3-5]。", ctx)
+    assert sorted(c["page"] for c in cites) == [3, 4, 5]
+
+
+def test_dash_range_filtered_by_valid_pages():
+    agent = _make_agent()
+    ctx = _ctx_with_pages([1, 2, 3])  # only 3 pages
+    cites = agent._parse_citations_from_reply("见 [p2-6]。", ctx)
+    assert sorted(c["page"] for c in cites) == [2, 3]
+
+
 if __name__ == "__main__":
     test_parses_single_and_multi_page_markers()
     test_no_markers_returns_empty()

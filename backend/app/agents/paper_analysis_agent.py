@@ -862,13 +862,20 @@ class PaperAnalysisAgent(BaseAgent):
                     continue
         citations: List[Dict[str, Any]] = []
         seen: set[int] = set()
-        # Match [p3], [p7,p8], [p3, p5], [p3,p5,p7] — capture everything between
-        # [p and ], then split on comma and parse each as an int (tolerating an
-        # optional 'p' prefix on each page number).
+        # Match [p3], [p7,p8], [p3, p5], [p3,p5,p7], [p3-p5] (dash ranges) —
+        # capture everything between [p and ], split on comma, and parse each
+        # item as an int or an N-M range (tolerating an optional 'p' prefix and
+        # -, –, — dashes).
         for m in re.finditer(r"\[p([^\]]*)\]", text_out):
             nums: list[int] = []
             for part in m.group(1).split(","):
                 part = part.strip().lstrip("p").strip()
+                rng = re.match(r"^(\d+)\s*[-–—]\s*p?(\d+)$", part)
+                if rng:
+                    lo, hi = int(rng.group(1)), int(rng.group(2))
+                    if lo <= hi:
+                        nums.extend(range(lo, hi + 1))
+                    continue
                 if part.isdigit():
                     nums.append(int(part))
             for n in nums:

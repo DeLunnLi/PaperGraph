@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Optional
 
 from cachetools import TTLCache
@@ -26,8 +27,11 @@ from .support.search_models import SearchIntent
 
 logger = logging.getLogger(__name__)
 
-# TTL cache for parsed search intents: 5 min TTL, max 200 entries
+# TTL cache for parsed search intents: 5 min TTL, max 200 entries.
+# cachetools TTLCache is not thread-safe; guard get/set with a lock so a
+# concurrent expire-while-read can't raise KeyError out of understand_intent.
 _INTENT_CACHE: TTLCache[tuple[str, str], SearchIntent] = TTLCache(maxsize=200, ttl=300)
+_INTENT_CACHE_LOCK = threading.Lock()
 
 
 class SearchAgent(BaseAgent):
@@ -136,12 +140,14 @@ class IntentParser:
             return SearchIntent()
 
         cache_key = (msg.lower()[:200], (profile or "accuracy").strip().lower())
-        cached = _INTENT_CACHE.get(cache_key)
+        with _INTENT_CACHE_LOCK:
+            cached = _INTENT_CACHE.get(cache_key)
         if cached is not None:
             return cached
 
         intent = self._parse_with_retry(msg, profile)
-        _INTENT_CACHE[cache_key] = intent
+        with _INTENT_CACHE_LOCK:
+            _INTENT_CACHE[cache_key] = intent
         return intent
 
     def _parse_with_retry(self, msg: str, profile: str) -> SearchIntent:
