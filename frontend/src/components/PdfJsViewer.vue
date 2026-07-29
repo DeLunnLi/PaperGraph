@@ -58,11 +58,23 @@
 
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 
-GlobalWorkerOptions.workerSrc = workerUrl
+// Lazy-load pdfjs-dist (~364KB) only when a document actually loads, instead of
+// evaluating it eagerly with the route chunk. The worker URL is a tiny string
+// asset resolved at build time.
+let getDocument: typeof import('pdfjs-dist')['getDocument']
+let pdfjsReady: Promise<void> | null = null
+function ensurePdfjs(): Promise<void> {
+  if (!pdfjsReady) {
+    pdfjsReady = import('pdfjs-dist').then((mod) => {
+      getDocument = mod.getDocument
+      mod.GlobalWorkerOptions.workerSrc = workerUrl
+    })
+  }
+  return pdfjsReady
+}
 
 interface PageState {
   number: number
@@ -229,6 +241,8 @@ const loadDocument = async () => {
   loading.value = true
   const generation = loadGeneration
   try {
+    await ensurePdfjs()
+    if (generation !== loadGeneration) return
     loadingTask = getDocument({ url: url.href, withCredentials: false })
     const document = await loadingTask.promise
     if (generation !== loadGeneration) {

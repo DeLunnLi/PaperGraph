@@ -1,6 +1,8 @@
 import DOMPurify from 'dompurify'
-import katex from 'katex'
-import 'katex/dist/katex.min.css'
+import { ensureKatex, renderKatex } from '@/utils/katex'
+
+// Warm katex (lazy chunk) so math renders without a flash when it arrives.
+void ensureKatex()
 
 const SANITIZE_CONFIG = {
   USE_PROFILES: { html: true, mathMl: true },
@@ -37,9 +39,8 @@ export function renderMarkdownWithLatex(text: string): string {
   const katexHtml: string[] = []
   const withPlaceholders = raw.replace(/\$([^$]+)\$/g, (_, tex) => {
     const t = String(tex).trim()
-    let h: string
-    try { h = katex.renderToString(t, { displayMode: false, throwOnError: false, output: 'html', strict: 'ignore' }) }
-    catch { h = `<span class="latex-inline__txt">${escapeHtmlForMathFallback(`$${t}$`)}</span>` }
+    const h = renderKatex(t, { displayMode: false })
+      ?? `<span class="latex-inline__txt">${escapeHtmlForMathFallback(`$${t}$`)}</span>`
     const idx = katexHtml.length; katexHtml.push(h)
     return `[[[LATEXPH${idx}]]]`
   })

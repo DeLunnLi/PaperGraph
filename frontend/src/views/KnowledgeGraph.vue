@@ -490,8 +490,16 @@ function render() {
     sim.stop()
   }
 }
+// Debounce filter/slider-driven rebuilds: render() does a full SVG teardown +
+// forceSimulation restart, so rebuilding on every keystroke / slider tick is
+// janky. Wait for a short pause before rebuilding.
+let renderDebounce = 0
 watch([filterText, nodeType, yearRange], () => {
-  render()
+  if (renderDebounce) window.clearTimeout(renderDebounce)
+  renderDebounce = window.setTimeout(() => {
+    renderDebounce = 0
+    render()
+  }, 180)
 })
 // Align yearRange to the loaded data extent so the slider bounds and filter
 // start in sync (otherwise yearRange stays [1990, now] and the upper bound
@@ -507,6 +515,7 @@ onMounted(() => {
   load()
 })
 onBeforeUnmount(() => {
+  if (renderDebounce) window.clearTimeout(renderDebounce)
   if (cleanup) cleanup()
 })
 </script>
