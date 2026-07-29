@@ -137,10 +137,6 @@ class Settings(BaseSettings):
         le=40,
         description="候选数低于该阈值时触发 proceedings 官网补召回",
     )
-    papergraph_proceedings_auto_discover: bool = Field(
-        default=True,
-        description="无 JSON 域名映射时，用 Tavily 按会议名+年份自动发现 proceedings 官网再检索",
-    )
     papergraph_fine_rank_pipeline_wall_sec: float = Field(
         default=15.0,
         ge=10.0,
@@ -181,13 +177,6 @@ class Settings(BaseSettings):
     trace_cleanup_interval_sec: int = Field(
         default=3600, ge=0, le=86400,
         description="trace 清理后台任务间隔秒数；0=禁用后台任务（仅启动时清理一次）",
-    )
-    papergraph_pipeline_parallel_presearch: bool = Field(default=True)
-    papergraph_venue_hydrate_wall_sec: float = Field(
-        default=3.0,
-        ge=1.0,
-        le=12.0,
-        description="原文→OpenAlex 会场探测墙钟上限（秒）",
     )
 
     papergraph_daily_auto_refresh: bool = Field(default=True)

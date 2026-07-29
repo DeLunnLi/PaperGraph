@@ -4,8 +4,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import HTTPException
-
 from ...api.repo import RelationRepository
 from ...models.schemas import GraphEdge, GraphNode, LibraryGraphResponse
 from ...services.papers.papers_helpers import graph_author_label, graph_author_node_id

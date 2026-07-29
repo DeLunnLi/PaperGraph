@@ -1,20 +1,13 @@
-"""数据源统一契约 —— SearchSource Protocol + registry。
+"""数据源统一契约 —— SearchSourceFn 签名 + registry。
 
-PaperGraph 的 5 个数据源（arxiv/dblp/openalex/mcp/tavily）原本是散落的函数式
-实现，``paper_searcher._fetch_src`` 用 if/elif 分派。这里定义统一契约，让：
-
-1. 新数据源（Semantic Scholar / PubMed / IEEE）接入只需实现 Protocol + 注册，
-   不再改 ``_fetch_src`` 的分派逻辑。
-2. 各源入口签名一致性可被静态/测试校验（``test_search_source_contract``）。
-3. 超时/去重等横切配置有统一锚点。
-
-设计选择：用 ``typing.Protocol``（结构化子类型）而非 ABC —— 源仍是函数式
-``async def(searcher, query, max_results, **kwargs) -> list[Paper]``，无需改成类。
-Protocol 在运行时零侵入，registry 用 adapter 包装现有函数。
+PaperGraph 的数据源（arxiv/dblp/openalex/mcp/...）是函数式实现，
+``paper_searcher._fetch_src`` 据 registry 分派。新数据源接入只需用
+``@register_source("name")`` 装饰入口函数并注册，不再改分派逻辑；各源入口
+签名一致性由 ``test_search_source_contract`` 校验。
 """
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable
 
 from ...paper import Paper  # noqa: F401  (re-export for sources)
 
@@ -25,39 +18,10 @@ from ...paper import Paper  # noqa: F401  (re-export for sources)
 SearchSourceFn = Callable[..., Awaitable[list[Paper]]]
 
 
-@runtime_checkable
-class SearchSource(Protocol):
-    """数据源统一契约（结构化，源无需显式继承）。"""
-
-    #: 源标识（小写，与 Paper.source 字段一致）：如 ``"arxiv"``/``"dblp"``。
-    source_name: str
-
-    async def search(
-        self,
-        searcher: Any,
-        query: str,
-        max_results: int = 10,
-        **kwargs: Any,
-    ) -> list[Paper]:
-        """检索论文，返回去重前的候选列表。失败时应返回 ``[]`` 而非抛出（由调用方统一兜底）。"""
-        ...
-
-
 # ── registry ────────────────────────────────────────────────────────
 
 #: 注册表：源名 → 入口函数。``paper_searcher._fetch_src`` 据此分派。
 _REGISTRY: dict[str, SearchSourceFn] = {}
-
-#: 各源默认超时（秒），``_fetch_src`` 用 ``_src_timeouts`` 覆盖。
-DEFAULT_TIMEOUTS: dict[str, float] = {
-    "arxiv": 30.0,
-    "dblp": 32.0,
-    "openalex": 45.0,
-    "mcp": 45.0,
-    "semantic_scholar": 10.0,
-    "europe_pmc": 12.0,
-    "crossref": 10.0,
-}
 
 
 def register_source(name: str, fn: SearchSourceFn | None = None) -> Any:

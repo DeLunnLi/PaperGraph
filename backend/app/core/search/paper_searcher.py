@@ -124,7 +124,7 @@ from .sources.openalex import (
     search_openalex as _search_openalex_src,
     _search_openalex_works_by_author_async,
 )
-from .sources.mcp import _search_mcp_src
+from .sources.mcp import _search_mcp_src  # noqa: F401  (registers via @register_source)
 from .sources import crossref as _crossref_source  # noqa: F401
 from .sources import europe_pmc as _europe_pmc_source  # noqa: F401
 from .sources import semantic_scholar as _semantic_scholar_source  # noqa: F401
@@ -491,18 +491,3 @@ class PaperSearcher:
             else: _merge_paper_link_fields(best[k], paper)
         return list(best.values())
 
-    def download_pdf(self, paper: Paper) -> Optional[str]:
-        if not paper.pdf_url: return None
-        try:
-            safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in paper.title[:50])
-            filename = f"{paper.arxiv_id or 'paper'}_{safe_title}.pdf"
-            file_path = os.path.join(self.download_dir, filename)
-            if os.path.exists(file_path): return file_path
-            response = self._session.get(paper.pdf_url, timeout=60, stream=True)
-            if response.status_code == 200:
-                with open(file_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
-                self._bump_stat("downloaded_pdfs")
-                return file_path
-        except Exception: pass
-        return None

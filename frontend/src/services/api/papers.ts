@@ -23,10 +23,6 @@ export async function getLibraryCategoryFolders(): Promise<LibraryCategoriesResp
   const response = await apiClient.get<LibraryCategoriesResponse>('/api/papers/library/categories')
   return response.data
 }
-export function getLibraryPdfHref(paperId: number): string {
-  const base = (apiClient.defaults.baseURL || '').replace(/\/$/, '')
-  return `${base}/api/papers/${paperId}/library-pdf`
-}
 export async function getLibraryPdfStreamUrl(paperId: number): Promise<string> {
   const response = await apiClient.post<{ success: boolean; ticket: string; expires_in: number }>(
     `/api/papers/${paperId}/pdf-ticket`,

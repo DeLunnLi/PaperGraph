@@ -37,14 +37,6 @@ async def require_user(authorization: str | None = Header(default=None)) -> dict
     return user
 
 
-async def optional_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-    """Backward-compatible alias for strict authentication.
-
-    Anonymous/default-user fallback is intentionally disabled to prevent data leaks.
-    """
-    return await require_user(authorization)
-
-
 # Simple in-memory rate limiter (no Redis needed)
 _rate_store: dict[str, list[float]] = {}
 _RATE_WINDOW = 60  # seconds

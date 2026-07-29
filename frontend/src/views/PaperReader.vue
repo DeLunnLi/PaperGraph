@@ -81,7 +81,7 @@
         @keydown="onDividerKeydown"
         @pointerdown="onDividerPointerDown"
       />
-      <div class="paper-reader__pane paper-reader__pane--chat" :class="{ 'paper-reader__pane--mobile-hidden': mobilePane !== 'chat' }" :style="rightPaneStyle">
+      <div class="paper-reader__pane paper-reader__pane--chat" :class="{ 'paper-reader__pane--mobile-hidden': mobilePane !== 'chat' }">
         <div class="paper-reader__assistant-head">
           <div class="paper-reader__assistant-mark"><RobotOutlined /></div>
           <div class="paper-reader__assistant-meta">
@@ -261,7 +261,6 @@ const {
   compactLayout,
   coarsePointer,
   hoverCapable,
-  dragging,
   leftPaneStyle,
   dividerPercent,
   onDividerPointerDown,
@@ -305,7 +304,6 @@ const onPdfLoaded = () => {
   pdfReady.value = true
   void maybeStartOpening()
 }
-const rightPaneStyle = computed(() => ({}))
 const backToLibrary = () => {
   router.push('/library')
 }
@@ -891,12 +889,6 @@ onMounted(() => {
   border-radius: 0;
   box-shadow: none;
   color: var(--pg-text);
-}
-.paper-reader__msg-role {
-  font-size: 12px;
-  color: var(--pg-text-tertiary);
-  margin-bottom: 4px;
-  font-weight: 500;
 }
 .paper-reader__msg-body {
   line-height: 1.72;

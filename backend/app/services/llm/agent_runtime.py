@@ -128,16 +128,12 @@ def run_json_task(
     timeout_sec: float | None = None,
     retries: int | None = None,
     default: dict[str, Any | None] = None,
-    parse_fn: Callable[[str | None], Any] | None = None,
     task_logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     log = task_logger or logger
-    if parse_fn is None:
-        from ..search_intent import extract_json_object
+    from ..search_intent import extract_json_object
 
-        parser = extract_json_object
-    else:
-        parser = parse_fn
+    parser = extract_json_object
     raw = run_agent_task(
         task_name=task_name,
         agent_name=agent_name,

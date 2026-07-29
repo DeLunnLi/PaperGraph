@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from ...core.paper import Paper as LitPaper
 from ...core.search.normalize import _normalize_title_for_dedupe, _arxiv_canonical_from_paper

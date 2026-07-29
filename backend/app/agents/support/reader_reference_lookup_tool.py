@@ -45,13 +45,6 @@ def _norm_arxiv(a: str | None) -> str:
             s = s[:vi]
     return s.strip()
 
-def strip_reader_reco_boilerplate(um: str) -> str:
-    import re as _re
-    s = (um or "").strip()
-    for pat in (r"推荐.*?论文", r"找.*?(相关|类似|参考)", r"search.*?(related|similar)", r"find.*?papers"):
-        s = _re.sub(pat, "", s, flags=_re.IGNORECASE).strip()
-    return s
-
 def parse_reader_recommendation_intent(um: str) -> tuple[bool, int]:
     s = (um or "").strip().lower()
     want = any(k in s for k in ("推荐", "相关论文", "类似", "related", "similar", "recommend", "找.*论文"))

@@ -64,11 +64,3 @@ class SearchSourceError(PaperGraphError):
         if source and message:
             message = f"[{source}] {message}"
         super().__init__(message, code=code)
-
-
-# ── 内容处理层 ──────────────────────────────────────────────────────
-
-class PDFParseError(PaperGraphError):
-    """PDF 文本抽取/结构解析失败。"""
-
-    code = "pdf_parse_error"

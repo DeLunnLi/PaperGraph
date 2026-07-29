@@ -30,10 +30,6 @@ const sortedPapers = computed(() => {
   return arr
 })
 
-function onSortChange() {
-  // sortedPapers is computed, re-renders automatically
-}
-
 const displayCount = ref(8)
 const visiblePapers = computed(() => sortedPapers.value.slice(0, displayCount.value))
 const hasMore = computed(() => displayCount.value < sortedPapers.value.length)
@@ -52,7 +48,7 @@ function abstractPreview(abs: string, length = 280): string {
     <div class="papers-header">
       <span>为你找到 {{ total }} 篇相关论文：</span>
       <div class="papers-header__right">
-        <a-select v-model:value="sortBy" size="small" style="width: 110px" @change="onSortChange">
+        <a-select v-model:value="sortBy" size="small" style="width: 110px">
           <a-select-option value="default">默认排序</a-select-option>
           <a-select-option value="year">按年份</a-select-option>
           <a-select-option value="citations">按引用数</a-select-option>

@@ -50,17 +50,6 @@ def _resolve_config_path() -> Path:
         if ep.is_file():
             return ep
         logger.warning("tavily venue config: env path not a file: %s", ep)
-    try:
-        from ...settings import get_settings
-
-        cfg = (getattr(get_settings(), "tavily_venue_domains_config_path", None) or "").strip()
-        if cfg:
-            cp = Path(cfg).expanduser()
-            if cp.is_file():
-                return cp
-            logger.warning("tavily venue config: settings path not a file: %s", cp)
-    except Exception:
-        pass
     return _DEFAULT_JSON
 
 
@@ -81,11 +70,6 @@ def _load_config_for_path(resolved_path: str) -> Dict[str, Any]:
 
 def _get_config_data() -> Dict[str, Any]:
     return _load_config_for_path(str(_resolve_config_path().resolve()))
-
-
-def clear_tavily_venue_config_cache() -> None:
-    """测试或替换 JSON 后调用以失效缓存。"""
-    _load_config_for_path.cache_clear()
 
 
 def get_official_proceedings_hosts() -> tuple[str, ...]:

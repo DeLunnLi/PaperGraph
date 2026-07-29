@@ -22,15 +22,6 @@ class BaseAgent:
             raise LLMError(f"{type(self).__name__}_llm_init_failed",
                            code="llm_init_failed") from e
 
-    def _cfg(self, name: str, default: Any = None) -> Any:
-        return getattr(self._settings, name, default)
-
-    def _cfg_int(self, name: str, default: int = 0) -> int:
-        try:
-            return int(self._cfg(name, default))
-        except (TypeError, ValueError):
-            return int(default)
-
     @staticmethod
     def _clip(value: Any, limit: int) -> str:
         return str(value or "").strip()[:limit]
@@ -45,24 +36,6 @@ class BaseAgent:
             return get_agent_memory()
         except Exception:
             return None
-
-    def _read_shared_context(self, *, query: str | None = None, agent_name: str | None = None,
-                           tags: list[str] | None = None) -> str:
-        """Read shared cross-agent memory as a context block.
-
-        Args:
-            tags: Filter shared memories by action tags (e.g. ["reader", "search"]).
-                  Only memories with at least one matching tag are returned.
-        """
-        am = self._get_shared_memory()
-        if not am:
-            return ""
-        try:
-            name = agent_name or type(self).__name__
-            return am.build_context_block(agent_name=name, query=query, tags=tags) or ""
-        except Exception:
-            logger.debug("[%s] read_shared_context failed", type(self).__name__, exc_info=True)
-            return ""
 
     def _read_shared_recent(self, *, memory_types: list[str] | None = None, limit: int = 8,
                             tags: list[str] | None = None) -> list[str]:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus

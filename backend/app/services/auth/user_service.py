@@ -21,7 +21,6 @@ def _get_db_path() -> str:
 
 
 def _get_jwt_secret() -> str:
-    from ...settings import get_settings
     secret = os.getenv("PAPERGRAPH_JWT_SECRET", "").strip()
     if len(secret) < 32:
         raise RuntimeError("PAPERGRAPH_JWT_SECRET 必须配置且至少包含 32 个字符")
@@ -219,8 +218,3 @@ def get_user_from_token(token: str) -> dict[str, Any] | None:
         "user_id": int(payload.get("sub", 0)),
         "username": str(payload.get("username", "")),
     }
-
-
-def get_or_create_default_user() -> int:
-    """Legacy compatibility shim; automatic default accounts are disabled."""
-    raise RuntimeError("默认账号已禁用，请先注册或登录")

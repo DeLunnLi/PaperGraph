@@ -150,18 +150,6 @@ class AgentMemory:
         except Exception:
             return None, 0.0
 
-    def _merge_memory(self, mid: str, new_content: str, new_importance: float) -> None:
-        """Merge a new memory into an existing one: keep longer content, take max importance."""
-        try:
-            rows = self.store.search_memories(user_id="", memory_type="", limit=1)
-            # We need to find and update the memory — use store's update if available
-            # Fallback: just update importance by deleting and re-adding
-            # Since SQLiteDocumentStore may not have update, we skip merge and just
-            # not add the duplicate (keep the existing one with bumped importance)
-            pass
-        except Exception:
-            pass
-
     def add(self, *, agent_name: str, content: str, memory_type: str = "working",
             importance: float = 0.5, shared: bool = False, meta: dict[str, Any] | None = None,
             tags: list[str] | None = None) -> str:
