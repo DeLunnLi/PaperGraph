@@ -141,7 +141,8 @@ class PaperAnalysisAgent(BaseAgent):
                 raw = self._llm_chat(ANALYSIS_SYSTEM, taxonomy_prompt)
                 parsed = _parse_taxonomy_majors(raw)
                 if not parsed:
-                    self._llm_chat(ANALYSIS_SYSTEM, taxonomy_prompt + '\n请确保输出合法 JSON。')
+                    raw = self._llm_chat(ANALYSIS_SYSTEM, taxonomy_prompt + '\n请确保输出合法 JSON。')
+                    parsed = _parse_taxonomy_majors(raw)
                 if parsed:
                     wl = tuple(parsed)
             except Exception:

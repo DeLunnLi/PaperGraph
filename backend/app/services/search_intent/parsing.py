@@ -240,9 +240,8 @@ def _ensure_intent_year_window_ordered(intent: SearchIntent) -> None:
     if isinstance(yf, int) and isinstance(yt, int) and yf > yt:
         intent.year_from, intent.year_to = yt, yf
 
-def infer_target_edition_year_for_recent(*, is_latest: bool = True, settings: Any | None = None) -> int:
+def infer_target_edition_year_for_recent() -> int:
     """Prompt hint for the latest likely conference edition year."""
-    _ = is_latest, settings
     y_now = int(datetime.now().year)
     return max(1990, y_now - 1)
 
@@ -255,7 +254,7 @@ def format_intent_llm_prompt(
     correction_hint: str | None = None,
 ) -> str:
     now = datetime.now()
-    edition_year = infer_target_edition_year_for_recent(is_latest=True)
+    edition_year = infer_target_edition_year_for_recent()
     base = template.format(
         user_text=(user_text or "").strip()[:3500],
         profile=profile,

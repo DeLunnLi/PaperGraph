@@ -10,6 +10,8 @@ from collections.abc import Callable
 from hello_agents.tools.base import Tool, ToolParameter
 from hello_agents.tools.response import ToolResponse
 
+_NOISE_RE = re.compile(r"[\s\-_:,\.\(\)\[\]]+")
+
 from ...agents.search_agent import SearchIntent
 
 logger = logging.getLogger(__name__)
@@ -49,8 +51,7 @@ def parse_reader_recommendation_intent(um: str) -> tuple[bool, int]:
     s = (um or "").strip().lower()
     want = any(k in s for k in ("推荐", "相关论文", "类似", "related", "similar", "recommend", "找.*论文"))
 
-    import re as _re
-    m = _re.search(r"(\d+)\s*[篇个本]", s)
+    m = re.search(r"(\d+)\s*[篇个本]", s)
     n = int(m.group(1)) if m else (5 if want else 0)
     return want, max(1, min(n, 20))
 
@@ -108,9 +109,8 @@ def paper_matches_reader_snap(snap: dict[str, Any], p: Any) -> bool:
         return True
     st = str(snap.get("title") or "").strip().lower()
     pt = str(getattr(p, "title", "") or "").strip().lower()
-    _noise = re.compile(r"[\s\-_:,\.\(\)\[\]]+")
-    stn = _noise.sub(" ", st).strip()
-    ptn = _noise.sub(" ", pt).strip()
+    stn = _NOISE_RE.sub(" ", st).strip()
+    ptn = _NOISE_RE.sub(" ", pt).strip()
     if len(stn) >= 14 and len(ptn) >= 14:
         if stn == ptn or (stn in ptn or ptn in stn):
             return True
@@ -258,13 +258,12 @@ class ReaderReferenceLookupTool(Tool):
         return ToolResponse.success(text="\n".join(lines))
 
 def score_reference_line_against_hint(ln: str, hint: str) -> float:
-    import re as _re
     h = (hint or "").lower()
     l = (ln or "").lower()
     if not h or not l:
         return 0.0
-    h_tokens = set(_re.split(r"\W+", h)) - {""}
-    l_tokens = set(_re.split(r"\W+", l)) - {""}
+    h_tokens = set(re.split(r"\W+", h)) - {""}
+    l_tokens = set(re.split(r"\W+", l)) - {""}
     if not h_tokens or not l_tokens:
         return 0.0
     return len(h_tokens & l_tokens) / max(len(h_tokens), len(l_tokens))

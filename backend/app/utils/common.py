@@ -116,10 +116,12 @@ suppress_exceptions_async = suppress_exceptions
 
 def exec_sql(db_path: str, *statements: str) -> None:
     conn = sqlite3.connect(db_path)
-    for stmt in statements:
-        conn.execute(stmt)
-    conn.commit()
-    conn.close()
+    try:
+        for stmt in statements:
+            conn.execute(stmt)
+        conn.commit()
+    finally:
+        conn.close()
 
 def build_in_clause(column: str, values: list[Any]) -> tuple[str, tuple[Any, ...]]:
     if not values:

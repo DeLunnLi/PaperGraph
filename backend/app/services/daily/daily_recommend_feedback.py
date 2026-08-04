@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import sqlite3
 import time
@@ -10,6 +11,8 @@ from collections import Counter
 from ...models.schemas import FeedbackActionEnum as FeedbackAction
 from ...utils.common import exec_sql
 from ...utils.db_init import ensure_once
+
+logger = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def _conn(db_path: str):
@@ -114,9 +117,7 @@ def record_feedback(
                         _upsert_interest_evolution(cur, date_key, kw.strip(), category, weight, "feedback", now)
         return True
     except Exception as e:
-        import logging
-
-        logging.getLogger(__name__).warning(f"记录推荐反馈失败: {e}")
+        logger.warning("记录推荐反馈失败: %s", e)
         return False
 
 def _action_to_weight(action: FeedbackAction) -> float:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -90,8 +91,6 @@ def _row_to_paper_meta(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 def _pdf_abspath_from_row(db_path: str, local_pdf_path: str | None) -> str | None:
-    import os
-
     if not local_pdf_path or not str(local_pdf_path).strip():
         return None
     data_root = os.path.dirname(os.path.abspath(db_path))

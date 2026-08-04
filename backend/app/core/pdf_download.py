@@ -141,13 +141,12 @@ def resolve_paper_pdf_url(paper: Paper, email: str = "") -> str | None:
     if ax:
         return ax
 
-    # Recover arXiv PDF URL from DOI/source URL.
-    if not ax:
-        for field_val in (getattr(paper, "doi", None) or "", getattr(paper, "source_url", None) or ""):
-            m = re.search(r"arxiv/([\d.]+)", str(field_val), re.I)
-            if m:
-                ax = f"https://arxiv.org/pdf/{m.group(1)}"
-                return ax
+    # Recover arXiv PDF URL from DOI/source URL (ax is falsy here — the
+    # truthy case returned above).
+    for field_val in (getattr(paper, "doi", None) or "", getattr(paper, "source_url", None) or ""):
+        m = re.search(r"arxiv/([\d.]+)", str(field_val), re.I)
+        if m:
+            return f"https://arxiv.org/pdf/{m.group(1)}"
 
     probe_candidates: list[str] = []
     seen: set[str] = set()

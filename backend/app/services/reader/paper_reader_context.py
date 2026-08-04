@@ -347,13 +347,16 @@ def extract_pdf_pages_cached(db_path: str, paper_id: int, abspath: str | None) -
 def _cache_delete(db_path: str, paper_id: int) -> None:
     if not db_path:
         return
+    conn = None
     try:
         conn = sqlite3.connect(db_path)
         conn.execute("DELETE FROM paper_pdf_excerpt_cache WHERE paper_id=?", (int(paper_id),))
         conn.commit()
-        conn.close()
     except Exception:
         pass
+    finally:
+        if conn is not None:
+            conn.close()
 
 def compute_and_cache_excerpt(db_path: str, paper_id: int, pdf_abspath: str) -> None:
     # Skip the (seconds-level) full re-parse when a fresh cached excerpt for

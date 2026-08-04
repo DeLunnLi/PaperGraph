@@ -96,7 +96,7 @@
               <div v-else-if="isLoading && index === messages.length - 1 && !msg.searchSteps?.length" class="ai-text ai-text--loading">{{ msg.content }}</div>
               <SearchToolTrace v-if="msg.toolCalls?.length" :tool-calls="msg.toolCalls" />
               <div v-if="msg.searchParams" class="search-params">
-                <a-tag v-if="msg.searchParams.venue" size="small" color="purple">{{ msg.searchParams.venue }}</a-tag>
+                <a-tag v-for="v in (msg.searchParams.venues || [])" :key="v" size="small" color="purple">{{ v }}</a-tag>
               </div>
               <SearchResultPapers
                 v-if="msg.results?.length"
@@ -201,7 +201,6 @@ import { message, Empty, Modal } from 'ant-design-vue'
 import {
   RobotOutlined,
   SendOutlined,
-  SaveOutlined,
   PlusOutlined,
   MenuOutlined,
   CloseOutlined,
@@ -1049,9 +1048,6 @@ padding: 0;
   }
   .conversations-sidebar.right-sidebar.collapsed {
   transform: translateX(100%);
-  }
-  .current-conv-tag {
-  max-width: 80px;
   }
   .sidebar-toggle.right-toggle {
   right: 0;
