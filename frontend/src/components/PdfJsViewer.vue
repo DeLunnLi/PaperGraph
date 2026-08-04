@@ -354,6 +354,10 @@ watch(() => props.page, (page) => {
   if (pdfDocument && page && page !== currentPage.value) void gotoPage(page)
 })
 onBeforeUnmount(() => {
+  if (fitWidthTimer) {
+    clearTimeout(fitWidthTimer)
+    fitWidthTimer = null
+  }
   resizeObserver?.disconnect()
   resizeObserver = null
   void disposeDocument()

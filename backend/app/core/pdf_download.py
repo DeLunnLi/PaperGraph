@@ -7,6 +7,8 @@ import os
 import re
 from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
+
 import requests
 
 from .conference_landing_pdf import fetch_pdf_url_from_html_page, is_safe_public_http_url, safe_public_get
@@ -163,6 +165,7 @@ def resolve_paper_pdf_url(paper: Paper, email: str = "") -> str | None:
             if got:
                 return got
         except Exception:
+            logger.debug("pdf_download: html pdf-link probe failed for %s", cand_url, exc_info=True)
             continue
 
     # OpenReview forum pages expose PDFs at /pdf?id=...

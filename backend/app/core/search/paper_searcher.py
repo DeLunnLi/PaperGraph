@@ -333,7 +333,7 @@ class PaperSearcher:
             if not _mcp_enabled():
                 sources = [s for s in sources if s != "mcp"]
         except Exception:
-            pass
+            logger.debug("paper_searcher: mcp enabled check failed", exc_info=True)
 
         raw_authors_kw = kwargs.get("authors") or kwargs.get("author") or []
         if isinstance(raw_authors_kw, str): raw_authors_kw = [raw_authors_kw]

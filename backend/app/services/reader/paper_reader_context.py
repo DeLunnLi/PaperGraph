@@ -1,11 +1,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 def extract_pdf_text_full(abspath: str | None) -> str:
     """Extract full PDF text via the enhanced extractor (pymupdf4llm → fitz → OCR, with dedup)."""
@@ -36,22 +39,24 @@ def extract_pdf_tables_markdown(abspath: str | None) -> str:
     try:
         import fitz
         doc = fitz.open(abspath)
-        for page in doc:
-            try:
-                tabs = page.find_tables()
-            except Exception:
-                tabs = None
-            if tabs:
-                for tab in tabs:
-                    try:
-                        md = tab.to_markdown()
-                        if md and "|" in str(md) and len(str(md)) > 20:
-                            tables.append(str(md).strip())
-                    except Exception:
-                        pass
-        doc.close()
+        try:
+            for page in doc:
+                try:
+                    tabs = page.find_tables()
+                except Exception:
+                    tabs = None
+                if tabs:
+                    for tab in tabs:
+                        try:
+                            md = tab.to_markdown()
+                            if md and "|" in str(md) and len(str(md)) > 20:
+                                tables.append(str(md).strip())
+                        except Exception:
+                            logger.debug("reader_context: fitz table.to_markdown failed", exc_info=True)
+        finally:
+            doc.close()
     except Exception:
-        pass
+        logger.debug("reader_context: fitz find_tables strategy failed for %s", abspath, exc_info=True)
 
     if not tables:
         # Method 2: pymupdf4llm Markdown — parses full doc
@@ -65,6 +70,7 @@ def extract_pdf_tables_markdown(abspath: str | None) -> str:
 
     if not tables:
         # Method 3: fitz text blocks — last resort
+        doc = None
         try:
             import fitz
             doc = fitz.open(abspath)
@@ -92,9 +98,11 @@ def extract_pdf_tables_markdown(abspath: str | None) -> str:
                     result = [" | ".join(str(cols[c][r]) for c in range(ncols)) for r in range(nrows)]
                     result.insert(1, " | ".join("---" for _ in range(ncols)))
                     tables.append("\n".join(result))
-            doc.close()
         except Exception:
-            pass
+            logger.debug("reader_context: fitz text-blocks table strategy failed for %s", abspath, exc_info=True)
+        finally:
+            if doc is not None:
+                doc.close()
 
     return "\n\n".join(tables) if tables else ""
 
@@ -512,19 +520,32 @@ def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None =
     if not p:
         return None, "", "", False, []
     pdf_path = _ensure_reader_pdf_available(db, p, user_id=user_id)
-    excerpt, is_cached = extract_pdf_text_full_cached(getattr(db, "db_path", ""), int(paper_id), pdf_path)
-    pages: list[dict] = []
+    db_path = getattr(db, "db_path", "")
+    # Single cache read (was two: extract_pdf_text_full_cached + extract_pdf_pages_cached
+    # each opened their own connection and ran the same SELECT + os.stat).
+    cached_excerpt, cached_pages = (None, None)
+    is_cached = False
     if pdf_path:
-        pages, _pages_cached = extract_pdf_pages_cached(getattr(db, "db_path", ""), int(paper_id), pdf_path)
+        cached_excerpt, cached_pages = _cache_get(db_path, int(paper_id), pdf_path, max_age_days=45)
+        is_cached = cached_excerpt is not None
+    excerpt = cached_excerpt or ""
+    pages: list[dict] = list(cached_pages) if cached_pages else []
+    if pdf_path:
         if not pages and is_cached and excerpt:
             # excerpt was cached before pages column existed; recompute lazily.
             pages = extract_pdf_text_with_pages(pdf_path)
-    if pdf_path and not excerpt:
-        excerpt = extract_pdf_text_full(pdf_path)
-        if excerpt.strip():
-            if not pages:
-                pages = extract_pdf_text_with_pages(pdf_path)
-            _cache_set(getattr(db, "db_path", ""), int(paper_id), pdf_path, excerpt, pages if pages else None)
+        if not excerpt:
+            # Cache miss: parse once. page_chunks yields both per-page text and
+            # (joined) the full text; only fall back to the OCR-aware full-text
+            # extractor when page-chunk parsing yields nothing (scanned PDF).
+            pages = pages or extract_pdf_text_with_pages(pdf_path)
+            if pages:
+                from .pdf_extract import _clean_math_whitespace
+                excerpt = _clean_math_whitespace("\n\n".join(str(pg.get("text") or "") for pg in pages)).strip()
+            if not excerpt:
+                excerpt = extract_pdf_text_full(pdf_path)
+            if excerpt.strip():
+                _cache_set(db_path, int(paper_id), pdf_path, excerpt, pages if pages else None)
     merged_for_refs = excerpt.strip()
     refs_raw = ""
     if not (getattr(p, "references", None) or []):
@@ -549,7 +570,8 @@ def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None =
                     p.abstract = _full[:2000]
                     excerpt = _full  # 替代 PDF 正文
                     db.update_paper(p.id, abstract=p.abstract)
-        except Exception: pass
+        except Exception:
+            logger.debug("reader_context: tavily abstract backfill failed for paper %s", int(paper_id), exc_info=True)
     reader_artifact_block = ""
     if merged_for_refs:
         try:

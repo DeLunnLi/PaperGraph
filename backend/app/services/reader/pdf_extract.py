@@ -265,21 +265,23 @@ def extract_pdf_text_enhanced(abspath: str | None) -> str:
     try:
         import fitz
         doc = fitz.open(abspath)
-        pages_text: list[str] = []
-        ocr_used = False
-        ocr_pages = 0
-        max_ocr_pages = _env_int("PAPERGRAPH_OCR_MAX_PAGES", 30, 0, 100)
-        for page in doc:
-            t = (page.get_text("text") or "").strip()
-            if ocr_worthwhile and _is_scanned_page(page) and ocr_pages < max_ocr_pages:
-                ocr_pages += 1
-                ocr_text = _ocr_page(page)
-                if len(ocr_text) > len(t):
-                    t = ocr_text
-                    ocr_used = True
-            if t:
-                pages_text.append(t)
-        doc.close()
+        try:
+            pages_text: list[str] = []
+            ocr_used = False
+            ocr_pages = 0
+            max_ocr_pages = _env_int("PAPERGRAPH_OCR_MAX_PAGES", 30, 0, 100)
+            for page in doc:
+                t = (page.get_text("text") or "").strip()
+                if ocr_worthwhile and _is_scanned_page(page) and ocr_pages < max_ocr_pages:
+                    ocr_pages += 1
+                    ocr_text = _ocr_page(page)
+                    if len(ocr_text) > len(t):
+                        t = ocr_text
+                        ocr_used = True
+                if t:
+                    pages_text.append(t)
+        finally:
+            doc.close()
         fitz_text = "\n\n".join(pages_text).strip()
 
         if ocr_used:
@@ -295,12 +297,14 @@ def extract_pdf_text_enhanced(abspath: str | None) -> str:
         try:
             import fitz
             doc = fitz.open(abspath)
-            blocks: list[str] = []
-            for page in doc:
-                for block in page.get_text("blocks") or []:
-                    if len(block) >= 5 and block[4].strip():
-                        blocks.append(str(block[4]).strip())
-            doc.close()
+            try:
+                blocks: list[str] = []
+                for page in doc:
+                    for block in page.get_text("blocks") or []:
+                        if len(block) >= 5 and block[4].strip():
+                            blocks.append(str(block[4]).strip())
+            finally:
+                doc.close()
             block_text = "\n".join(blocks).strip()
             if len(block_text) > len(best):
                 best = block_text
@@ -355,20 +359,22 @@ def extract_pdf_pages_enhanced(abspath: str | None) -> list[dict]:
     try:
         import fitz
         doc = fitz.open(abspath)
-        ocr_pages = 0
-        max_ocr_pages = _env_int("PAPERGRAPH_OCR_MAX_PAGES", 30, 0, 100)
-        for i, page in enumerate(doc):
-            t = (page.get_text("text") or "").strip()
-            if _is_scanned_page(page) and ocr_pages < max_ocr_pages:
-                ocr_pages += 1
-                ocr_text = _ocr_page(page)
-                if len(ocr_text) > len(t):
-                    t = ocr_text
-            if t:
-                if len(t) > PAGE_SIZE_LIMIT:
-                    t = t[:PAGE_SIZE_LIMIT]
-                out.append({"page": i + 1, "text": t})
-        doc.close()
+        try:
+            ocr_pages = 0
+            max_ocr_pages = _env_int("PAPERGRAPH_OCR_MAX_PAGES", 30, 0, 100)
+            for i, page in enumerate(doc):
+                t = (page.get_text("text") or "").strip()
+                if _is_scanned_page(page) and ocr_pages < max_ocr_pages:
+                    ocr_pages += 1
+                    ocr_text = _ocr_page(page)
+                    if len(ocr_text) > len(t):
+                        t = ocr_text
+                if t:
+                    if len(t) > PAGE_SIZE_LIMIT:
+                        t = t[:PAGE_SIZE_LIMIT]
+                    out.append({"page": i + 1, "text": t})
+        finally:
+            doc.close()
     except Exception as exc:
         logger.debug("pdf_extract: fitz per-page strategy failed: %s", exc, exc_info=False)
 

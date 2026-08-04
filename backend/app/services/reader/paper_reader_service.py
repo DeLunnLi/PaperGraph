@@ -65,9 +65,6 @@ class PaperReaderService:
         from ..memory.memory_store import MemoryStore
         from .paper_reader_context import build_reader_context_for_paper
 
-        paper = await run_in_threadpool(self._db.get_paper_by_id, paper_id, user_id)
-        if not paper:
-            raise HTTPException(status_code=404, detail="文献不存在")
         paper, base_ctx, pdf_ref_text, pdf_parsing, pdf_pages = await run_in_threadpool(build_reader_context_for_paper, self._db, paper_id, user_id)
         if not paper:
             raise HTTPException(status_code=404, detail="文献不存在")

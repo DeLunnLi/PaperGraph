@@ -413,6 +413,7 @@ async def search_arxiv(
                 )
             )
         except Exception:
+            logger.debug("arxiv: entry parse failed", exc_info=True)
             continue
 
     searcher._bump_stat("arxiv_requests")
