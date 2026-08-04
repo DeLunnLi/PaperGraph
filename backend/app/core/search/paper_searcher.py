@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-from requests import Session
-from requests.adapters import HTTPAdapter
 
 from ..paper import Paper
 from app.exceptions import SearchSourceError
@@ -141,11 +139,6 @@ class PaperSearcher:
         self._httpx_trust_env = bool(httpx_trust_env)
         os.makedirs(self.download_dir, exist_ok=True)
         self._rate = RateLimiter(fixed_delays={"arxiv": 0.1, "openalex": 0.15, "dblp": 0.35, "europe_pmc": 0.15})
-        # Configure session with connection pooling
-        self._session = Session()
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=50)
-        self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
         self._async_client: Optional[httpx.AsyncClient] = None
         self._async_client_loop: Optional[asyncio.AbstractEventLoop] = None
         self.stats = {"arxiv_requests": 0, "dblp_requests": 0, "openalex_requests": 0,
