@@ -6,8 +6,13 @@ import time
 from contextlib import contextmanager
 
 from ...utils.common import exec_sql
+from ...utils.db_init import ensure_once
 
 def ensure_tables(db_path: str) -> None:
+    ensure_once(db_path, _create_tables)
+
+
+def _create_tables(db_path: str) -> None:
     exec_sql(db_path,
         "CREATE TABLE IF NOT EXISTS paper_reader_turns(id INTEGER PRIMARY KEY AUTOINCREMENT,paper_id INTEGER NOT NULL,user_id INTEGER NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL,metadata TEXT)",
         "CREATE INDEX IF NOT EXISTS idx_paper_reader_turns_paper ON paper_reader_turns(paper_id,created_at)",

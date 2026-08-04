@@ -9,6 +9,7 @@ from collections import Counter
 
 from ...models.schemas import FeedbackActionEnum as FeedbackAction
 from ...utils.common import exec_sql
+from ...utils.db_init import ensure_once
 
 @contextlib.contextmanager
 def _conn(db_path: str):
@@ -21,6 +22,10 @@ def _conn(db_path: str):
         conn.close()
 
 def ensure_tables(db_path: str) -> None:
+    ensure_once(db_path, _create_tables)
+
+
+def _create_tables(db_path: str) -> None:
     exec_sql(db_path,
         """CREATE TABLE IF NOT EXISTS daily_recommend_feedback (
           id INTEGER PRIMARY KEY AUTOINCREMENT,

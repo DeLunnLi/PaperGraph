@@ -40,8 +40,13 @@ def _prune_recent_fingerprints(now: float) -> None:
             _kg_recent_fingerprints.pop(k, None)
 
 from ...utils.common import exec_sql
+from ...utils.db_init import ensure_once
 
 def ensure_tables(db_path: str) -> None:
+    ensure_once(db_path, _create_tables)
+
+
+def _create_tables(db_path: str) -> None:
     exec_sql(db_path,
         """CREATE TABLE IF NOT EXISTS paper_relations (
           source_paper_id INTEGER NOT NULL,

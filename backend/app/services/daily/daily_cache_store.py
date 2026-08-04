@@ -7,8 +7,13 @@ import time
 from typing import Any
 
 from ...utils.common import exec_sql
+from ...utils.db_init import ensure_once
 
 def ensure_tables(db_path: str) -> None:
+    ensure_once(db_path, _create_tables)
+
+
+def _create_tables(db_path: str) -> None:
     exec_sql(db_path,
         """CREATE TABLE IF NOT EXISTS daily_papers_cache (
           date_key TEXT NOT NULL,
