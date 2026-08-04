@@ -159,31 +159,6 @@ def embed_texts(texts: Iterable[str]) -> list[list[float]]:
                     _cache_put(model, text, vector)
                     for position in batch_positions[batch_idx]:
                         output[position] = vector
-        rows = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(rows, list) or len(rows) != len(missing):
-            raise ValueError("embedding_response_count_mismatch")
-        vectors_by_index: dict[int, list[float]] = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ValueError("embedding_response_invalid")
-            index = row.get("index")
-            vector = row.get("embedding")
-            if not isinstance(index, int) or not isinstance(vector, list) or not vector:
-                raise ValueError("embedding_response_invalid")
-            parsed = [float(value) for value in vector]
-            if not all(math.isfinite(value) for value in parsed):
-                raise ValueError("embedding_response_non_finite")
-            vectors_by_index[index] = parsed
-        if set(vectors_by_index) != set(range(len(missing))):
-            raise ValueError("embedding_response_index_mismatch")
-        dimensions = {len(vector) for vector in vectors_by_index.values()}
-        if len(dimensions) != 1:
-            raise ValueError("embedding_response_dimension_mismatch")
-        for missing_index, text in enumerate(missing):
-            vector = vectors_by_index[missing_index]
-            _cache_put(model, text, vector)
-            for position in missing_positions[text]:
-                output[position] = vector
 
     if any(vector is None for vector in output):
         raise ValueError("embedding_response_incomplete")

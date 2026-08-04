@@ -67,3 +67,19 @@ def test_missing_cache_falls_through_to_parse(db_path, sample_pdf, monkeypatch):
 
     compute_and_cache_excerpt(db_path, 99, sample_pdf)
     assert calls["n"] == 1
+
+
+def test_pages_present_skips_full_parse(db_path, sample_pdf, monkeypatch):
+    # Round-7 perf fix: when page-chunk parsing yields pages, the full-text
+    # extractor must NOT run a second pymupdf4llm pass — the excerpt is derived
+    # by joining page texts. extract_pdf_text_full should never be called.
+    def _boom(abspath):
+        raise AssertionError("extract_pdf_text_full should not run when pages parse OK")
+    monkeypatch.setattr(prc, "extract_pdf_text_full", _boom)
+    monkeypatch.setattr(
+        prc,
+        "extract_pdf_text_with_pages",
+        lambda abspath: [{"page": 1, "text": "PAGE_ONE"}, {"page": 2, "text": "PAGE_TWO"}],
+    )
+
+    compute_and_cache_excerpt(db_path, 7, sample_pdf)  # must derive excerpt from pages only

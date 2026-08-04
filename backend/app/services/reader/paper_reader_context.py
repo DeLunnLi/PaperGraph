@@ -363,9 +363,19 @@ def compute_and_cache_excerpt(db_path: str, paper_id: int, pdf_abspath: str) -> 
     cached, _pages = _cache_get(db_path, int(paper_id), pdf_abspath, max_age_days=45)
     if cached:
         return
-    ex = extract_pdf_text_full(pdf_abspath)
-    if ex.strip():
-        pages = extract_pdf_text_with_pages(pdf_abspath)
+    # Parse once: pymupdf4llm page_chunks gives both per-page text and (joined)
+    # the full text. Only when page-chunk parsing yields nothing (scanned PDF /
+    # pymupdf4llm failure) do we fall back to the OCR-aware full-text extractor.
+    # Previously this ran two complete pymupdf4llm.to_markdown passes per miss.
+    pages = extract_pdf_text_with_pages(pdf_abspath)
+    if pages:
+        from .pdf_extract import _clean_math_whitespace
+        ex = _clean_math_whitespace("\n\n".join(str(p.get("text") or "") for p in pages)).strip()
+    else:
+        ex = ""
+    if not ex:
+        ex = extract_pdf_text_full(pdf_abspath).strip()
+    if ex:
         _cache_set(db_path, int(paper_id), pdf_abspath, ex, pages if pages else None)
     else:
         _cache_delete(db_path, int(paper_id))

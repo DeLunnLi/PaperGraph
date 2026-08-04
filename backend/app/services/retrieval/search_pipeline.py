@@ -250,11 +250,16 @@ async def rank_candidates(
         and all(has_strong_main_conference_venue_signal(paper, venue) for paper in candidates)
     )
     if not use_llm_rank or constraints_fully_verified:
-        scored = rank_by_semantic_relevance(
-            candidates,
-            ctx.enhanced_query or ctx.rank_query,
-            keywords=ctx.merged_keywords,
-            target_titles=_merge_target_titles(plan, ctx),
+        # rank_by_semantic_relevance calls the embedding endpoint via a sync
+        # httpx.Client; run it off the event loop so concurrent source fan-out
+        # (and other async tasks) aren't blocked for the embedding round-trip.
+        scored = await anyio.to_thread.run_sync(
+            lambda: rank_by_semantic_relevance(
+                candidates,
+                ctx.enhanced_query or ctx.rank_query,
+                keywords=ctx.merged_keywords,
+                target_titles=_merge_target_titles(plan, ctx),
+            )
         )
         semantic_ranked = [RankedPaper(paper=p, fine_score=score) for p, score in scored]
         if not (plan.authors or plan.venues or plan.target_titles or plan.year_from or plan.year_to):
@@ -308,11 +313,13 @@ async def rank_candidates(
         use_semantic = bool(ctx.enhanced_query or ctx.rank_query)
         if use_semantic:
             try:
-                scored = rank_by_semantic_relevance(
-                    candidates,
-                    ctx.enhanced_query or ctx.rank_query,
-                    keywords=ctx.merged_keywords,
-                    target_titles=_merge_target_titles(plan, ctx),
+                scored = await anyio.to_thread.run_sync(
+                    lambda: rank_by_semantic_relevance(
+                        candidates,
+                        ctx.enhanced_query or ctx.rank_query,
+                        keywords=ctx.merged_keywords,
+                        target_titles=_merge_target_titles(plan, ctx),
+                    )
                 )
                 ranked = [RankedPaper(paper=p, fine_score=score) for p, score in scored]
                 if not (plan.authors or plan.venues or plan.target_titles or plan.year_from or plan.year_to):
