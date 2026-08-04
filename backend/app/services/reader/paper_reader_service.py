@@ -134,7 +134,7 @@ class PaperReaderService:
             if pdf_path:
                 reader_snap["_pdf_abspath"] = pdf_path
         except Exception:
-            pass
+            logger.debug("reader_snap pdf_abspath lookup failed", exc_info=True)
         if pdf_parsing:
             self._schedule_pdf_excerpt(paper_id, user_id, ctx, background_tasks)
 
@@ -198,7 +198,7 @@ class PaperReaderService:
             if pdf_path:
                 reader_snap["_pdf_abspath"] = pdf_path
         except Exception:
-            pass
+            logger.debug("reader_snap pdf_abspath lookup failed", exc_info=True)
         self._schedule_pdf_excerpt(paper_id, user_id, ctx, background_tasks)
 
         store = MemoryStore(self._db.db_path)

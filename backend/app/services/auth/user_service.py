@@ -9,10 +9,13 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sqlite3
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _get_db_path() -> str:
@@ -71,6 +74,7 @@ def _verify_password(password: str, password_hash: str) -> bool:
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
     except Exception:
+        logger.debug("password verify failed", exc_info=True)
         return False
 
 

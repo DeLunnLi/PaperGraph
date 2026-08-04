@@ -180,7 +180,7 @@ def resolve_paper_pdf_url(paper: Paper, email: str = "") -> str | None:
                 if r.status_code == 200 and r.headers.get("content-type", "").startswith("application/pdf"):
                     return doi_u
         except Exception:
-            pass
+            logger.debug("doi direct-pdf probe failed for %s", doi_u, exc_info=True)
 
     return None
 

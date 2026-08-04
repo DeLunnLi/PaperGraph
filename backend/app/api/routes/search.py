@@ -174,8 +174,8 @@ async def _run_search_agent_core(
 ) -> SearchAgentResponse:
     tool_calls: List[ToolCallInfo] = []
 
-    intent = await anyio.to_thread.run_sync(agent.understand_intent, merged_query, request.mode)
     with track_tool_call(tool_calls, "understand_intent", {"query": merged_query}) as tc:
+        intent = await anyio.to_thread.run_sync(agent.understand_intent, merged_query, request.mode)
         tc.result_summary = f"sort={intent.sort}, venues={intent.venues}, yf={intent.year_from}, kw={intent.keywords}"
 
     plan = ResolvedSearchPlan.from_search_intent(intent)

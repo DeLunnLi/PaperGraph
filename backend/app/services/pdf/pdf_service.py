@@ -81,7 +81,7 @@ def build_library_pdf_response(*, paper_id: int, user_id: int, request: Request,
                 if int(ims_ts) >= mtime:
                     return Response(status_code=304, headers=common_headers)
         except Exception:
-            pass
+            logger.debug("conditional-request header parse failed", exc_info=True)
 
     if not range_header:
         return StreamingResponse(
