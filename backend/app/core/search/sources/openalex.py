@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -208,8 +210,7 @@ async def _search_openalex_works_by_author_async(
 
     year_filt = openalex_publication_year_filter(kwargs.get("year_from"), kwargs.get("year_to"))
 
-    best_aid, best_score = "", -1
-    for cand in search_candidates[:4]:
+    async def _resolve_one(cand: str):
         try:
             ar = await searcher._async_client.get(
                 "https://api.openalex.org/authors",
@@ -225,10 +226,18 @@ async def _search_openalex_works_by_author_async(
                 display_name=lambda h: str(h.get("display_name") or "").strip(),
                 score_bonus=lambda h, s: s + min(3, int(h.get("works_count") or 0) // 200),
             )
-            if best_hit and score > best_score:
-                best_score, best_aid = score, str(best_hit.get("id") or "").strip()
+            if best_hit:
+                return score, str(best_hit.get("id") or "").strip()
         except Exception:
-            continue
+            pass
+        return None
+
+    cands = search_candidates[:4]
+    results = await asyncio.gather(*[_resolve_one(c) for c in cands], return_exceptions=True)
+    best_aid, best_score = "", -1.0
+    for res in results:
+        if isinstance(res, tuple) and res[0] > best_score:
+            best_score, best_aid = res
     if not best_aid:
         return []
 
@@ -259,14 +268,22 @@ async def _search_openalex_works_by_author_async(
     return _extract_openalex_papers(searcher, results, max_results)
 
 
+_VENUE_ID_CACHE: Dict[str, tuple[Optional[str], float]] = {}
+_VENUE_ID_CACHE_TTL = 3600.0
+
+
 async def _openalex_resolve_venue_id_async(
     searcher, venue_raw: str, headers: Optional[Dict[str, str]] = None
 ) -> Optional[str]:
-    """Resolve a venue name to an OpenAlex venue ID."""
+    """Resolve a venue name to an OpenAlex venue ID (cached for 1h per normalized name)."""
     v = (venue_raw or "").strip().lower()
     if not v:
         return None
     v2 = re.sub(r"\b(19|20)\d{2}\b", "", v).strip() or v
+    now = time.monotonic()
+    cached = _VENUE_ID_CACHE.get(v2)
+    if cached and now - cached[1] < _VENUE_ID_CACHE_TTL:
+        return cached[0]
     try:
         r = await searcher._async_client.get(
             "https://api.openalex.org/venues",
@@ -275,11 +292,13 @@ async def _openalex_resolve_venue_id_async(
             timeout=25.0,
         )
         r.raise_for_status()
-        return _pick_openalex_venue_id_from_items(
+        result = _pick_openalex_venue_id_from_items(
             v2, list((r.json() or {}).get("results") or [])
         )
     except Exception:
-        return None
+        result = None
+    _VENUE_ID_CACHE[v2] = (result, now)
+    return result
 
 
 @register_source("openalex")

@@ -283,19 +283,25 @@ async def search_tavily_proceedings(
                 f"{venue} {year_i} conference papers list",
             ]
             seen_titles: set[str] = set()
-            for bq in browse_queries:
-                batch = await _tavily_proceedings_fetch(
-                    api_key=_ak, query=bq, domains=domains or None,
-                    max_results=10, httpx_client=_client,
-                    searcher=searcher, year=year, journal=journal,
-                )
+            batches = await asyncio.gather(
+                *[
+                    _tavily_proceedings_fetch(
+                        api_key=_ak, query=bq, domains=domains or None,
+                        max_results=10, httpx_client=_client,
+                        searcher=searcher, year=year, journal=journal,
+                    )
+                    for bq in browse_queries
+                ],
+                return_exceptions=True,
+            )
+            for batch in batches:
+                if isinstance(batch, Exception):
+                    continue
                 for p in batch:
                     t = (getattr(p, "title", None) or "").strip().lower()
                     if t and t not in seen_titles:
                         seen_titles.add(t)
                         papers.append(p)
-                if len(papers) >= max(20, int(max_results)):
-                    break
         else:
             seen_titles: set[str] = set()
             for tq in [base_q]:

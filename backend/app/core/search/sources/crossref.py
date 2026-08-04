@@ -6,6 +6,7 @@ canonical work. Callers must provide verified DOI values via ``dois``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import quote
@@ -70,8 +71,9 @@ async def search_crossref(
     if not dois:
         return []
     await searcher._ensure_async_client()
-    papers: list[Paper] = []
-    for doi in dict.fromkeys(dois[: max(1, min(int(max_results), 5))]):
+    doi_list = list(dict.fromkeys(dois[: max(1, min(int(max_results), 5))]))
+
+    async def _lookup_one(doi: str) -> Paper | None:
         try:
             response = await searcher._async_http_get_with_retry(
                 f"https://api.crossref.org/works/{quote(doi, safe='')}",
@@ -83,7 +85,10 @@ async def search_crossref(
             message = (response.json() or {}).get("message") or {}
             paper = _message_to_paper(searcher, message)
             if paper and paper.doi == doi:
-                papers.append(paper)
+                return paper
         except Exception as exc:
             logger.info("crossref_doi_lookup_failed: %s", type(exc).__name__)
-    return papers
+        return None
+
+    results = await asyncio.gather(*[_lookup_one(d) for d in doi_list], return_exceptions=True)
+    return [p for p in results if isinstance(p, Paper)]
