@@ -124,10 +124,11 @@ export function renderMarkdown(text: string): string {
     .replace(/^### (.*$)/gim, '<h3>$1</h3>').replace(/^## (.*$)/gim, '<h2>$1</h2>').replace(/^# (.*$)/gim, '<h1>$1</h1>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>')
     .replace(/^\* (.*$)/gim, '<li>$1</li>').replace(/^- (.*$)/gim, '<li>$1</li>')
-    .replace(/^\d+\. (.*$)/gim, '<li>$1</li>')
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, (match) => {
-    const hasNumbers = /^\d+\. /.test(text.substring(text.indexOf(match) - 10, text.indexOf(match)))
-    return hasNumbers ? `<ol>${match}</ol>` : `<ul>${match}</ul>`
+    .replace(/^\d+\. (.*$)/gim, '<li data-ol>$1</li>')
+  html = html.replace(/(<li(?: data-ol)?>.*<\/li>\n?)+/g, (match) => {
+    const isOrdered = match.includes(' data-ol>')
+    const inner = isOrdered ? match.replace(/ data-ol/g, '') : match
+    return isOrdered ? `<ol>${inner}</ol>` : `<ul>${inner}</ul>`
   })
   html = html.replace(/((?:^\|.+\|\n?)+)/gm, (tableBlock) => {
     const rows = tableBlock.trim().split('\n').filter(r => r.includes('|'))

@@ -11,6 +11,7 @@ _RE_ARXIV_DOI = re.compile(r"10\.48550/arxiv\.?([\d.]+\d)", re.I)
 _RE_ARXIV_URL_IN_DOI = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w./]+)", re.I)
 _RE_ARXIV_VERSION_SUFFIX = re.compile(r"v\d+$", re.I)
 _RE_TITLE_ENTITY = re.compile(r"&amp;|&lt;|&gt;|&quot;|&#\d+;")
+_RE_TITLE_NON_ALNUM = re.compile(r"[^a-z0-9\u4e00-\u9fff]+", re.I)
 
 
 def strip_arxiv_version(arxiv_id: str | None) -> str:
@@ -19,7 +20,6 @@ def strip_arxiv_version(arxiv_id: str | None) -> str:
     Returns the input unchanged (as a stripped string) when there is no suffix.
     """
     return _RE_ARXIV_VERSION_SUFFIX.sub("", (arxiv_id or "").strip())
-_RE_TITLE_NON_ALNUM = re.compile(r"[^a-z0-9\u4e00-\u9fff]+", re.I)
 
 
 @functools.lru_cache(maxsize=128)

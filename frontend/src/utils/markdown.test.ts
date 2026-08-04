@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { clipTextAvoidBreakingMath } from './markdown'
+import { clipTextAvoidBreakingMath, renderMarkdown } from './markdown'
 
 describe('clipTextAvoidBreakingMath', () => {
   it('returns short strings unchanged', () => {
@@ -30,5 +30,19 @@ describe('clipTextAvoidBreakingMath', () => {
   it('handles empty/null', () => {
     expect(clipTextAvoidBreakingMath('', 10)).toBe('')
     expect(clipTextAvoidBreakingMath(null as unknown as string, 10)).toBe(null as unknown as string)
+  })
+})
+
+describe('renderMarkdown list rendering', () => {
+  it('renders ordered lists as <ol>', () => {
+    const html = renderMarkdown('1. first\n2. second')
+    expect(html).toContain('<ol>')
+    expect(html).not.toContain('<ul>')
+  })
+
+  it('renders unordered lists as <ul>', () => {
+    const html = renderMarkdown('- first\n- second')
+    expect(html).toContain('<ul>')
+    expect(html).not.toContain('<ol>')
   })
 })

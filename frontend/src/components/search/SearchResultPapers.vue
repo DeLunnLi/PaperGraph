@@ -58,7 +58,7 @@ function abstractPreview(abs: string, length = 280): string {
         </a-button>
       </div>
     </div>
-    <div v-for="(paper, pIndex) in visiblePapers" :key="pIndex" class="paper-item">
+    <div v-for="(paper, pIndex) in visiblePapers" :key="paper.doi || paper.arxiv_id || paper.title || pIndex" class="paper-item">
       <div class="paper-number">{{ pIndex + 1 }}.</div>
       <div class="paper-content">
         <div class="paper-title-line">
