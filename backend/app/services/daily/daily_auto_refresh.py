@@ -84,9 +84,10 @@ async def daily_auto_refresh_loop(app: FastAPI) -> None:
             db_path = get_db_path()
             date_key = _dt.datetime.now().strftime("%Y-%m-%d")
             import sqlite3
+            from contextlib import closing
 
             def _user_ids() -> list[int]:
-                with sqlite3.connect(db_path) as conn:
+                with closing(sqlite3.connect(db_path)) as conn:
                     return [int(row[0]) for row in conn.execute("SELECT id FROM users ORDER BY id").fetchall()]
 
             user_ids = await run_in_threadpool(_user_ids)

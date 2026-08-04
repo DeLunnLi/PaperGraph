@@ -337,21 +337,6 @@ def extract_pdf_text_full_cached(db_path: str, paper_id: int, abspath: str | Non
         return ex, True
     return "", False
 
-def extract_pdf_pages_cached(db_path: str, paper_id: int, abspath: str | None) -> tuple[list[dict], bool]:
-    """Return (pages, cached). pages = list[{"page":N,"text":...}], cached=True if from cache."""
-    if not abspath or not os.path.isfile(abspath):
-        return [], False
-    _ex, pages = _cache_get(db_path, int(paper_id), abspath, max_age_days=45)
-    if pages is not None:
-        return pages, True
-    # Cache miss for pages but maybe excerpt present without pages — recompute pages only.
-    if _ex is not None:
-        pages = extract_pdf_text_with_pages(abspath)
-        if pages:
-            _cache_set(db_path, int(paper_id), abspath, _ex, pages)
-        return pages, False
-    return [], False
-
 def _cache_delete(db_path: str, paper_id: int) -> None:
     if not db_path:
         return

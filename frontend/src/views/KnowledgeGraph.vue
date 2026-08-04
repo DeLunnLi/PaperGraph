@@ -83,7 +83,7 @@
             <div v-if="selected!.year != null" class="kg-info__kv"><strong>year</strong>：{{ selected!.year }}</div>
             <div v-if="selected!.category" class="kg-info__kv"><strong>category</strong>：{{ selected!.category }}</div>
             <template v-if="selected!.type === 'paper' && selected!.paper_id">
-              <div v-if="paperDetailLoading" class="kg-info__kg-info__kv" style="color: var(--pg-text-tertiary);">加载论文详情中…</div>
+              <div v-if="paperDetailLoading" class="kg-info__kv" style="color: var(--pg-text-tertiary);">加载论文详情中…</div>
               <template v-else-if="paperDetail">
                 <div v-if="paperDetail.authors?.length" class="kg-info__kv"><strong>authors</strong>：{{ formatAuthors(paperDetail, { empty: '' }) }}</div>
                 <div v-if="paperDetail.journal" class="kg-info__kv"><strong>{{ paperDetail.venue_type === 'conference' ? 'conference' : paperDetail.venue_type === 'preprint' ? 'preprint' : 'journal' }}</strong>：{{ paperDetail.journal }}</div>
