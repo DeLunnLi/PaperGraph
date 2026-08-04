@@ -32,6 +32,11 @@ export function useSearchConversations<TMessage>({
   let statePersistTimer: ReturnType<typeof setTimeout> | null = null
 
   function cloneMessages(value: TMessage[]): TMessage[] {
+    // structuredClone is native, faster than JSON round-trip, and preserves
+    // non-JSON types. Fall back to JSON for environments without it.
+    if (typeof structuredClone === 'function') {
+      return structuredClone(value) as TMessage[]
+    }
     return JSON.parse(JSON.stringify(value)) as TMessage[]
   }
   function generateId(): string {

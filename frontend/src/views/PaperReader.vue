@@ -106,7 +106,7 @@
           </div>
           <div
             v-for="(m, i) in messages"
-            :key="i"
+            :key="m._uid"
             class="paper-reader__msg"
             :class="'paper-reader__msg--' + m.role"
           >
@@ -240,12 +240,15 @@ const pdfStreamUrl = ref('')
 const acquiringPdf = ref(false)
 const pdfAcquireError = ref('')
 const pdfViewerRef = ref<InstanceType<typeof PdfJsViewer> | null>(null)
+let _msgUidSeq = 0
+const _nextMsgUid = () => ++_msgUidSeq
 const messages = ref<
   {
     role: 'user' | 'assistant'
     content: string
     related_papers?: Paper[]
     citations?: PaperReaderCitation[]
+    _uid: number
   }[]
 >([])
 const draft = ref('')
@@ -407,13 +410,13 @@ const gotoCitationPage = (page: number) => {
 }
 const mapHistoryTurns = (
   turns: { role?: string; content?: string | null; created_at?: number }[]
-): { role: 'user' | 'assistant'; content: string; related_papers?: Paper[] }[] =>
+): { role: 'user' | 'assistant'; content: string; related_papers?: Paper[]; _uid: number }[] =>
   turns
     .filter((t) => t && (t.role === 'user' || t.role === 'assistant') && String(t.content || '').trim())
     .map((t) => {
       const role = t.role as 'user' | 'assistant'
       const content = role === 'assistant' ? normalizeAssistantText(String(t.content)) : String(t.content)
-      return { role, content }
+      return { role, content, _uid: _nextMsgUid() }
     })
 const ensureOpeningAndHistory = async (reloadHistory = false, showError = true, loadSeq?: number) => {
   if (paperId.value == null) return
@@ -436,7 +439,7 @@ const ensureOpeningAndHistory = async (reloadHistory = false, showError = true, 
     }
     const hasAssistantMessage = messages.value.some((m) => m.role === 'assistant')
     if (!hasAssistantMessage) {
-      messages.value.push({ role: 'assistant', content: normalizeAssistantText(res.opening) })
+      messages.value.push({ role: 'assistant', content: normalizeAssistantText(res.opening), _uid: _nextMsgUid() })
       await scrollBottom()
     }
   } catch (e: unknown) {
@@ -464,8 +467,8 @@ const send = async () => {
   activeChatAbortController = abortController
   activeChatPaperId = currentPaperId
   sending.value = true
-  messages.value.push({ role: 'user', content: text })
-  const assistantIdx = messages.value.push({ role: 'assistant', content: '正在思考…' }) - 1
+  messages.value.push({ role: 'user', content: text, _uid: _nextMsgUid() })
+  const assistantIdx = messages.value.push({ role: 'assistant', content: '正在思考…', _uid: _nextMsgUid() }) - 1
   activeAssistantPlaceholderIndex = assistantIdx
   draft.value = ''
   inputKey.value += 1

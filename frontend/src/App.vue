@@ -207,16 +207,24 @@ watch(
   },
   { immediate: true }
 )
+let _resizeRaf = 0
 const onResize = () => {
-  windowWidth.value = window.innerWidth
-  if (window.innerWidth < 1024 && !collapsed.value) collapsed.value = true
-  if (window.innerWidth >= 1280 && collapsed.value) collapsed.value = false
+  if (_resizeRaf) return
+  _resizeRaf = requestAnimationFrame(() => {
+    _resizeRaf = 0
+    windowWidth.value = window.innerWidth
+    if (window.innerWidth < 1024 && !collapsed.value) collapsed.value = true
+    if (window.innerWidth >= 1280 && collapsed.value) collapsed.value = false
+  })
 }
 onMounted(() => {
   onResize()
   window.addEventListener('resize', onResize)
 })
-onBeforeUnmount(() => window.removeEventListener('resize', onResize))
+onBeforeUnmount(() => {
+  if (_resizeRaf) cancelAnimationFrame(_resizeRaf)
+  window.removeEventListener('resize', onResize)
+})
 </script>
 <style scoped>
 .standalone-root {

@@ -77,7 +77,7 @@
         </div>
       </div>
       <div ref="messagesContainer" class="messages-container" role="log" aria-live="polite" aria-label="搜索对话消息">
-        <div v-for="(msg, index) in messages" :key="index" class="message" :class="msg.role">
+        <div v-for="(msg, index) in messages" :key="msg.timestamp || index" class="message" :class="msg.role">
           <div v-if="msg.role === 'user'" class="user-bubble">
             <div class="message-content">{{ msg.content }}</div>
           </div>
