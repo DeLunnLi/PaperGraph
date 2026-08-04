@@ -1,4 +1,4 @@
-import { ref, type Ref } from 'vue'
+import { onScopeDispose, ref, type Ref } from 'vue'
 interface SearchConversation<TMessage> {
   id: string
   title: string
@@ -209,6 +209,13 @@ export function useSearchConversations<TMessage>({
     }
     return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
   }
+
+  // Safety net: clear debounce timers if the owning component forgets to flush.
+  onScopeDispose(() => {
+    if (conversationsPersistTimer) clearTimeout(conversationsPersistTimer)
+    if (statePersistTimer) clearTimeout(statePersistTimer)
+  })
+
   return {
     conversations,
     currentConversationId,

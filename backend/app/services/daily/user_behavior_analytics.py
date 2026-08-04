@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass
 
 from ...utils import build_in_clause
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class UserInterestProfile:
@@ -135,6 +138,7 @@ class UserBehaviorAnalytics:
             keywords_set = get_high_value_keywords_from_feedback(self.db_path, user_id=self.user_id, days=days, top_n=30)
             return Counter({kw: 2.0 for kw in keywords_set})
         except Exception:
+            logger.debug("get_feedback_enhanced_keywords failed", exc_info=True)
             return Counter()
 
     def get_user_interest_profile(

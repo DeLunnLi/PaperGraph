@@ -224,11 +224,11 @@ def save_papers(
         t_after_classify = time.perf_counter()
 
         # Backfill missing abstracts via Tavily.
+        from ...settings import get_settings as _gs
+        _ak = getattr(_gs(), "tavily_api_key", "").strip()
         for lit_p in lit_list:
             if not (lit_p.abstract or "").strip() and lit_p.title:
                 try:
-                    from ...settings import get_settings as _gs
-                    _ak = getattr(_gs(), "tavily_api_key", "").strip()
                     if _ak:
                         import httpx
                         _resp = httpx.post("https://api.tavily.com/search", json={

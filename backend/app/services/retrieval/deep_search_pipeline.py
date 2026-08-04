@@ -232,7 +232,7 @@ async def run_deep_search_pipeline_async(
             try:
                 progress_callback(event_type, payload)
             except Exception:
-                pass
+                logger.debug("progress_callback failed", exc_info=True)
 
     # --- Step 1: Decompose ---
     _emit("deep:decompose", {"phase": "decompose"})

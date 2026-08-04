@@ -96,7 +96,7 @@ def _select_personalized_and_general(
             if llm_p or llm_g:
                 p_idxs, g_idxs = llm_p, llm_g
     except Exception:
-        pass
+        logger.debug("daily pick LLM selection failed", exc_info=True)
     return [pool[i] for i in p_idxs], [pool[i] for i in g_idxs]
 
 
@@ -589,6 +589,6 @@ async def record_user_daily_feedback(*, body, db_path, user_id: int) -> Any:
                 max_new_rules=2,
             )
         except Exception:
-            pass
+            logger.debug("skip negative-feedback recording failed", exc_info=True)
 
     return DailyRecommendFeedbackResponse(success=ok, message="反馈已记录" if ok else "记录失败")

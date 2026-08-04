@@ -366,7 +366,7 @@ class LlmPaperRanker:
                         self._finalize_scores(ranked2)
                         return ranked2[:top_k], method2
                 except Exception:
-                    pass
+                    logger.debug("fine_rank retry failed", exc_info=True)
 
             if _looks_like_llm_timeout(e):
                 logger.warning(

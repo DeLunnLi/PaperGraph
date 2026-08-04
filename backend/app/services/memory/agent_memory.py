@@ -225,7 +225,7 @@ class AgentMemory:
             for _, mid in scored[:excess]:
                 self.store.delete_memory(mid)
         except Exception:
-            pass
+            logger.debug("[AgentMemory] _evict_old_memories failed", exc_info=True)
 
     def _compress_shared_working(self, uid: str) -> None:
         """Compress old shared working memories into a single episodic summary.

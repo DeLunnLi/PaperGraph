@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from typing import Any
 
 from ...utils.common import exec_sql
 from ...utils.db_init import ensure_once
+
+logger = logging.getLogger(__name__)
 
 def ensure_tables(db_path: str) -> None:
     ensure_once(db_path, _create_tables)
@@ -51,7 +54,7 @@ def get_cache(db_path: str, *, date_key: str, cache_key: str) -> dict[str, Any |
             )
             conn.commit()
         except Exception:
-            pass
+            logger.debug("daily_cache hit_count update failed", exc_info=True)
         return data if isinstance(data, dict) else None
     finally:
         conn.close()

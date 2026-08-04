@@ -9,6 +9,7 @@ Lightweight strategy:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -21,6 +22,7 @@ from ..deps import require_user
 
 from ...settings import get_settings
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/export", tags=["导出"])
 
 
@@ -111,6 +113,7 @@ def _export_memory(conn: sqlite3.Connection, user_id: int) -> list[dict]:
                  "shared": bool(r[4]), "scope": r[5], "paper_id": r[6], "created_at": r[7]}
                 for r in rows]
     except Exception:
+        logger.warning("export._export_memory failed", exc_info=True)
         return []
 
 
@@ -128,6 +131,7 @@ def _export_relations(conn: sqlite3.Connection, user_id: int) -> list[dict]:
         return [{"source": r[0], "target": r[1], "relation": r[2], "score": r[3],
                  "evidence": r[4], "created_at": r[5]} for r in rows]
     except Exception:
+        logger.warning("export._export_relations failed", exc_info=True)
         return []
 
 
@@ -146,6 +150,7 @@ def _export_feedback(conn: sqlite3.Connection, user_id: int | None = None) -> li
         return [{"date": r[0], "paper": r[1], "title": r[2], "action": r[3],
                  "source": r[4], "created_at": r[5]} for r in rows]
     except Exception:
+        logger.warning("export._export_feedback failed", exc_info=True)
         return []
 
 

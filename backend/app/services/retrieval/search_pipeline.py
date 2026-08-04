@@ -112,6 +112,7 @@ async def _merge_pinned_papers(
             )
         pinned = pinned or []
     except Exception:
+        logger.debug("pinned arxiv lookup failed", exc_info=True)
         pinned = []
     return merge_candidates(candidates, list(pinned), "prepend")
 
@@ -329,7 +330,7 @@ async def rank_candidates(
                 ranked = ranked[: runtime.max_results]
                 return ranked, "semantic_fallback_timeout", {"semantic_scores": [rp.fine_score for rp in ranked]}
             except Exception:
-                pass
+                logger.debug("semantic fallback after ranking timeout failed", exc_info=True)
         from .paper_ranker import _papers_to_ranked_pool
 
         pool = _papers_to_ranked_pool(candidates, cap=runtime.recall_max, prefer_recency=prefer_rec)

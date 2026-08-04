@@ -1,12 +1,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any
 
 from ..llm.agent_runtime import run_json_task, stateless_llm_chat
 from .sqlite_document_store_compat import SQLiteDocumentStore
+
+logger = logging.getLogger(__name__)
 
 class MemoryStoreConfig:
 
@@ -82,6 +85,7 @@ class MemoryStore:
                 if self.store.delete_memory(mid):
                     deleted += 1
             except Exception:
+                logger.debug("memory_store._delete_docs failed mid=%s", mid, exc_info=True)
                 continue
         return deleted
 
@@ -103,6 +107,7 @@ class MemoryStore:
             d = _json.loads(txt) if txt.startswith("{") else {}
             return bool(d.get("duplicate", False))
         except Exception:
+            logger.debug("memory_store._llm_is_duplicate failed", exc_info=True)
             return False
 
     @staticmethod
@@ -368,6 +373,7 @@ class MemoryStore:
             summary = stateless_llm_chat(llm, None, prompt, temperature=0.3, max_tokens=400)
             return str(summary or "").strip()
         except Exception:
+            logger.debug("memory_store._summarize_via_llm failed", exc_info=True)
             return ""
 
     def compress_working(self, *, scope: str = "paper", paper_id: int | None = None, min_entries: int = 6) -> str:
