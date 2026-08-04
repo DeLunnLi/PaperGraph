@@ -18,8 +18,6 @@ from .paper import Paper
 _MAX_PDF_BYTES = 200 * 1024 * 1024   # 200 MiB hard ceiling
 _MAX_REDIRECTS = 5
 
-_log = logging.getLogger(__name__)
-
 def _is_pkp_ojs_article_download_url(url: str) -> bool:
     return bool(re.search(r"/article/download/\d+/\d+", (url or ""), re.I))
 
@@ -77,7 +75,7 @@ def _pdf_download_candidates(paper: Paper, email: str) -> list[str]:
         resolved = resolve_paper_pdf_url(paper, email=email)
         _push(resolved)
     except Exception as ex:
-        _log.warning("resolve_paper_pdf_url 异常（已忽略）: %s", ex, exc_info=True)
+        logger.warning("resolve_paper_pdf_url 异常（已忽略）: %s", ex, exc_info=True)
 
     # Last resort: derive PDF URL from abstract page URL pattern
     if not out and su:
@@ -202,7 +200,7 @@ def download_paper_pdf_to_path(paper: Paper, dest_abspath: str, email: str = "")
 
         for url in urls:
             if not is_safe_public_http_url(url):
-                _log.warning("SSRF blocked: %s", url)
+                logger.warning("SSRF blocked: %s", url)
                 continue
             tmp = dest_abspath + ".part"
             try:
@@ -218,7 +216,7 @@ def download_paper_pdf_to_path(paper: Paper, dest_abspath: str, email: str = "")
                             if chunk:
                                 total += len(chunk)
                                 if total > _MAX_PDF_BYTES:
-                                    _log.warning("PDF exceeded %d MiB, aborting", _MAX_PDF_BYTES // (1024 * 1024))
+                                    logger.warning("PDF exceeded %d MiB, aborting", _MAX_PDF_BYTES // (1024 * 1024))
                                     break
                                 f.write(chunk)
                         else:
@@ -242,6 +240,6 @@ def download_paper_pdf_to_path(paper: Paper, dest_abspath: str, email: str = "")
         return False
 
     except Exception as ex:
-        _log.warning("download_paper_pdf_to_path 异常: %s", ex, exc_info=True)
+        logger.warning("download_paper_pdf_to_path 异常: %s", ex, exc_info=True)
         _cleanup_temp_file(dest_abspath + ".part")
         return False

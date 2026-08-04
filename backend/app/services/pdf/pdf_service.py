@@ -94,7 +94,7 @@ def build_library_pdf_response(*, paper_id: int, user_id: int, request: Request,
         ok = if_range in (etag, last_modified)
         if not ok:
             return StreamingResponse(
-                _iter_file(path),
+                _iter_file(real_path),
                 media_type="application/pdf",
                 headers={**common_headers, "Content-Length": str(file_size)},
             )

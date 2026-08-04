@@ -34,7 +34,7 @@ def abbreviate_journal(journal: str | None) -> str | None:
         return m.group(1).upper()
 
     caps = [w for w in re.findall(r"\b[A-Z]{3,8}\b", j)
-            if w not in ("IEEE", "ACM", "SIG", "CVF", "THE", "FOR", "AND", "WITH", "ON", "IN")]
+            if w not in ("IEEE", "ACM", "SIG", "CVF", "THE", "FOR", "AND", "WITH")]
     if caps:
         return caps[0]
     return j
