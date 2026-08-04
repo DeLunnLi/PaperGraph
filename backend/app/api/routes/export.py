@@ -9,7 +9,7 @@ Lightweight strategy:
 from __future__ import annotations
 
 import json
-import logging
+import os
 import sqlite3
 import time
 from typing import Any, Literal
@@ -21,12 +21,10 @@ from ..deps import require_user
 
 from ...settings import get_settings
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/export", tags=["导出"])
 
 
 def _get_db_path() -> str:
-    import os
     s = get_settings()
     return os.path.join(s.data_dir, "papers.db")
 

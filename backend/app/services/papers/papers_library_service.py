@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import threading
 import time
 
@@ -149,7 +150,6 @@ def save_papers(
                 lit_p.arxiv_id = (api_p.arxiv_id or "").strip()
             # Fill missing arXiv ID from DOI/source URL.
             if not (getattr(lit_p, "arxiv_id", None) or "").strip():
-                import re
                 for field_val in ((api_p.doi or "").strip(), (api_p.source_url or "").strip()):
                     m = re.search(r"arxiv/([\d.]+)", field_val, re.I)
                     if m:
@@ -159,7 +159,6 @@ def save_papers(
             if not (getattr(lit_p, "venue_type", None) or "").strip():
                 j = (getattr(lit_p, "journal", None) or "").strip()
                 if j:
-                    import re
                     if re.search(r"(?i)\b(journal|transactions|letters|magazine|review|annals|acta|bulletin)\b", j):
                         lit_p.venue_type = "journal"
                     else:
@@ -168,7 +167,6 @@ def save_papers(
             # Fill missing DOI from source URL.
             if not (getattr(lit_p, "doi", None) or "").strip():
                 su = (api_p.source_url or "").strip()
-                import re
                 m = re.search(r"doi\.org/(10\.\S+)", su, re.I)
                 if m:
                     lit_p.doi = m.group(1)
@@ -217,12 +215,8 @@ def save_papers(
                         llm_classified += 1
             except Exception as e:
                 logger.warning("大模型归类未执行：%s", e)
-                for lit_p in lit_list:
-                    lit_p.category = normalize_library_category_display(getattr(lit_p, "category", None))
         elif lit_list:
-
-            for lit_p in lit_list:
-                lit_p.category = normalize_library_category_display(getattr(lit_p, "category", None))
+            pass
 
         for lit_p in lit_list:
             lit_p.category = normalize_library_category_display(getattr(lit_p, "category", None))
