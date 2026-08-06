@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import ACollapse, { CollapsePanel as ACollapsePanel } from 'ant-design-vue/es/collapse'
 
 interface SearchStep {
   name: string

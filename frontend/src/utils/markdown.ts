@@ -65,6 +65,18 @@ function cacheRender(key: string, value: string): void {
   }
   _RENDER_CACHE.set(key, value)
 }
+// Same bounded memoization for plain renderMarkdown: PaperReader calls it in
+// the template for every assistant message, so any component re-render (each
+// composer keystroke included) would otherwise re-run the full regex pipeline
+// + DOMPurify over the whole conversation.
+const _MD_CACHE = new Map<string, string>()
+function cacheMarkdown(key: string, value: string): void {
+  if (_MD_CACHE.size >= _RENDER_CACHE_MAX) {
+    const first = _MD_CACHE.keys().next().value
+    if (first !== undefined) _MD_CACHE.delete(first)
+  }
+  _MD_CACHE.set(key, value)
+}
 export function repairTabSeparatedPseudoTables(text: string): string {
   const raw = String(text || '').replace(/\r\n/g, '\n')
   const lines = raw.split('\n')
@@ -113,7 +125,10 @@ export function repairTabSeparatedPseudoTables(text: string): string {
 }
 export function renderMarkdown(text: string): string {
   if (!text) return ''
-  const repaired = repairTabSeparatedPseudoTables(String(text))
+  const cacheKey = String(text)
+  const cached = _MD_CACHE.get(cacheKey)
+  if (cached !== undefined) return cached
+  const repaired = repairTabSeparatedPseudoTables(cacheKey)
   const normalized = repaired.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
   let html = normalized
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -147,5 +162,7 @@ export function renderMarkdown(text: string): string {
     if (trimmed.startsWith('<h') || trimmed.startsWith('<ul') || trimmed.startsWith('<ol') || trimmed.startsWith('<pre') || trimmed.startsWith('<li') || trimmed === '<hr>' || trimmed.startsWith('<hr ')) return trimmed
     return `<p>${trimmed.replace(/\n/g, '<br>')}</p>`
   }).filter(p => p && p !== '<p><br></p>' && p !== '<p></p>').join('\n')
-  return sanitizeHtml(html)
+  const result = sanitizeHtml(html)
+  cacheMarkdown(cacheKey, result)
+  return result
 }

@@ -42,7 +42,8 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks(id) {
-            if (id.includes('node_modules/ant-design-vue')) return 'antd'
+            // No ant-design-vue bucket: views import components via deep paths,
+            // so Rollup chunks antd modules with the route that uses them.
             if (id.includes('node_modules/pdfjs-dist')) return 'pdfjs'
             if (id.includes('node_modules/d3')) return 'd3'
             if (id.includes('node_modules/katex')) return 'katex'

@@ -21,7 +21,7 @@
           :min="yearExtent[0]"
           :max="yearExtent[1]"
           v-model:value="yearRange"
-          :tip-formatter="(v: number) => String(v)"
+          :tip-formatter="(v?: number) => String(v)"
           class="kg-year-slider"
         />
       </a-space>
@@ -105,7 +105,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import message from 'ant-design-vue/es/message'
+import AButton from 'ant-design-vue/es/button'
+import ACard from 'ant-design-vue/es/card'
+import AInput from 'ant-design-vue/es/input'
+import ASelect, { SelectOption as ASelectOption } from 'ant-design-vue/es/select'
+import ASlider from 'ant-design-vue/es/slider'
+import ASpace from 'ant-design-vue/es/space'
+import ATag from 'ant-design-vue/es/tag'
 import * as d3 from 'd3'
 import apiClient, { getPaper } from '@/services/api'
 import { formatAuthors } from '@/utils/citation'
@@ -355,7 +362,7 @@ function render() {
       hideHoverTip()
     })
   const g = svg.append('g')
-  const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.2, 4]).on('zoom', (ev) => {
+  const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.2, 4]).on('zoom', (ev: any) => {
     g.attr('transform', ev.transform)
   })
   svg.call(zoom as any)

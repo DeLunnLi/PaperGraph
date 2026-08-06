@@ -108,7 +108,16 @@
 </template>
 <script setup lang="ts">
 import { onMounted, ref, computed } from 'vue'
-import { message, Modal } from 'ant-design-vue'
+import message from 'ant-design-vue/es/message'
+import AAlert from 'ant-design-vue/es/alert'
+import AButton from 'ant-design-vue/es/button'
+import ACard from 'ant-design-vue/es/card'
+import AEmpty from 'ant-design-vue/es/empty'
+import AList from 'ant-design-vue/es/list'
+import AModal from 'ant-design-vue/es/modal'
+import ASpin from 'ant-design-vue/es/spin'
+import ATag from 'ant-design-vue/es/tag'
+import ATooltip from 'ant-design-vue/es/tooltip'
 import { useRouter } from 'vue-router'
 import { CloseOutlined } from '@ant-design/icons-vue'
 import PaperCard from '@/components/shared/PaperCard.vue'
@@ -348,7 +357,7 @@ async function ensureSavedAndOpenReader(paper: Paper) {
 function showWhyAndMaybeRead(paper: Paper) {
   const h = hintFor(paper)
   if (!h) return
-  Modal.confirm({
+  AModal.confirm({
     title: '为什么推荐这篇？',
     content: h.explanation || '（暂无解释）',
     okText: '去阅读',

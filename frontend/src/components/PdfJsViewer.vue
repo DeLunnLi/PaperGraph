@@ -58,6 +58,9 @@
 
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import AButton from 'ant-design-vue/es/button'
+import AInputNumber from 'ant-design-vue/es/input-number'
+import ASpin from 'ant-design-vue/es/spin'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 

@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import AButton from 'ant-design-vue/es/button'
+import ASelect, { SelectOption as ASelectOption } from 'ant-design-vue/es/select'
+import ATag from 'ant-design-vue/es/tag'
 import { FilePdfOutlined, SaveOutlined } from '@ant-design/icons-vue'
 import LatexInline from '@/components/LatexInline.vue'
 import type { Paper } from '@/types'
