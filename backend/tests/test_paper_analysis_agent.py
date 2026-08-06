@@ -278,7 +278,7 @@ def test_classify_for_library_cache_hits_skip_llm():
 
     agent.llm = _StubLLM()
     # Prime the whitelist so _get_major_whitelist doesn't bootstrap via LLM.
-    import app.agents.paper_analysis_agent as mod
+    import app.agents.support.classification_mixin as mod
     mod._MAJOR_WHITELIST = ("AI", "未分类")
     try:
         r1 = agent.classify_for_library("Title", "abs", None, [], existing_categories=[])
