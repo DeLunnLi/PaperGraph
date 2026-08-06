@@ -37,8 +37,11 @@ async def require_user(authorization: str | None = Header(default=None)) -> dict
     return user
 
 
-# Simple in-memory rate limiter (no Redis needed)
-_rate_store: dict[str, list[float]] = {}
+# Simple in-memory rate limiter (no Redis needed). TTLCache bounds memory:
+# per-IP entries expire with the window instead of accumulating forever.
+from cachetools import TTLCache
+
+_rate_store: TTLCache = TTLCache(maxsize=10000, ttl=60)
 _RATE_WINDOW = 60  # seconds
 _RATE_MAX = 30  # max requests per window per IP
 
