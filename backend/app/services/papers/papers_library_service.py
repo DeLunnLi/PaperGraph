@@ -4,10 +4,30 @@ import re
 import threading
 import time
 
+from cachetools import TTLCache
+
 from fastapi import BackgroundTasks, HTTPException, Request
 
 from ...settings import get_settings
 from ...utils.common import safe_http_500
+
+# The repair walk does a full os.walk of the library PDF tree — cache its
+# result briefly per (user, missing-id set) so repeat library lists don't
+# re-walk the filesystem on every request.
+_REPAIR_CACHE: TTLCache = TTLCache(maxsize=64, ttl=60)
+_REPAIR_CACHE_LOCK = threading.Lock()
+
+
+def _repair_missing_pdfs(db, ids_missing_pdf: list[int], *, user_id: int) -> dict[int, str]:
+    key = (int(user_id), tuple(sorted(int(i) for i in ids_missing_pdf)))
+    with _REPAIR_CACHE_LOCK:
+        cached = _REPAIR_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    repaired = db.repair_library_local_pdf_paths_batch(ids_missing_pdf, user_id=user_id)
+    with _REPAIR_CACHE_LOCK:
+        _REPAIR_CACHE[key] = dict(repaired)
+    return repaired
 from ...models.schemas import (
     DeletePaperResponse,
     LibraryCategoriesResponse,
@@ -107,7 +127,7 @@ def get_library(
             if p.id is not None and not (getattr(p, "local_pdf_path", None) or "").strip()
         ]
         if ids_missing_pdf:
-            repaired = db.repair_library_local_pdf_paths_batch(ids_missing_pdf, user_id=user_id)
+            repaired = _repair_missing_pdfs(db, ids_missing_pdf, user_id=user_id)
             for p in papers_data:
                 if p.id is not None and int(p.id) in repaired:
                     p.local_pdf_path = repaired[int(p.id)]
@@ -248,6 +268,12 @@ def save_papers(
                 if pid is None or int(pid) <= 0:
                     continue
                 build_relations_for_new_paper(db.db_path, int(pid))
+                try:
+                    from ..graph.kg_citations import build_citation_edges_for_paper
+
+                    build_citation_edges_for_paper(db.db_path, int(pid), user_id=user_id)
+                except Exception:
+                    logger.debug("save_papers.citation_edges_failed pid=%s", pid, exc_info=True)
             except Exception:
                 continue
         t_after_kg = time.perf_counter()
