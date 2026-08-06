@@ -500,10 +500,10 @@ def format_paper_reader_block(
         )
     return "\n".join(lines)
 
-def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None = None) -> tuple[Any | None, str, str, bool, list[dict]]:
+def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None = None) -> tuple[Any | None, str, str, bool, list[dict], str | None]:
     p = db.get_paper_by_id(int(paper_id), user_id=user_id)
     if not p:
-        return None, "", "", False, []
+        return None, "", "", False, [], None
     pdf_path = _ensure_reader_pdf_available(db, p, user_id=user_id)
     db_path = getattr(db, "db_path", "")
     # Single cache read (was two: extract_pdf_text_full_cached + extract_pdf_pages_cached
@@ -578,13 +578,13 @@ def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None =
         references_section_raw=refs_raw,
         reader_artifact_block=reader_artifact_block,
     )
-    # Detect if PDF is still being parsed: if paper has a PDF path but no excerpt cached yet
+    # Detect if PDF is still being parsed: if paper has a PDF path but no excerpt cached yet.
+    # Reuses the pdf_path already resolved above — no second DB query.
     pdf_parsing = False
     try:
-        pdf_path = db.get_library_pdf_abspath(int(paper_id), user_id=user_id)
         if pdf_path and os.path.isfile(pdf_path):
             # Check if excerpt is empty or too short — means parsing hasn't completed
             pdf_parsing = len((excerpt or "").strip()) < 200
     except Exception:
         pass
-    return p, block, merged_for_refs, pdf_parsing, pages
+    return p, block, merged_for_refs, pdf_parsing, pages, pdf_path

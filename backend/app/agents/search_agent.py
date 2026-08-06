@@ -95,17 +95,19 @@ class SearchAgent(BaseAgent):
                 max_results=max(5, min(30, len(explicit_ids))),
             )
 
-        # Inject shared cross-agent memory as context hints
-        # This lets search benefit from user's reading history and preferences
-        # Filter by tags: search agent cares about reader insights and previous searches
-        shared_hints = self._read_shared_recent(
-            memory_types=["working", "episodic"], limit=5,
-            tags=["reader", "search", "deep_search"],
-        )
-        if shared_hints:
-            # Append shared hints to the message as soft context (non-intrusive)
-            hint_text = " | ".join(shared_hints[:3])[:200]
-            logger.debug("[SearchAgent] shared memory hints: %s", hint_text[:80])
+        # Procedural memory: inject strategies learned from past searches
+        # (papers the user saved for similar queries) as soft context. The
+        # intent LLM decides how to use them; TF-IDF only gathers candidates.
+        try:
+            from ..services.memory.agent_memory import get_agent_memory
+
+            hints = get_agent_memory().procedural_hints(agent_name="search", query=message)
+        except Exception:
+            hints = []
+        if hints:
+            hint_text = "；".join(h[:80] for h in hints)[:300]
+            logger.debug("[SearchAgent] procedural hints: %s", hint_text[:80])
+            message = f"{message}\n\n（用户历史上类似查询保存过的论文线索，可参考：{hint_text}）"
         return self.intent_parser.parse(message, profile=profile)
 
     def explain_results(self, intent: SearchIntent, papers: list[Paper], mode: str = "accuracy") -> str:

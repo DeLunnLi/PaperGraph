@@ -13,7 +13,7 @@ export async function postPaperReaderOpening(paperId: number): Promise<{ success
 export async function postPaperReaderChat(body: {
   paper_id: number; messages: PaperReaderChatTurn[]; user_message: string
 }, options: PaperReaderChatOptions = {}): Promise<{
-  success: boolean; reply: string; pdf_parsing?: boolean; related_papers?: Paper[]; related_hints?: any[]; kg_edges?: any[]; citations?: PaperReaderCitation[]
+  success: boolean; reply: string; related_papers?: Paper[]; citations?: PaperReaderCitation[]; assistant_turn_id?: number | null
 }> {
   const response = await apiClient.post('/api/ai/paper-reader/chat', body, {
     timeout: PAPER_READER_CHAT_REQUEST_MS,
@@ -22,8 +22,15 @@ export async function postPaperReaderChat(body: {
   return response.data
 }
 export async function getPaperReaderHistory(paperId: number, limit = 200): Promise<{
-  success: boolean; paper_id: number; turns: { role: string; content: string; created_at: number }[]
+  success: boolean; turns: { id?: number | null; role: string; content: string }[]
 }> {
   const response = await apiClient.get('/api/ai/paper-reader/history', { params: { paper_id: paperId, limit } })
+  return response.data
+}
+
+export async function postReaderFeedback(body: {
+  paper_id: number; turn_id: number; signal: 'up' | 'down' | 'citation_click'
+}): Promise<{ success: boolean; affected_memory_count?: number }> {
+  const response = await apiClient.post('/api/ai/paper-reader/feedback', body, { timeout: 30000 })
   return response.data
 }

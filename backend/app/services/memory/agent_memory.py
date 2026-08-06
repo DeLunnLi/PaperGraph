@@ -10,6 +10,8 @@ from collections import Counter
 from typing import Any
 
 import os
+import uuid
+from .policy import get_memory_policy
 from .sqlite_document_store_compat import SQLiteDocumentStore
 
 logger = logging.getLogger(__name__)
@@ -17,11 +19,13 @@ logger = logging.getLogger(__name__)
 
 def _memory_db_path() -> str:
     from ...settings import get_settings
+    from .db_paths import AGENT_MEMORY_DB_NAME
+
     root = get_settings().data_dir
     os.makedirs(root, exist_ok=True)
     # Agent coordination memory uses synthetic identities (papergraph:agent:*),
     # so it must not share the application DB whose memories.user_id references users.id.
-    return os.path.join(root, "agent_memory.db")
+    return os.path.join(root, AGENT_MEMORY_DB_NAME)
 
 def _agent_user_id(agent_name: str) -> str:
     return f"papergraph:agent:{str(agent_name or 'unknown').strip()[:48]}"
@@ -94,24 +98,24 @@ def _query_relevant_memories(query: str, memories: list[str], limit: int = 4) ->
 
 class AgentMemory:
 
-    # Maximum long-term memories per agent before LRU eviction
-    MAX_EPISODIC_PER_AGENT = 20
-    # Maximum shared working memories before compression
-    MAX_SHARED_WORKING = 15
-    # TF-IDF similarity threshold for dedup (borrowed from CrewAI's 0.85)
-    DEDUP_THRESHOLD = 0.75
+    # Caps/thresholds sourced from the memory policy module (single source of
+    # truth); the class-level names stay for backward compatibility.
+    MAX_EPISODIC_PER_AGENT = get_memory_policy().agent_episodic_cap
+    MAX_PROCEDURAL_PER_AGENT = get_memory_policy().agent_procedural_cap
+    MAX_SHARED_WORKING = get_memory_policy().agent_shared_working_cap
+    DEDUP_THRESHOLD = get_memory_policy().agent_dedup_threshold
 
     def __init__(self, *, db_path: str | None = None) -> None:
         self.db_path = db_path or _memory_db_path()
         self.store = SQLiteDocumentStore(db_path=self.db_path)
 
-    def _find_similar(self, uid: str, memory_type: str, content: str, limit: int = 10) -> tuple[str | None, float]:
+    def _find_similar(self, uid: str, memory_type: str, content: str) -> tuple[str | None, float]:
         """Find the most similar existing memory via TF-IDF cosine similarity.
 
         Returns (memory_id, similarity_score) or (None, 0.0).
         """
         try:
-            rows = self.store.search_memories(user_id=uid, memory_type=memory_type, limit=limit)
+            rows = self.store.search_memories(user_id=uid, memory_type=memory_type, limit=10)
             if not rows:
                 return None, 0.0
             new_tokens = _tokenize(content)
@@ -180,14 +184,19 @@ class AgentMemory:
             props["tags"] = [str(t).strip().lower() for t in tags if str(t).strip()]
         if meta:
             props.update(meta)
+        # uuid suffix: second-granularity ids collided on rapid adds (same
+        # uid/type/importance within one second), silently overwriting the
+        # previous memory via the upsert path.
         mid = self.store.add_memory(
-            memory_id=f"{uid}:{mt}:{now}:{int(float(importance or 0.5)*1000)}",
+            memory_id=f"{uid}:{mt}:{now}:{int(float(importance or 0.5)*1000)}:{uuid.uuid4().hex[:8]}",
             user_id=uid, content=c, memory_type=mt, timestamp=now,
             importance=float(importance or 0.0), properties=props)
 
-        # LRU eviction for episodic memories
+        # Capacity eviction for bounded memory tiers (episodic / procedural)
         if mt == "episodic":
             self._evict_old_memories(uid, mt, self.MAX_EPISODIC_PER_AGENT)
+        elif mt == "procedural":
+            self._evict_old_memories(uid, mt, self.MAX_PROCEDURAL_PER_AGENT)
 
         # Auto-compress shared working memories when too many (borrowed from MemGPT tiered memory)
         if shared and mt == "working":
@@ -196,34 +205,38 @@ class AgentMemory:
         return mid
 
     def _evict_old_memories(self, uid: str, memory_type: str, max_count: int) -> None:
-        """Evict lowest-scoring memories when count exceeds max_count.
+        """Evict memories when count exceeds max_count — model-judged keep list.
 
-        Score = importance * recency_decay (borrowed from CrewAI's composite scoring).
+        The judge picks which memories are most worth keeping; the rest are
+        evicted. Fallback (judge unavailable): keep the most recent ones.
         """
         try:
             rows = self.store.search_memories(user_id=uid, memory_type=memory_type, limit=max_count + 10)
             if not rows or len(rows) <= max_count:
                 return
-            now = int(time.time())
-            scored: list[tuple[float, str]] = []
-            for r in rows:
-                if not isinstance(r, dict):
-                    continue
-                mid = str(r.get("memory_id") or r.get("id") or "")
-                if not mid:
-                    continue
-                imp = float(r.get("importance") or 0.5)
-                ts = int(r.get("timestamp") or 0)
-                # Recency decay: 0.1 per day old (min 0.1)
-                age_days = max(0, (now - ts) / 86400)
-                recency = max(0.1, 1.0 - age_days * 0.05)
-                score = imp * recency
-                scored.append((score, mid))
-            scored.sort()  # ascending — lowest scores first
-            # Delete the excess (lowest scoring)
-            excess = len(rows) - max_count
-            for _, mid in scored[:excess]:
-                self.store.delete_memory(mid)
+            candidates = [r for r in rows if isinstance(r, dict) and str(r.get("memory_id") or "")]
+            if len(candidates) <= max_count:
+                return
+            from .memory_judge import judge_select_memories
+
+            keep_ids = judge_select_memories(
+                candidates=candidates,
+                purpose=f"容量淘汰：{uid} 的 {memory_type} 记忆超限，选出最值得长期保留的",
+                max_items=max_count,
+            )
+            if not keep_ids:
+                # Judge unavailable/empty — recency fallback keeps the newest.
+                candidates.sort(key=lambda r: int(r.get("timestamp") or 0), reverse=True)
+                keep_ids = [str(r.get("memory_id")) for r in candidates[:max_count]]
+            keep = set(keep_ids)
+            excess = len(candidates) - max_count
+            deleted = 0
+            for r in candidates:
+                mid = str(r.get("memory_id"))
+                if mid not in keep and deleted < excess:
+                    self.store.delete_memory(mid)
+                    self.store.log_evolution(mid, "prune", reason=f"容量淘汰 evict agent={uid}")
+                    deleted += 1
         except Exception:
             logger.debug("[AgentMemory] _evict_old_memories failed", exc_info=True)
 
@@ -306,16 +319,11 @@ class AgentMemory:
         except Exception as e:
             return {"error": str(e)}
 
-    def recent(self, *, agent_name: str, memory_types: list[str], limit: int, shared: bool,
-               tags: list[str] | None = None) -> list[str]:
-        """Read recent memories, optionally filtered by tags.
-
-        Args:
-            tags: If provided, only return memories that have at least one matching tag.
-                  This implements selective sharing (borrowed from MetaGPT's cause_by).
-        """
+    def _recent_docs(self, *, agent_name: str, memory_types: list[str], limit: int, shared: bool,
+                     tags: list[str] | None = None) -> list[dict[str, Any]]:
+        """Doc-returning variant of :meth:`recent` (keeps memory_id for access tracking)."""
         uid = _shared_user_id() if shared else _agent_user_id(agent_name)
-        out: list[tuple[int, str]] = []
+        out: list[tuple[int, dict[str, Any]]] = []
         for mt in [str(x).strip() for x in (memory_types or []) if str(x).strip()]:
             for r in (self.store.search_memories(user_id=uid, memory_type=mt, limit=int(limit)) or []):
                 if not isinstance(r, dict):
@@ -333,12 +341,30 @@ class AgentMemory:
                         continue
                 c = str(r.get("content") or "").strip()
                 if c:
-                    out.append((int(r.get("timestamp") or 0), c))
-        return [c for _, c in sorted(out, key=lambda x: -x[0])[:max(1, int(limit))]]
+                    out.append((int(r.get("timestamp") or 0), r))
+        return [r for _, r in sorted(out, key=lambda x: -x[0])[:max(1, int(limit))]]
+
+    def recent(self, *, agent_name: str, memory_types: list[str], limit: int, shared: bool,
+               tags: list[str] | None = None) -> list[str]:
+        """Read recent memories, optionally filtered by tags.
+
+        Args:
+            tags: If provided, only return memories that have at least one matching tag.
+                  This implements selective sharing (borrowed from MetaGPT's cause_by).
+        """
+        return [
+            str(r.get("content") or "").strip()
+            for r in self._recent_docs(
+                agent_name=agent_name, memory_types=memory_types, limit=limit, shared=shared, tags=tags,
+            )
+        ]
 
     def build_context_block(self, *, agent_name: str, query: str | None = None,
                             tags: list[str] | None = None) -> str:
         """Build a formatted context block from shared and agent-specific memories.
+
+        Query-relevant selection is model-judged (TF-IDF fallback); every
+        injected memory gets its access_count incremented.
 
         Args:
             tags: If provided, filter shared memories by these action tags.
@@ -346,18 +372,42 @@ class AgentMemory:
                    memories tagged as reader or search insights.
         """
         pref = self.get_preferences()
-        agent_lines = self.recent(agent_name=agent_name, memory_types=["working"], limit=12, shared=False)
-        agent_epi = self.recent(agent_name=agent_name, memory_types=["episodic"], limit=24, shared=False)
+        agent_docs = self._recent_docs(agent_name=agent_name, memory_types=["working"], limit=12, shared=False)
+        agent_epi_docs = self._recent_docs(agent_name=agent_name, memory_types=["episodic"], limit=24, shared=False)
         # Cross-paper shared insights — filtered by tags if provided
-        shared_lines = self.recent(agent_name="shared", memory_types=["working"], limit=8, shared=True, tags=tags)
-        # Query-relevant shared memories using TF-IDF scoring (replaces old substring match)
-        query_lines: list[str] = []
+        shared_docs = self._recent_docs(agent_name="shared", memory_types=["working"], limit=8, shared=True, tags=tags)
+        # 元记忆（反思提炼的跨记忆规律）始终参与
+        reflection_docs = self._recent_docs(agent_name="shared", memory_types=["reflection"], limit=3, shared=True)
+        # Query-relevant shared memories — model-judged selection (TF-IDF fallback)
+        query_docs: list[dict[str, Any]] = []
         if query:
-            all_shared = self.recent(agent_name="shared", memory_types=["working", "episodic"], limit=30, shared=True, tags=tags)
-            query_lines = _query_relevant_memories(query, all_shared, limit=4)
+            all_shared_docs = self._recent_docs(agent_name="shared", memory_types=["working", "episodic"], limit=30, shared=True, tags=tags)
+            from .memory_judge import rank_docs_with_judge
+
+            ranked = rank_docs_with_judge(
+                all_shared_docs,
+                purpose="按当前问题检索相关的跨论文共享记忆",
+                context_hint=query,
+                max_items=4,
+            )
+            if ranked is None:
+                contents = [str(d.get("content") or "") for d in all_shared_docs]
+                rel = set(_query_relevant_memories(query, contents, limit=4))
+                query_docs = [d for d in all_shared_docs if str(d.get("content") or "") in rel]
+            else:
+                query_docs = ranked
+
+        agent_lines = [str(d.get("content") or "") for d in agent_docs]
+        agent_epi = [str(d.get("content") or "") for d in agent_epi_docs]
+        shared_lines = [str(d.get("content") or "") for d in shared_docs]
+        reflection_lines = [str(d.get("content") or "") for d in reflection_docs]
+        query_lines = [str(d.get("content") or "") for d in query_docs]
+
         lines: list[str] = []
         if pref:
             lines.append(f"【用户偏好（全局）】\n{pref}")
+        if reflection_lines:
+            lines.append(f"【长期洞察（反思提炼）】\n" + "\n".join(f"- {x}" for x in reflection_lines))
         if shared_lines:
             lines.append(f"【跨论文共享记忆】\n" + "\n".join(f"- {x}" for x in reversed(shared_lines)))
         if query_lines:
@@ -366,7 +416,29 @@ class AgentMemory:
             lines.append(f"【{agent_name} 独立记忆（近期）】\n" + "\n".join(f"- {x}" for x in reversed(agent_lines)))
         if agent_epi:
             lines.append(f"【{agent_name} 独立记忆（长期）】\n" + "\n".join(f"- {x}" for x in reversed(agent_epi[:8])))
+
+        injected_ids: list[str] = []
+        for d in list(agent_docs) + list(agent_epi_docs[:8]) + list(shared_docs) + list(reflection_docs) + list(query_docs):
+            mid = str(d.get("memory_id") or "")
+            if mid and mid not in injected_ids:
+                injected_ids.append(mid)
+        if injected_ids:
+            self.store.increment_access(injected_ids)
         return "\n\n".join(lines) if lines else ""
+
+    def procedural_hints(self, *, agent_name: str, query: str, limit: int | None = None) -> list[str]:
+        """Relevant learned strategies (procedural memories) for a new query.
+
+        TF-IDF gathering only — the consuming LLM (e.g. the intent parser)
+        decides how to use them.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        k = max(1, int(limit or get_memory_policy().procedural_hints_per_query))
+        docs = self._recent_docs(agent_name=agent_name, memory_types=["procedural"], limit=50, shared=False)
+        contents = [str(d.get("content") or "") for d in docs]
+        return _query_relevant_memories(q, contents, limit=k)
 
     def get_preferences(self) -> str:
         rows = self.store.search_memories(user_id=_shared_user_id(), memory_type="preference", limit=1)

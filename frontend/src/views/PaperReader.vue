@@ -60,7 +60,7 @@
               </p>
             </template>
             <a-space>
-              <a-button type="primary" :loading="acquiringPdf" @click="acquirePdf">获取论文 PDF</a-button>
+              <a-button type="primary" :loading="acquiringPdf" @click="acquirePdf()">获取论文 PDF</a-button>
               <a-button v-if="paperExternalUrl(paper)" type="link" :href="paperExternalUrl(paper)!" target="_blank" rel="noopener noreferrer">
                 打开原文链接
               </a-button>
@@ -93,7 +93,7 @@
         <div
           ref="scrollRef"
           class="paper-reader__messages"
-          @wheel.stop="onChatWheel"
+          @wheel.stop
           @scroll.stop
         >
           <div v-if="loadingPaper && messages.length === 0" class="paper-reader__msg paper-reader__msg--assistant">
@@ -210,7 +210,14 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import message from 'ant-design-vue/es/message'
+import AButton from 'ant-design-vue/es/button'
+import ADropdown from 'ant-design-vue/es/dropdown'
+import AEmpty from 'ant-design-vue/es/empty'
+import ASkeleton from 'ant-design-vue/es/skeleton'
+import ASpace from 'ant-design-vue/es/space'
+import ASpin from 'ant-design-vue/es/spin'
+import { Textarea as ATextarea } from 'ant-design-vue/es/input'
 import { RobotOutlined, CopyOutlined } from '@ant-design/icons-vue'
 import {
   getPaper,
@@ -219,6 +226,7 @@ import {
   postPaperReaderOpening,
   postPaperReaderChat,
   getPaperReaderHistory,
+  postReaderFeedback,
   postReadingLog,
   savePapers,
 } from '@/services/api'
@@ -249,6 +257,8 @@ const messages = ref<
     related_papers?: Paper[]
     citations?: PaperReaderCitation[]
     _uid: number
+    turn_id?: number | null
+    citationClickSent?: boolean
   }[]
 >([])
 const draft = ref('')
@@ -360,9 +370,6 @@ const closeTab = () => {
   } catch {
   }
 }
-const onChatWheel = (e: WheelEvent) => {
-  e.stopPropagation()
-}
 onBeforeUnmount(() => {
   cancelActiveChat('已取消当前提问')
   resetPdfStreamUrl()
@@ -407,16 +414,28 @@ const cancelActiveChat = (reason = '已取消当前提问') => {
 const gotoCitationPage = (page: number) => {
   if (!page || page < 1) return
   void pdfViewerRef.value?.gotoPage(page)
+  // 隐式反馈：用户点击引用锚点 = 在核对依据，归因到最近一条可反馈的回答
+  const lastAssistant = [...messages.value].reverse().find(
+    (m) => m.role === 'assistant' && m.turn_id && !m.citationClickSent,
+  )
+  if (lastAssistant && lastAssistant.turn_id && paperId.value != null) {
+    lastAssistant.citationClickSent = true
+    void postReaderFeedback({
+      paper_id: paperId.value,
+      turn_id: lastAssistant.turn_id,
+      signal: 'citation_click',
+    }).catch(() => {})
+  }
 }
 const mapHistoryTurns = (
-  turns: { role?: string; content?: string | null; created_at?: number }[]
-): { role: 'user' | 'assistant'; content: string; related_papers?: Paper[]; _uid: number }[] =>
+  turns: { id?: number | null; role?: string; content?: string | null; created_at?: number }[]
+): { role: 'user' | 'assistant'; content: string; related_papers?: Paper[]; _uid: number; turn_id?: number | null }[] =>
   turns
     .filter((t) => t && (t.role === 'user' || t.role === 'assistant') && String(t.content || '').trim())
     .map((t) => {
       const role = t.role as 'user' | 'assistant'
       const content = role === 'assistant' ? normalizeAssistantText(String(t.content)) : String(t.content)
-      return { role, content, _uid: _nextMsgUid() }
+      return { role, content, _uid: _nextMsgUid(), turn_id: t.id ?? null }
     })
 const ensureOpeningAndHistory = async (reloadHistory = false, showError = true, loadSeq?: number) => {
   if (paperId.value == null) return
@@ -489,6 +508,7 @@ const send = async () => {
       target.content = normalizeAssistantText(res.reply)
       target.related_papers = rp.length ? rp : undefined
       target.citations = cites.length ? cites : undefined
+      target.turn_id = typeof res.assistant_turn_id === 'number' ? res.assistant_turn_id : null
     } else {
       target.content = '（无回复）'
       target.related_papers = undefined

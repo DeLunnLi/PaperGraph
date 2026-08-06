@@ -9,7 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..settings import configure_logging, get_settings, print_config, validate_config
 from ..services.graph.kg_relations import get_kg_metrics
-from .routes import paper_routes, paper_reader_routes, search_routes
+from .routes import paper_routes, paper_reader_routes, search_routes, knowledge_routes, traces_routes
 from .routes import export as export_routes
 from .routes import memory as memory_routes
 from .routes import auth as auth_routes
@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     app.state.last_meaningful_activity_monotonic = None
     daily_refresh_task: asyncio.Task | None = None
     trace_cleanup_task: asyncio.Task | None = None
+    memory_evolution_task: asyncio.Task | None = None
 
     # Run DB migrations (add user_id columns for multi-user isolation)
     from ..services.auth.user_migration import migrate_add_user_id
@@ -69,6 +70,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("trace 清理后台任务未启动: %s", exc)
 
+    try:
+        from ..services.memory.memory_evolution import spawn_memory_evolution_task
+
+        memory_evolution_task = spawn_memory_evolution_task(app)
+    except Exception as exc:
+        logger.warning("记忆进化后台任务未启动: %s", exc)
+
     logger.info("%s", "=" * 60)
 
     yield
@@ -91,6 +99,14 @@ async def lifespan(app: FastAPI):
             pass
         except Exception:
             logger.debug("trace 清理后台任务结束异常", exc_info=True)
+    if memory_evolution_task is not None:
+        memory_evolution_task.cancel()
+        try:
+            await memory_evolution_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("记忆进化后台任务结束异常", exc_info=True)
 
     # Close the shared searcher's httpx.AsyncClient connection pool.
     try:
@@ -126,6 +142,8 @@ app.include_router(search_routes.router, prefix="/api")
 app.include_router(export_routes.router, prefix="/api")
 app.include_router(memory_routes.router, prefix="/api")
 app.include_router(auth_routes.router, prefix="/api")
+app.include_router(knowledge_routes.router, prefix="/api")
+app.include_router(traces_routes.router, prefix="/api")
 
 @app.get("/")
 async def root():
