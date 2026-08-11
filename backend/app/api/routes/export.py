@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 
 from ..deps import require_user
+from ...utils.common import sqlite_connect
 
 from ...settings import get_settings
 
@@ -165,8 +166,7 @@ async def export_json(
     """Export knowledge base as a portable JSON file (filtered by user)."""
     db_path = _get_db_path()
     user_id = user["user_id"]
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite_connect(db_path, row_factory=True)
     try:
         data: dict[str, Any] = {
             "version": "1.0",

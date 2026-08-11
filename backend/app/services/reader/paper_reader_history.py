@@ -1,13 +1,16 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from contextlib import contextmanager
 from typing import Any
 
-from ...utils.common import exec_sql
+from ...utils.common import exec_sql, sqlite_connect
 from ...utils.db_init import ensure_once
+
+logger = logging.getLogger(__name__)
 
 def ensure_tables(db_path: str) -> None:
     ensure_once(db_path, _create_tables)
@@ -32,7 +35,7 @@ def _create_tables(db_path: str) -> None:
 
 @contextmanager
 def _conn(db_path: str, *, row_factory=None):
-    conn = sqlite3.connect(db_path)
+    conn = sqlite_connect(db_path)
     if row_factory:
         conn.row_factory = row_factory
     try:
@@ -100,15 +103,27 @@ def ensure_opening_turn(db_path: str, *, paper_id: int, user_id: int, opening_te
     if r0 == "assistant" and c0 == op:
         return  # Already up to date
     if r0 == "assistant":
-        # Opening content changed (e.g. re-generated) — update the first turn
+        # Opening content changed (e.g. re-generated) — update the first turn.
+        # NOTE: `UPDATE ... ORDER BY ... LIMIT` needs SQLite to be built with
+        # SQLITE_ENABLE_UPDATE_DELETE_LIMIT, which the stdlib build is not. It
+        # raised OperationalError on every call and the bare `except: pass`
+        # hid it, so regenerated openings were silently never persisted.
+        # Select the target row id in a subquery instead — portable everywhere.
         try:
             with _conn(db_path) as conn:
                 conn.execute(
-                    "UPDATE paper_reader_turns SET content=? WHERE paper_id=? AND user_id=? AND role='assistant' ORDER BY created_at ASC LIMIT 1",
+                    "UPDATE paper_reader_turns SET content=? WHERE id = ("
+                    "  SELECT id FROM paper_reader_turns"
+                    "  WHERE paper_id=? AND user_id=? AND role='assistant'"
+                    "  ORDER BY created_at ASC, id ASC LIMIT 1"
+                    ")",
                     (op, int(paper_id), int(user_id)),
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "ensure_opening_turn: failed to refresh opening for paper=%s user=%s: %s",
+                paper_id, user_id, exc,
+            )
         return
     if r0 == "user":
         try:

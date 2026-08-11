@@ -553,8 +553,13 @@ class PaperDatabase:
                 query += " WHERE user_id = ?"
                 params.append(int(user_id))
             query += f" ORDER BY {order_by}"
+            # SQLite rejects `OFFSET` without a preceding `LIMIT`, so an
+            # offset-only call (limit defaults to None) used to raise
+            # OperationalError. `LIMIT -1` is SQLite's "no limit" sentinel.
             if limit:
                 query += f" LIMIT {int(limit)}"
+            elif offset:
+                query += " LIMIT -1"
             if offset:
                 query += f" OFFSET {int(offset)}"
             cursor.execute(query, params)

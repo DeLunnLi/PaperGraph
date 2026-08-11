@@ -114,8 +114,26 @@ def suppress_exceptions(default_return=None, log_level="debug", log_message=None
 
 suppress_exceptions_async = suppress_exceptions
 
+#: Matches ``PaperDatabase._get_connection``. The stdlib default is 5s, which a
+#: slow migration or a batch save can exceed — and papers.db is shared by
+#: storage, auth, export and the reader history, so a plain
+#: ``sqlite3.connect(path)`` there raises "database is locked" instead of
+#: waiting. Keep both the connect timeout and the PRAGMA: the former covers
+#: acquiring the connection, the latter covers statements on it.
+SQLITE_BUSY_TIMEOUT_SEC = 10.0
+
+
+def sqlite_connect(db_path: str, *, row_factory: bool = False) -> sqlite3.Connection:
+    """``sqlite3.connect`` with a sane busy timeout applied consistently."""
+    conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SEC)
+    conn.execute(f"PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SEC * 1000)}")
+    if row_factory:
+        conn.row_factory = sqlite3.Row
+    return conn
+
+
 def exec_sql(db_path: str, *statements: str) -> None:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite_connect(db_path)
     try:
         for stmt in statements:
             conn.execute(stmt)

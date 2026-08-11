@@ -1,9 +1,10 @@
 
 from __future__ import annotations
 
-import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+
+from ..utils.common import sqlite_connect
 
 @dataclass(frozen=True)
 class RelationRepository:
@@ -17,7 +18,7 @@ class RelationRepository:
         rows: list[tuple[int, int, str, float, str]] = []
         # closing() ensures the connection is actually closed — sqlite3's
         # `with conn:` only commits/rolls back, it does NOT close.
-        with closing(sqlite3.connect(self.db_path)) as conn:
+        with closing(sqlite_connect(self.db_path)) as conn:
             cur = conn.cursor()
             if focus_id is not None:
                 cur.execute(
@@ -51,7 +52,7 @@ class RelationRepository:
         if not ids:
             return {}
         out: dict[int, tuple[str, int | None, str | None]] = {}
-        with closing(sqlite3.connect(self.db_path)) as conn:
+        with closing(sqlite_connect(self.db_path)) as conn:
             cur = conn.cursor()
             cur.execute("CREATE TEMP TABLE IF NOT EXISTS _kg_meta (id INTEGER PRIMARY KEY)")
             cur.execute("DELETE FROM _kg_meta")
