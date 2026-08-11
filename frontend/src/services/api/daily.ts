@@ -61,7 +61,9 @@ type FeedbackAction = 'click' | 'save' | 'skip' | 'ignore' | 'read'
 interface DailyRecommendFeedbackRequest {
   identity_key: string; title?: string; action: FeedbackAction
   source_list?: 'personalized' | 'general'; score_at_recommend?: number
-  keywords?: string[]; category?: string; journal?: string; source?: string
+  // Nullable to match the generated Paper schema (backend accepts null here).
+  keywords?: string[] | null; category?: string | null
+  journal?: string | null; source?: string | null
 }
 export async function postDailyRecommendFeedback(
   body: DailyRecommendFeedbackRequest

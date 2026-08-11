@@ -385,8 +385,8 @@ const skipOne = async (paper: Paper, index: number) => {
       source_list: randomIds.value.has(paper.arxiv_id || '') ? 'general' : 'personalized',
       keywords: paper.keywords,
       category: paper.category,
-      journal: (paper as any).journal,
-      source: (paper as any).source,
+      journal: paper.journal,
+      source: paper.source,
     })
     message.success('已标记为不感兴趣，后续将减少类似推荐')
   } catch (e: unknown) {

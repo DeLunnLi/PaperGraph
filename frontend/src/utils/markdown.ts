@@ -1,15 +1,18 @@
-import DOMPurify from 'dompurify'
+import DOMPurify, { type Config } from 'dompurify'
 import { ensureKatex, renderKatex } from '@/utils/katex'
 
 // Warm katex (lazy chunk) so math renders without a flash when it arrives.
 void ensureKatex()
 
+// `satisfies` (not `as const`, not a plain annotation): DOMPurify's Config wants
+// mutable string[] for FORBID_*, while the literal type must survive so the
+// sanitize() overload returning `string` is selected over `TrustedHTML`.
 const SANITIZE_CONFIG = {
   USE_PROFILES: { html: true, mathMl: true },
   ALLOW_UNKNOWN_PROTOCOLS: false,
   FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'style'],
   FORBID_ATTR: ['style'],
-} as const
+} satisfies Config
 
 function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, SANITIZE_CONFIG)

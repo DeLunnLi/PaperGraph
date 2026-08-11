@@ -416,7 +416,11 @@ const loadFolders = async () => {
         .filter((f) => (f.children?.length ?? 0) > 0)
         .map((f) => `sub-${f.category}`)
     }
-  } catch {
+  } catch (e) {
+    // Not surfaced as a toast: the category sidebar is secondary UI and the
+    // paper list still loads. But swallowing it entirely made an empty
+    // sidebar indistinguishable from "you have no categories".
+    console.error('Failed to load library category folders:', e)
   }
 }
 const load = async () => {
