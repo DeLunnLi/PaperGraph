@@ -200,16 +200,22 @@ def test_filter_and_rerank_pairs_drops_papers_matching_snap():
     assert "Current Paper Title" not in titles
 
 
-def test_filter_and_rerank_pairs_caps_results():
+def test_filter_and_rerank_pairs_caps_results(monkeypatch):
+    # `_filter_and_rerank_pairs` branches on the *global* is_llm_configured(),
+    # not on the agent instance. With a real key in the environment this unit
+    # test issued a live LLM rerank call — slow, billable and intermittently
+    # failing. Force the deterministic anchor-rerank path instead.
+    monkeypatch.setattr(
+        "app.agents.support.reader_reco_mixin.is_llm_configured", lambda: False
+    )
     agent = _make_agent()
     ctx = ReaderCtx(snap={"paper_id": 1})
     pairs = [(_paper(f"P{i}"), READER_RELATED_FROM_BIBLIOGRAPHY) for i in range(10)]
     papers, _ = agent._filter_and_rerank_pairs(
         ctx, pairs, um="推荐相关", want_reco=True, reco_max=3, history_lines=""
     )
-    # want_reco=True → exactly capped at reco_max (3); the LLM rerank path is
-    # skipped (no llm on the __new__ agent) so anchor fallback preserves all 10
-    # before the cap. A regression that drops the cap surfaces up to 80.
+    # want_reco=True → exactly capped at reco_max (3); the anchor fallback
+    # preserves all 10 before the cap. Dropping the cap surfaces up to 80.
     assert len(papers) == 3
 
 
