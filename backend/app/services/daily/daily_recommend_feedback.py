@@ -216,6 +216,11 @@ def _upsert_interest_evolution(
     source: str,
     now: int,
 ) -> None:
+    # SQLite treats NULLs as distinct in UNIQUE constraints, so ON CONFLICT
+    # never fires when category is NULL — weights silently stop accumulating
+    # and duplicate rows pile up.  Coalesce to an empty-string sentinel so the
+    # constraint matches consistently without a schema migration.
+    cat = (category or "").strip() if category else ""
     cur.execute(
         """
         INSERT INTO user_interest_evolution (date_key, keyword, category, interaction_weight, source, created_at)
@@ -224,7 +229,7 @@ def _upsert_interest_evolution(
           interaction_weight = interaction_weight + excluded.interaction_weight,
           created_at = excluded.created_at
         """,
-        (str(date_key), keyword.lower(), category, weight, source, now),
+        (str(date_key), keyword.lower(), cat, weight, source, now),
     )
 
 def get_skipped_papers(
