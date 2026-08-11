@@ -288,7 +288,10 @@ class PaperSearcher:
         if venue_kw and unique_results:
             matched = [p for p in unique_results if self._paper_matches_venue_proceedings(p, venue_kw)]
             if matched and len(matched) >= max(1, len(unique_results) * 0.15):
-                non_matched = [p for p in unique_results if p not in matched]
+                # Use an id-set to avoid O(n*m) deep __eq__ comparisons on
+                # Pydantic Paper objects (triggered by ``p not in matched``).
+                matched_ids = {id(p) for p in matched}
+                non_matched = [p for p in unique_results if id(p) not in matched_ids]
                 unique_results = matched + non_matched
 
         if year_from is not None:
