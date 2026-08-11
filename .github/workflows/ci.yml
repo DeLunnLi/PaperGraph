@@ -1,0 +1,86 @@
+name: CI
+
+# Why this exists: several real bugs shipped because nothing ran automatically.
+# `vite build` does not typecheck (esbuild strips types), so 12 TypeScript
+# errors accumulated while the build stayed green; and the backend suite was
+# only ever run by hand. Both gates below catch exactly those classes of
+# regression.
+#
+# Note: no secrets are required. The whole backend suite passes with
+# PAPERGRAPH_JWT_SECRET / LLM_API_KEY / EMBED_API_KEY all unset, and the
+# network-dependent smoke tests are opt-in behind PG_LIVE_SMOKE (see
+# backend/tests/test_search_sources_live_smoke.py), so CI stays offline,
+# fast and deterministic.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch/PR makes the in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches backend/Dockerfile (python:3.11-slim) and mypy.ini.
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        # pytest is only a commented-out "dev dependency" in requirements.txt,
+        # so it has to be installed explicitly. pytest-asyncio is deliberately
+        # NOT installed: no test uses the marker, they drive coroutines with
+        # asyncio.run().
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+  frontend:
+    name: frontend (typecheck + test + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        # The gate that was missing: `vite build` transpiles with esbuild and
+        # discards types entirely, so type errors never failed the build.
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        # build:only skips the duplicate vue-tsc pass already run above.
+        run: npm run build:only
