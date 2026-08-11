@@ -45,6 +45,31 @@ def test_rate_limiter_actually_spaces_calls() -> None:
     assert elapsed >= 0.2, f"limiter did not space calls (elapsed {elapsed:.3f}s)"
 
 
+def test_rate_limiter_serializes_concurrent_requests_per_source() -> None:
+    """Concurrent callers must not bypass a source's configured interval.
+
+    Without a source-level lock, every coroutine can read the same old
+    timestamp, sleep together, and all update it at once. This violates
+    arXiv's one-request-per-three-seconds policy under parallel searches.
+    """
+    limiter = RateLimiter(fixed_delays={"probe": 0.08})
+
+    async def _run() -> list[float]:
+        timestamps: list[float] = []
+
+        async def _one() -> None:
+            await limiter.wait_async("probe")
+            timestamps.append(time.monotonic())
+
+        await asyncio.gather(*(_one() for _ in range(3)))
+        return sorted(timestamps)
+
+    timestamps = asyncio.run(_run())
+    gaps = [later - earlier for earlier, later in zip(timestamps, timestamps[1:])]
+    assert len(gaps) == 2
+    assert min(gaps) >= 0.06, f"concurrent requests bypassed limiter: gaps={gaps}"
+
+
 def test_zero_delay_source_is_not_throttled() -> None:
     limiter = RateLimiter(fixed_delays={})
 

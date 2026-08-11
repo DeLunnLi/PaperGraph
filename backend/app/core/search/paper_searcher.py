@@ -77,6 +77,12 @@ class RateLimiter:
     def __init__(self, *, fixed_delays: dict[str, float]) -> None:
         self._fixed = dict(fixed_delays)
         self._last: dict[str, float] = {}
+        # One lock per source serializes concurrent callers. Without it,
+        # coroutines can observe the same old timestamp, sleep together, and
+        # issue a burst immediately afterwards — violating upstream quotas.
+        # Locks are recreated when the caller changes event loop because a
+        # PaperSearcher can also be used via the sync wrapper in tests/CLIs.
+        self._locks: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
 
     def _delay_for(self, source: str) -> float:
         return float(self._fixed.get(source, 0.0))
@@ -84,13 +90,21 @@ class RateLimiter:
     async def wait_async(self, source: str) -> None:
         delay = self._delay_for(source)
         if delay <= 0:
-            self._last[source] = time.time()
+            self._last[source] = time.monotonic()
             return
-        now = time.time()
-        elapsed = now - self._last.get(source, 0.0)
-        if elapsed < delay:
-            await asyncio.sleep(delay - elapsed)
-        self._last[source] = time.time()
+
+        loop = asyncio.get_running_loop()
+        lock_entry = self._locks.get(source)
+        if lock_entry is None or lock_entry[0] is not loop:
+            lock_entry = (loop, asyncio.Lock())
+            self._locks[source] = lock_entry
+
+        async with lock_entry[1]:
+            now = time.monotonic()
+            elapsed = now - self._last.get(source, 0.0)
+            if elapsed < delay:
+                await asyncio.sleep(delay - elapsed)
+            self._last[source] = time.monotonic()
 
 _DEFAULT_PAPER_SEARCHER_DOWNLOAD_DIR = str(Path(__file__).resolve().parents[3] / "downloads" / "papers")
 
