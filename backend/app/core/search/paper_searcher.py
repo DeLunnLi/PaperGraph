@@ -295,9 +295,11 @@ class PaperSearcher:
                 unique_results = matched + non_matched
 
         if year_from is not None:
-            unique_results = [p for p in unique_results if (p.year or 0) >= int(year_from)]
+            # Papers with unknown year (common from DBLP / some OpenAlex results)
+            # must survive year filtering — dropping them silently loses recall.
+            unique_results = [p for p in unique_results if p.year is None or (p.year) >= int(year_from)]
         if year_to is not None:
-            unique_results = [p for p in unique_results if (p.year or 9999) <= int(year_to)]
+            unique_results = [p for p in unique_results if p.year is None or (p.year) <= int(year_to)]
 
         sort_mode = (kwargs.get("sort") or "relevance").lower().strip()
         if sort_mode == "date":
