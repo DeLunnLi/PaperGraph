@@ -24,8 +24,11 @@ def openalex_publication_year_filter(year_from: int | None, year_to: int | None)
         if yf_i == yt_i:
             return f"publication_year:{yf_i}"
         return f"publication_year:{yf_i}-{yt_i}"
+    # OpenAlex rejects `publication_year:>=2024` with HTTP 400
+    # ("Value for param publication_year must be a number"). Open-ended ranges
+    # are the supported form: `2024-` means >=2024 and `-2024` means <=2024.
     if yf_i is not None:
-        return f"publication_year:>={yf_i}"
+        return f"publication_year:{yf_i}-"
     if yt_i is not None:
-        return f"publication_year:<={yt_i}"
+        return f"publication_year:-{yt_i}"
     return None

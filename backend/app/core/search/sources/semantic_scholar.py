@@ -66,6 +66,9 @@ async def search_semantic_scholar(
         return []
 
     await searcher._ensure_async_client()
+    # The unauthenticated Graph API throttles hard; without this the source
+    # 429s and silently returns [] (see the `return []` on 429 below).
+    await searcher._rate_limit_async("semantic_scholar")
     headers = json_api_headers(searcher)
     try:
         response = await searcher._async_http_get_with_retry(

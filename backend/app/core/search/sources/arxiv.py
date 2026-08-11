@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
@@ -96,6 +97,11 @@ def _arxiv_entry_published_naive(entry: Any) -> Optional[datetime]:
         return None
 
 
+# A standalone boolean OR used as a separator. Word-bounded and case-insensitive
+# so it never splits inside real words ("sensor", "Oregon", "OR-Tools").
+_OR_SPLIT = re.compile(r"\s+OR\s+", re.IGNORECASE)
+
+
 def _arxiv_clause_for_phrase(searcher, phrase: str, style: str) -> str:
     p = (phrase or "").replace('"', " ").strip()
     if not p:
@@ -112,11 +118,21 @@ def _arxiv_query_part(
     if not q:
         return None
     st = style if style in ("all", "ti_abs") else "all"
-    phrases = [
+    raw_phrases = [
         p.replace('"', " ").strip()
         for p in split_query_phrases(q)
         if p.strip()
-    ][: max(1, int(max_phrases))]
+    ]
+    # Callers (and the LLM-built daily query) may pass boolean OR between terms.
+    # split_query_phrases() only splits on , ; and newlines, so without this an
+    # OR query collapses into ONE literal phrase — arXiv then matches the string
+    # "a  OR  b" verbatim, returning stale/irrelevant hits that the days_back
+    # filter later drops entirely. Treat OR as a phrase separator instead; the
+    # clauses below are already joined with +OR+.
+    phrases: List[str] = []
+    for p in raw_phrases:
+        phrases.extend(t.strip() for t in _OR_SPLIT.split(p) if t.strip())
+    phrases = phrases[: max(1, int(max_phrases))]
     clauses = [
         c
         for c in (_arxiv_clause_for_phrase(searcher, p, st) for p in phrases)

@@ -426,10 +426,11 @@ async def search_openalex(
             qtext_clean = (qtext or "").strip()[:180]
 
     if star_q:
+        # Build via the helper: OpenAlex 400s on `publication_year:>=YYYY`.
         if yf_int is None and year_filt is None:
             yf_int = datetime.now().year - 1
-            year_filt = f"publication_year:>={yf_int}"
-        filt = year_filt or f"publication_year:>={yf_int}"
+            year_filt = openalex_publication_year_filter(yf_int, None)
+        filt = year_filt or openalex_publication_year_filter(yf_int, None)
         ocid = (kwargs.get("openalex_concept_id") or "").strip()
         if ocid and filt:
             filt = f"{filt},concept.id:{ocid if ocid.startswith('http') else f'https://openalex.org/{ocid}'}"
@@ -493,7 +494,7 @@ async def search_openalex(
 
     if star_q and not results and (kwargs.get("openalex_concept_id") or "").strip() and "concept.id:" in str(params.get("filter", "")):
         yf_b = yf_int if yf_int is not None else datetime.now().year - 1
-        params["filter"] = f"publication_year:>={yf_b}"
+        params["filter"] = openalex_publication_year_filter(yf_b, None)
         results = await _do_request(with_venue_filter=bool(venue_raw and vpj))
         if venue_raw and vpj and not results and oa_retry_without_host_venue:
             results = await _do_request(with_venue_filter=False)

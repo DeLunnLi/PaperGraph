@@ -75,6 +75,9 @@ async def search_crossref(
 
     async def _lookup_one(doi: str) -> Paper | None:
         try:
+            # These run concurrently via gather() below; without throttling the
+            # burst can trip Crossref's limits and each failure is swallowed.
+            await searcher._rate_limit_async("crossref")
             response = await searcher._async_http_get_with_retry(
                 f"https://api.crossref.org/works/{quote(doi, safe='')}",
                 params={"mailto": searcher.email} if searcher.email else {},

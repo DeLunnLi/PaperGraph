@@ -138,7 +138,28 @@ class PaperSearcher:
         self.email, self.api_key, self.download_dir = _email, api_key, download_dir
         self._httpx_trust_env = bool(httpx_trust_env)
         os.makedirs(self.download_dir, exist_ok=True)
-        self._rate = RateLimiter(fixed_delays={"arxiv": 0.1, "openalex": 0.15, "dblp": 0.35, "europe_pmc": 0.15})
+        # arXiv's API terms require "no more than one request every three
+        # seconds" (https://info.arxiv.org/help/api/tou.html). The previous 0.1s
+        # exceeded that by 30x, which gets the whole host 429'd — and because
+        # _run_one swallows source errors into [], searches then silently
+        # returned fewer results instead of failing loudly.
+        # semantic_scholar: the unauthenticated Graph API is aggressively
+        # throttled (observed 429 on requests only ~5s apart) and it had no
+        # delay at all, so its very first call could 429 — silently, because the
+        # source returns [] on 429.
+        self._rate = RateLimiter(
+            fixed_delays={
+                "arxiv": 3.0,
+                "openalex": 0.15,
+                "dblp": 0.35,
+                "europe_pmc": 0.15,
+                "semantic_scholar": 3.0,
+                # Crossref is more permissive (esp. the polite pool via mailto),
+                # but it was previously unthrottled while issuing parallel DOI
+                # lookups.
+                "crossref": 0.2,
+            }
+        )
         self._async_client: Optional[httpx.AsyncClient] = None
         self._async_client_loop: Optional[asyncio.AbstractEventLoop] = None
         self.stats = {"arxiv_requests": 0, "dblp_requests": 0, "openalex_requests": 0,
