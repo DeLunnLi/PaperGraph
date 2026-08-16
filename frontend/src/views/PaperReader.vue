@@ -127,10 +127,14 @@
                     :key="ci"
                     type="button"
                     class="paper-reader__citation-chip"
-                    :title="c.snippet || `跳转到第 ${c.page} 页`"
+                    :class="{
+                      'paper-reader__citation-chip--verified': c.verified === true,
+                      'paper-reader__citation-chip--unverified': c.verified === false,
+                    }"
+                    :title="citationTooltip(c)"
                     @click.stop="gotoCitationPage(c.page)"
                   >
-                    {{ c.marker }}
+                    {{ c.marker }}<span v-if="c.verified === true" class="paper-reader__citation-mark">✓</span><span v-else-if="c.verified === false" class="paper-reader__citation-mark">⚠</span>
                   </button>
                 </div>
               </div>
@@ -385,7 +389,11 @@ const flushReadingSession = async () => {
   if (!Number.isFinite(sec) || sec < 8) return
   try {
     await postReadingLog({ paper_id: s.paperId, duration_sec: Math.min(sec, 60 * 60 * 6), client_ts: Math.floor(Date.now() / 1000) })
-  } catch {
+  } catch (e) {
+    // Deliberately not user-facing (this fires on unload), but it feeds the
+    // reading calendar and behaviour analytics — dropping it without a trace
+    // makes "my reading time is missing" impossible to diagnose.
+    console.error('Failed to record reading session:', e)
   }
 }
 const scrollBottom = async () => {
@@ -411,6 +419,18 @@ const cancelActiveChat = (reason = '已取消当前提问') => {
   activeAssistantPlaceholderIndex = null
   sending.value = false
 }
+const citationTooltip = (c: PaperReaderCitation): string => {
+  const parts: string[] = [`跳转到第 ${c.page} 页`]
+  if (c.quote) {
+    parts.push(`原文：${c.quote}`)
+    parts.push(c.verified === true ? '✓ 引用已在页面核验' : c.verified === false ? '⚠ 引用未在该页找到（可能改写）' : '引用未核验')
+  } else if (c.verified === false) {
+    parts.push('⚠ 引用未在该页找到')
+  }
+  if (c.snippet) parts.push(c.snippet)
+  return parts.join('\n')
+}
+
 const gotoCitationPage = (page: number) => {
   if (!page || page < 1) return
   void pdfViewerRef.value?.gotoPage(page)
@@ -623,7 +643,11 @@ const loadPaper = async () => {
           await scrollBottom()
         }
       }
-    } catch {
+    } catch (e) {
+      // Falls through to generating a fresh opening below, so the page still
+      // works — but the user silently loses their prior conversation, which
+      // is worth a trace.
+      console.error('Failed to restore reader chat history:', e)
     }
     if (messages.value.length === 0) {
       void maybeStartOpening()
@@ -1042,6 +1066,29 @@ onMounted(() => {
 .paper-reader__citation-chip:hover {
   background: var(--pg-primary, #6366f1);
   color: var(--pg-text-inverse);
+}
+/* Passage-level grounding: ✓ = quote verified on page (green), ⚠ = not found (amber) */
+.paper-reader__citation-chip--verified {
+  color: var(--pg-success, #15803d);
+  background: var(--pg-success-soft, #dcfce7);
+  border-color: var(--pg-success-border, #bbf7d0);
+}
+.paper-reader__citation-chip--verified:hover {
+  background: var(--pg-success, #16a34a);
+  color: var(--pg-text-inverse);
+}
+.paper-reader__citation-chip--unverified {
+  color: var(--pg-warning, #b45309);
+  background: var(--pg-warning-soft, #fef3c7);
+  border-color: var(--pg-warning-border, #fde68a);
+}
+.paper-reader__citation-chip--unverified:hover {
+  background: var(--pg-warning, #d97706);
+  color: var(--pg-text-inverse);
+}
+.paper-reader__citation-mark {
+  margin-left: 4px;
+  font-weight: 700;
 }
 .paper-reader__related-title {
   font-size: 12px;

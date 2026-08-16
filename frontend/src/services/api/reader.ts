@@ -1,7 +1,15 @@
 import { apiClient } from './client'
 import type { Paper } from '@/types'
 type PaperReaderChatTurn = { role: string; content: string }
-export type PaperReaderCitation = { marker: string; page: number; snippet?: string }
+export type PaperReaderCitation = {
+  marker: string
+  page: number
+  snippet?: string
+  /** Verbatim excerpt the LLM quoted from page N (passage-level grounding). */
+  quote?: string | null
+  /** True = quote verified on page N; False = quote present but not found on page (hallucination signal); null/undefined = page-level only (no quote). */
+  verified?: boolean | null
+}
 const PAPER_READER_CHAT_REQUEST_MS = 240000
 interface PaperReaderChatOptions {
   signal?: AbortSignal

@@ -587,4 +587,43 @@ def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None =
             pdf_parsing = len((excerpt or "").strip()) < 200
     except Exception:
         pass
+    # Citation-graph × personal-memory cross signal (P2b): surface the
+    # library papers this paper cites / is cited-by, flagging those the user
+    # already has reader notes on. Skipped when user_id is unknown (can't
+    # isolate) or the graph is empty — never bloats the reader context.
+    if user_id is not None:
+        try:
+            from ..graph.kg_citations import get_citation_neighbors
+
+            nb = get_citation_neighbors(db_path, int(paper_id), user_id=int(user_id))
+            graph_block = _format_citation_graph_block(nb)
+            if graph_block:
+                block = (block + "\n\n" + graph_block).strip() if block else graph_block
+        except Exception:
+            logger.debug("reader_context: citation graph block failed for %s", int(paper_id), exc_info=True)
     return p, block, merged_for_refs, pdf_parsing, pages, pdf_path
+
+
+def _format_citation_graph_block(neighbors: dict) -> str:
+    """Render citation-graph neighbors as a concise reader-context block.
+
+    Capped (cites ≤ 5, cited_by ≤ 3) so the reader prompt stays bounded.
+    Papers the user has reader memories for are marked 「你有笔记」 — the
+    citation-graph × personal-memory cross signal ("本文引用的 X 你读过").
+    Empty input → empty string (no spurious block).
+    """
+    cites = (neighbors or {}).get("cites") or []
+    cited_by = (neighbors or {}).get("cited_by") or []
+    if not cites and not cited_by:
+        return ""
+    parts: list[str] = []
+    if cites:
+        items = []
+        for c in cites[:5]:
+            tag = "（你有笔记）" if c.get("has_memory") else ""
+            items.append(f"{c.get('title') or c.get('paper_id')}{tag}")
+        parts.append("本文引用了你库中的：" + "、".join(items))
+    if cited_by:
+        items = [f"{c.get('title') or c.get('paper_id')}" for c in cited_by[:3]]
+        parts.append("本文被你库中的 " + "、".join(items) + " 引用")
+    return "【引用图谱】" + "；".join(parts) + "。"

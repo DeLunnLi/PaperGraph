@@ -9,6 +9,7 @@ endpoints must be library papers — edges reference local paper ids only.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -146,3 +147,86 @@ def build_citation_edges_for_paper(db_path: str, paper_id: int, *, user_id: int)
     if written:
         logger.info("kg_citations: paper %s → %d 真实引用边", paper_id, written)
     return written
+
+
+def _has_reader_memory(reader_mem_db: str, paper_id: int) -> bool:
+    """Best-effort: does the user have paper-scope reader memories for this paper?
+    Cross-DB query against reader_memory.db (papers.db holds the graph edges).
+    Fail-soft False so a missing/locked reader DB never blocks reader injection.
+    """
+    try:
+        if not os.path.exists(reader_mem_db):
+            return False
+        conn = sqlite3.connect(reader_mem_db)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM memories WHERE user_id = ? AND deleted_at = 0 LIMIT 1",
+                (f"papergraph:paper:{int(paper_id)}",),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def get_citation_neighbors(db_path: str, paper_id: int, *, user_id: int) -> dict:
+    """Citation-graph neighbors of a library paper, for reader injection.
+
+    Returns ``{"cites": [...], "cited_by": [...]}`` where each entry is
+    ``{"paper_id", "title", "has_memory"}``. ``cites`` = papers THIS paper
+    references (outgoing); ``cited_by`` = papers that reference THIS paper
+    (incoming). ``has_memory`` flags library papers the user has reader
+    memories for — the citation-graph × personal-memory cross signal
+    ("本文引用的 X 你上周读过").
+
+    Edges come from ``paper_relations`` (relation='cites', written by
+    :func:`build_citation_edges_for_paper`). The papers JOIN enforces
+    user_id isolation as defense-in-depth (edges already reference library
+    papers only). Caps each direction at 20 to keep reader ctx bounded.
+    Fails soft (empty dict) on any DB error.
+    """
+    out: dict = {"cites": [], "cited_by": []}
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cites_rows = conn.execute(
+                "SELECT r.target_paper_id, p.title "
+                "FROM paper_relations r JOIN papers p "
+                "  ON p.id = r.target_paper_id AND p.user_id = ? "
+                "WHERE r.source_paper_id = ? AND r.relation = 'cites' "
+                "ORDER BY r.score DESC LIMIT 20",
+                (int(user_id), int(paper_id)),
+            ).fetchall()
+            cited_rows = conn.execute(
+                "SELECT r.source_paper_id, p.title "
+                "FROM paper_relations r JOIN papers p "
+                "  ON p.id = r.source_paper_id AND p.user_id = ? "
+                "WHERE r.target_paper_id = ? AND r.relation = 'cites' "
+                "ORDER BY r.score DESC LIMIT 20",
+                (int(user_id), int(paper_id)),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("kg_citations: get_citation_neighbors failed for %s", paper_id, exc_info=True)
+        return out
+
+    from ...settings import get_settings
+    from ..memory.db_paths import READER_MEMORY_DB_NAME
+
+    reader_mem_db = os.path.join(get_settings().data_dir, READER_MEMORY_DB_NAME)
+
+    def _build(rows) -> list[dict]:
+        items: list[dict] = []
+        for pid, title in rows:
+            items.append({
+                "paper_id": int(pid),
+                "title": str(title or "")[:200],
+                "has_memory": _has_reader_memory(reader_mem_db, int(pid)),
+            })
+        return items
+
+    out["cites"] = _build(cites_rows)
+    out["cited_by"] = _build(cited_rows)
+    return out

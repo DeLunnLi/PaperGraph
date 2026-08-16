@@ -22,6 +22,108 @@ from .reader_reference_lookup_tool import (
 logger = logging.getLogger(__name__)
 
 
+# ── Passage-level citation grounding (PaperQA2-style excerpt verification) ──
+# The reader prompt asks the LLM to attach a verbatim short quote from the
+# cited page: [pN:"original-text excerpt"]. We verify the quote actually
+# appears on page N's text — passage-level grounding + a hallucination signal
+# (quote present but not on that page → verified=False). [pN] without a quote
+# stays page-level (verified=None). Normalization tolerates PDF→LLM surface
+# differences (markdown, CJK punctuation, whitespace) without false-positive.
+
+_MIN_QUOTE_LEN = 5  # normalized chars; shorter quotes match too many pages to trust
+
+
+# Smart/curly quotes → ASCII. glm-5 (Chinese-leaning) frequently emits
+# typographic quotes (“ ” U+201C/D, ‘ ’ U+2018/9) in prose; without
+# normalization the quote-aware parser fails closed and the entire citation
+# marker (page + quote) silently vanishes. Applied to the reply text up-front
+# so the outer regex, _split_citation_items, and _parse_citation_item all see
+# ASCII delimiters consistently.
+_SMART_QUOTE_MAP = str.maketrans({
+    "“": '"', "”": '"',   # left/right double quotation mark
+    "„": '"', "‟": '"',   # double low-9 / double high-reversed-9
+    "″": '"', "‶": '"',   # double prime / reversed double prime
+    "‘": "'", "’": "'",   # left/right single quotation mark
+    "‚": "'", "‛": "'",   # single low-9 / high-reversed-9
+    "′": "'", "‵": "'",   # prime / reversed prime
+})
+
+
+def _canon_quotes(s: str) -> str:
+    """Normalize smart/curly quotes to ASCII so the quote-aware parser works
+    regardless of which quote style the LLM emitted."""
+    return (s or "").translate(_SMART_QUOTE_MAP)
+
+
+def _normalize_text(s: str) -> str:
+    """Lowercase, strip all punctuation (ASCII + CJK), collapse whitespace.
+
+    Applied identically to the PDF page text and the LLM's quoted excerpt so a
+    verbatim quote matches despite surface differences (markdown emphasis,
+    CJK punctuation, line breaks). A paraphrased quote will NOT match — that
+    is the intended hallucination signal (verified=False), not a bug.
+    """
+    s = (s or "").lower()
+    s = re.sub(r"[^\w\s]", " ", s)  # strip punctuation, keep word chars (incl. CJK) + spaces
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _verify_quote(quote: str | None, page_text_norm: str) -> Optional[bool]:
+    """Three-state: True (quote found on page), False (quote present but not on
+    page — hallucination signal), None (no quote / no page text / quote too
+    short to verify reliably)."""
+    if not quote:
+        return None
+    if not page_text_norm:  # page has no extractable text (e.g. scanned w/o OCR)
+        return None
+    q = _normalize_text(quote)
+    if len(q) < _MIN_QUOTE_LEN:
+        return None  # too short → substring match would be unreliable
+    return q in page_text_norm
+
+
+def _split_citation_items(inner: str) -> list[str]:
+    """Split the inside of [p...] on commas NOT inside double-quoted strings,
+    so a quote containing a comma stays attached to its page spec."""
+    items: list[str] = []
+    cur = ""
+    in_quote = False
+    for ch in inner:
+        if ch == '"':
+            in_quote = not in_quote
+            cur += ch
+        elif ch == "," and not in_quote:
+            if cur.strip():
+                items.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        items.append(cur.strip())
+    return items
+
+
+def _parse_citation_item(item: str) -> tuple[list[int], str | None]:
+    """Parse one item like '3', 'p3', '3-5', '3:"quote"', 'p3-5:"quote"'.
+
+    Returns (pages, quote_or_None). Quote is the raw string inside the quotes.
+    """
+    m = re.match(
+        r'^p?(\d+)\s*(?:[-–—]\s*p?(\d+))?\s*(?::\s*"((?:[^"\\]|\\.)*)")?\s*$',
+        item.strip(),
+    )
+    if not m:
+        return [], None
+    lo = int(m.group(1))
+    hi = int(m.group(2)) if m.group(2) is not None else lo
+    if hi < lo:
+        hi = lo
+    pages = list(range(lo, hi + 1))
+    quote = m.group(3)
+    return pages, quote
+
+
 class ReaderOutputMixin:
     def _cleanup_mixed_reader_response(self, reply: str, user_message: str) -> str:
         """Use one cleanup pass when tool output leaks into the final reply."""
@@ -139,45 +241,61 @@ class ReaderOutputMixin:
             )
         return "抱歉，本次未能生成有效回复。请尝试换一种方式提问，或稍后重试。"
     def _parse_citations_from_reply(self, text_out: str, ctx: ReaderCtx) -> List[Dict[str, Any]]:
-        """Extract [pN] page anchors from the reply. Soft constraint — LLM may omit."""
+        """Extract [pN] page anchors (and optional verbatim quotes) from the reply.
+
+        Soft constraint — LLM may omit. Supports:
+          [p3]                 page-level only
+          [p7,p8] / [p3, p5]   multiple pages
+          [p3-p5]              dash range
+          [pN:"verbatim quote"] passage-level grounding — the quote is verified
+                               against page N's text (verified True/False/None).
+          [p3:"q1",p5:"q2"]    per-page quotes (commas inside quotes are safe).
+          quotes containing ] (e.g. [p4:"see eq [3]"]) — the outer match is
+                               quote-aware so a ] inside a quote doesn't truncate.
+        Smart/curly quotes (“ ”) are normalized to ASCII before parsing, so a
+        glm-5 reply that emits typographic quotes still parses.
+        """
         if not text_out:
             return []
+        # Normalize smart quotes up-front so every quote-aware step below sees
+        # ASCII delimiters consistently (outer regex, split, item parse).
+        text_out = _canon_quotes(text_out)
         pages = ctx.snap.get("_pdf_pages")
         valid_pages: set[int] = set()
+        page_text_norm: dict[int, str] = {}
         if isinstance(pages, list):
             for pg in pages:
                 try:
-                    valid_pages.add(int(pg.get("page")))  # type: ignore[arg-type]
+                    n = int(pg.get("page"))  # type: ignore[arg-type]
+                    valid_pages.add(n)
+                    page_text_norm[n] = _normalize_text(str(pg.get("text") or ""))
                 except (TypeError, ValueError):
                     continue
         citations: List[Dict[str, Any]] = []
-        seen: set[int] = set()
-        # Match [p3], [p7,p8], [p3, p5], [p3,p5,p7], [p3-p5] (dash ranges) —
-        # capture everything between [p and ], split on comma, and parse each
-        # item as an int or an N-M range (tolerating an optional 'p' prefix and
-        # -, –, — dashes).
-        for m in re.finditer(r"\[p([^\]]*)\]", text_out):
-            nums: list[int] = []
-            for part in m.group(1).split(","):
-                part = part.strip().lstrip("p").strip()
-                rng = re.match(r"^(\d+)\s*[-–—]\s*p?(\d+)$", part)
-                if rng:
-                    lo, hi = int(rng.group(1)), int(rng.group(2))
-                    if lo <= hi:
-                        nums.extend(range(lo, hi + 1))
-                    continue
-                if part.isdigit():
-                    nums.append(int(part))
-            for n in nums:
-                if valid_pages and n not in valid_pages:
-                    continue  # filter out-of-range page anchors
-                if n in seen:
-                    continue
-                seen.add(n)
-                start = max(0, m.start() - 120)
-                end = min(len(text_out), m.end() + 120)
-                snippet = text_out[start:end].strip().replace("\n", " ")
-                if len(snippet) > 240:
-                    snippet = snippet[:240] + "…"
-                citations.append({"marker": f"[p{n}]", "page": n, "snippet": snippet})
+        seen: set[tuple[int, str | None]] = set()
+        # Quote-aware outer match: inside [p...], allow either a fully-balanced
+        # quoted run ("...") OR a non-']' char. A ']' inside a verbatim quote
+        # (e.g. a reference to eq [3]) is consumed as part of the quoted run,
+        # not treated as the closing bracket. Plain [p3]/[p3,p5]/[p3-p5] still
+        # match exactly (no quotes → falls to the [^\]] branch).
+        for m in re.finditer(r'\[p((?:"(?:[^"\\]|\\.)*"|[^\]])*)\]', text_out):
+            for item in _split_citation_items(m.group(1)):
+                nums, quote = _parse_citation_item(item)
+                for n in nums:
+                    if valid_pages and n not in valid_pages:
+                        continue  # filter out-of-range page anchors
+                    key = (n, quote)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    start = max(0, m.start() - 120)
+                    end = min(len(text_out), m.end() + 120)
+                    snippet = text_out[start:end].strip().replace("\n", " ")
+                    if len(snippet) > 240:
+                        snippet = snippet[:240] + "…"
+                    verified = _verify_quote(quote, page_text_norm.get(n, ""))
+                    citations.append({
+                        "marker": f"[p{n}]", "page": n, "snippet": snippet,
+                        "quote": quote, "verified": verified,
+                    })
         return citations
