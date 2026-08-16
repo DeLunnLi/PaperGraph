@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -12,10 +13,56 @@ from typing import Any
 
 from .author import Author
 from .paper import Paper
-from .paper_paths import LIBRARY_PDF_ROOT_DIR, category_slug_for_pdf_dir
+from .paper_paths import (
+    LIBRARY_PDF_ROOT_DIR,
+    category_slug_for_pdf_dir,
+    library_pdf_relative_path,
+)
 from ..settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_list(raw: Any) -> list:
+    """Parse a JSON-list column defensively.
+
+    The ``keywords``/``mesh_terms``/``references``/``tags`` columns are
+    contracted to hold ``json.dumps(list[str])``. Stale dev-DB rows from an
+    older write path can hold a bare int or a non-JSON string (e.g.
+    ``references = '35'`` where ``35`` was a leaked citation count), which
+    ``json.loads`` returns as a non-list and downstream code then subscripts
+    like ``refs[:120]`` -> ``TypeError: 'int' object is not subscriptable``.
+    The deserialization boundary must guarantee the list contract regardless
+    of stored data.
+    """
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _parse_int(raw: Any, default: int = 0) -> int:
+    """Parse an int column defensively.
+
+    ``citations`` is contracted to be an INTEGER. Stale rows can hold a
+    leaked source-name string (e.g. ``'openalex'``); return ``default``
+    instead of propagating the string into the model (which would silently
+    break ``citations DESC`` ordering / numeric ranking). Numeric strings
+    coerce (SQLite may store text).
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):  # guard: bool is an int subclass
+        return default
+    if isinstance(raw, int):
+        return raw
+    try:
+        return int(str(raw).strip())
+    except (ValueError, TypeError):
+        return default
 
 class PaperDatabase:
 
@@ -519,13 +566,13 @@ class PaperDatabase:
             pdf_url=row["pdf_url"],
             source_url=row["source_url"],
             local_pdf_path=row["local_pdf_path"] if "local_pdf_path" in keys else None,
-            keywords=json.loads(row["keywords"] or "[]"),
-            mesh_terms=json.loads(row["mesh_terms"] or "[]"),
-            references=json.loads(row["references"] or "[]"),
-            citations=row["citations"] or 0,
+            keywords=_parse_json_list(row["keywords"]),
+            mesh_terms=_parse_json_list(row["mesh_terms"]),
+            references=_parse_json_list(row["references"]),
+            citations=_parse_int(row["citations"]),
             source=row["source"] or "unknown",
             notes=row["notes"],
-            tags=json.loads(row["tags"] or "[]"),
+            tags=_parse_json_list(row["tags"]),
             category=row["category"] if "category" in keys else None,
             venue_type=row["venue_type"] if "venue_type" in keys else None,
             rating=row["rating"],
@@ -753,40 +800,101 @@ class PaperDatabase:
         return deleted
 
     def repair_library_local_pdf_paths_batch(self, paper_ids: list[int], user_id: int) -> dict[int, str]:
+        """Repair local_pdf_path for the given papers.
+
+        Heals three failure modes:
+          * NULL/empty — the row was never given a path;
+          * corrupt — the column holds a ``json.dumps(keywords)`` string
+            (e.g. ``'["cs.LG", "cs.AI"]'``), a stale artifact of an older
+            write path that is no longer produced but lingers in dev DBs;
+          * stale — the path no longer points at an existing file.
+
+        The library names files deterministically as
+        ``<sanitized_title>_<sha256(paper_id)[:6]>.pdf`` under a category dir
+        (see :func:`library_pdf_relative_path`), so a paper's expected path
+        can be re-derived from ``(category, pid, title)`` and verified with a
+        stat. The id-hash suffix is stable across category/title renames, so a
+        single walk indexed by suffix also catches files saved under an old
+        category. When no file exists, a corrupt value is cleared to NULL so
+        downstream code (reader) does not interpret keywords-JSON as a path.
+        """
         want = {int(x) for x in paper_ids if x is not None and int(x) >= 0}
         if not want:
             return {}
         data_root = self._data_root()
         lib_root = os.path.join(data_root, LIBRARY_PDF_ROOT_DIR)
-        if not os.path.isdir(lib_root):
+
+        # Fetch (id, category, title, current local_pdf_path) for the wanted
+        # papers so we can re-derive the deterministic path and detect corrupt
+        # values to cleanse. Chunked for the 999-variable SQLite limit.
+        meta: dict[int, tuple[str | None, str | None, str | None]] = {}
+        want_list = list(want)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for i in range(0, len(want_list), 900):
+                chunk = want_list[i : i + 900]
+                placeholders = ",".join(["?"] * len(chunk))
+                cursor.execute(
+                    f"SELECT id, category, title, local_pdf_path FROM papers "
+                    f"WHERE user_id = ? AND id IN ({placeholders})",
+                    (int(user_id), *chunk),
+                )
+                for r in cursor.fetchall():
+                    meta[int(r[0])] = (r[1], r[2], r[3])
+
+        if not meta:
             return {}
-        candidates: dict[int, list[tuple[float, str]]] = {k: [] for k in want}
-        name_pat = re.compile(r"^(\d+)\.pdf$")
-        for dirpath, _, filenames in os.walk(lib_root):
-            for fn in filenames:
-                m = name_pat.match(fn)
-                if not m:
-                    continue
-                pid = int(m.group(1))
-                if pid not in want:
-                    continue
-                full = os.path.join(dirpath, fn)
-                try:
-                    mt = os.path.getmtime(full)
-                except OSError:
-                    continue
-                rel = os.path.relpath(full, data_root).replace("\\", "/")
-                if rel.startswith(".."):
-                    continue
-                candidates[pid].append((mt, rel))
+
+        # Single walk of the library, indexing PDFs by their stable id-hash
+        # suffix (the last ``_<6 hex>`` before ``.pdf``). Used as a fallback
+        # when the re-derived path does not exist (e.g. file saved under a
+        # now-changed category).
+        by_hash: dict[str, str] = {}
+        if os.path.isdir(lib_root):
+            suffix_pat = re.compile(r"_([0-9a-f]{6})\.pdf$", re.IGNORECASE)
+            for dirpath, _, filenames in os.walk(lib_root):
+                for fn in filenames:
+                    if not fn.lower().endswith(".pdf"):
+                        continue
+                    m = suffix_pat.search(fn)
+                    if not m:
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    try:
+                        if not os.path.isfile(full):
+                            continue
+                    except OSError:
+                        continue
+                    rel = os.path.relpath(full, data_root).replace("\\", "/")
+                    if rel.startswith(".."):
+                        continue
+                    by_hash.setdefault(m.group(1).lower(), rel)
+
         out: dict[int, str] = {}
-        for pid, rows in candidates.items():
-            if not rows:
+        for pid, (category, title, current) in meta.items():
+            h = hashlib.sha256(str(pid).encode()).hexdigest()[:6]
+            rel: str | None = None
+            # 1. deterministic path from current category/title
+            derived = library_pdf_relative_path(category, pid, title)
+            if not derived.startswith("..") and os.path.isfile(
+                os.path.join(data_root, derived)
+            ):
+                rel = derived
+            # 2. fall back to any file with the stable id-hash suffix
+            if rel is None:
+                rel = by_hash.get(h)
+
+            if rel is not None:
+                if rel != (current or "").strip() and self.set_local_pdf_path(
+                    pid, rel, user_id=user_id
+                ):
+                    out[pid] = rel
                 continue
-            rows.sort(key=lambda x: -x[0])
-            best_rel = rows[0][1]
-            if self.set_local_pdf_path(pid, best_rel, user_id=user_id):
-                out[pid] = best_rel
+
+            # 3. no file on disk — cleanse a corrupt value to NULL so the
+            # reader does not interpret keywords-JSON as a path.
+            if current and current.lstrip().startswith("["):
+                self.set_local_pdf_path(pid, None, user_id=user_id)
         return out
 
     def paper_ids_missing_local_pdf(self, paper_ids: list[int], user_id: int) -> list[int]:
@@ -807,7 +915,8 @@ class PaperDatabase:
                 placeholders = ",".join(["?"] * len(chunk))
                 cursor.execute(
                     f"SELECT id FROM papers WHERE user_id = ? AND id IN ({placeholders}) "
-                    f"AND (local_pdf_path IS NULL OR TRIM(local_pdf_path) = '')",
+                    f"AND (local_pdf_path IS NULL OR TRIM(local_pdf_path) = '' "
+                    f"OR local_pdf_path LIKE '[%')",
                     (int(user_id), *chunk),
                 )
                 out.extend(int(r[0]) for r in cursor.fetchall())
