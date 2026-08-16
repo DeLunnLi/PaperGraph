@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import re
 import sqlite3
@@ -11,6 +12,27 @@ from dataclasses import dataclass
 from ...utils import build_in_clause
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_keyword_list(raw: object) -> list[str]:
+    """Parse the ``papers.keywords`` column defensively.
+
+    The column stores ``json.dumps(list[str])`` (e.g. ``'["cs.IR", "cs.AI"]'``).
+    Splitting that string on commas — as this function used to — produced
+    bracket-prefixed garbage tokens (``'["cs.ir"'``) that corrupted the
+    interest-keyword signal feeding the daily pipeline. Parse as JSON and
+    fall back to ``[]`` on corrupt/stale values (the same mis-mapped-data
+    shape that broke ``references``/``citations``).
+    """
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(x) for x in value if str(x).strip()]
 
 @dataclass
 class UserInterestProfile:
@@ -103,7 +125,7 @@ class UserBehaviorAnalytics:
             for row in cur.fetchall():
                 all_kw.extend(self.extract_keywords_from_text(str(row["title"] or "")))
                 all_kw.extend(self.extract_keywords_from_text(str(row["abstract"] or "")))
-                for kw in (str(row["keywords"] or "")).split(","):
+                for kw in _parse_keyword_list(row["keywords"]):
                     k = kw.strip().lower()
                     if k and len(k) >= 3:
                         all_kw.append(k)
