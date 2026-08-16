@@ -79,3 +79,21 @@ def clamp_utility(value: float) -> float:
     [-2, 5] range is defined for writes (judge prompts reference it too)."""
     p = get_memory_policy()
     return max(p.utility_min, min(p.utility_max, float(value)))
+
+
+def attention_key(doc: dict) -> tuple[float, float]:
+    """Karpathy "position = last touched" sort key (higher = top of mind).
+
+    ``max(last_used, timestamp)`` collapses creation and rescue into one time
+    axis: a freshly appended memory floats to the top (timestamp), and a
+    rescued/Injected one floats above its creation recency (last_used). DESC
+    sort gives the append-and-review "things sink unless rescued" ordering
+    without a magic weighted formula — ``utility`` is a secondary tiebreak so
+    among equally-recent memories the higher-value one wins. ``access_count``
+    is intentionally NOT a key: in Karpathy's model frequency doesn't buy
+    position, only recency of attention does.
+    """
+    last_used = float(doc.get("last_used") or 0)
+    timestamp = float(doc.get("timestamp") or 0)
+    position = last_used if last_used > 0 else timestamp
+    return (position, float(doc.get("utility") or 0))

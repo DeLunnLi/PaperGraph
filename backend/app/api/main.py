@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     app.state.last_meaningful_activity_monotonic = None
     daily_refresh_task: asyncio.Task | None = None
     trace_cleanup_task: asyncio.Task | None = None
-    memory_evolution_task: asyncio.Task | None = None
+    memory_evolution_tasks: list[asyncio.Task] = []
 
     # Run DB migrations (add user_id columns for multi-user isolation)
     from ..services.auth.user_migration import migrate_add_user_id
@@ -71,9 +71,9 @@ async def lifespan(app: FastAPI):
         logger.warning("trace 清理后台任务未启动: %s", exc)
 
     try:
-        from ..services.memory.memory_evolution import spawn_memory_evolution_task
+        from ..services.memory.memory_evolution import spawn_memory_evolution_tasks
 
-        memory_evolution_task = spawn_memory_evolution_task(app)
+        memory_evolution_tasks = spawn_memory_evolution_tasks(app)
     except Exception as exc:
         logger.warning("记忆进化后台任务未启动: %s", exc)
 
@@ -99,10 +99,10 @@ async def lifespan(app: FastAPI):
             pass
         except Exception:
             logger.debug("trace 清理后台任务结束异常", exc_info=True)
-    if memory_evolution_task is not None:
-        memory_evolution_task.cancel()
+    for task in memory_evolution_tasks:
+        task.cancel()
         try:
-            await memory_evolution_task
+            await task
         except asyncio.CancelledError:
             pass
         except Exception:

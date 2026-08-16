@@ -82,14 +82,19 @@ def main() -> int:
     _check("conflict.distinct_keep", distinct is not None and distinct.get("old") == "keep",
            f"verdicts={distinct}")
 
-    # --- judge_evolution_batch: junk pruned, value kept ---
+    # --- judge_evolution_batch: junk pruned, value rescued/kept ---
+    # New Karpathy prompt adds "rescue" (float valuable forgotten memories to
+    # the top). A valuable stale memory may be rescued OR kept — both are
+    # positive outcomes. Junk must still be pruned (soft-retired).
     decisions = j.judge_evolution_batch(candidates=[
         _doc("junk", "用户问：哈哈哈", kind="working", imp=0.3),
         _doc("value", "用户的研究方向是检索增强生成的重排序与评测", imp=0.7),
     ])
     by_id = {d["memory_id"]: d["action"] for d in (decisions or [])}
     _check("evolution.junk_pruned", by_id.get("junk") == "prune", f"decisions={by_id}")
-    _check("evolution.value_kept", by_id.get("value") == "keep", f"decisions={by_id}")
+    _check("evolution.value_surfaced",
+           by_id.get("value") in ("rescue", "keep"),
+           f"decisions={by_id} (rescue=new Karpathy float-to-top, keep=still valuable)")
 
     # --- judge_memory_links: related linked, unrelated not ---
     links = j.judge_memory_links(

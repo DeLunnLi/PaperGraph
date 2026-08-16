@@ -8,9 +8,13 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 # Column list shared by every memories-table query (see _select_memories).
+# ``deleted_at`` (Karpathy-style soft delete) is the 13th column: 0 = live,
+# >0 = epoch seconds when the memory was retired. Reads filter ``deleted_at=0``
+# by default; pass ``include_deleted=True`` to ``_select_memories`` for the
+# knowledge-base admin view.
 _MEMORY_COLUMNS = (
     "memory_id, user_id, content, memory_type, importance, properties, "
-    "timestamp, created_at, updated_at, utility, access_count, last_used"
+    "timestamp, created_at, updated_at, utility, access_count, last_used, deleted_at"
 )
 
 
@@ -59,7 +63,8 @@ class SQLiteDocumentStore:
                         updated_at REAL NOT NULL,
                         utility REAL DEFAULT 0.0,
                         access_count INTEGER DEFAULT 0,
-                        last_used REAL DEFAULT 0
+                        last_used REAL DEFAULT 0,
+                        deleted_at REAL DEFAULT 0
                     )"""
                 )
                 columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memories)")}
@@ -77,6 +82,11 @@ class SQLiteDocumentStore:
                     conn.execute("ALTER TABLE memories ADD COLUMN access_count INTEGER DEFAULT 0")
                 if "last_used" not in columns:
                     conn.execute("ALTER TABLE memories ADD COLUMN last_used REAL DEFAULT 0")
+                # Karpathy-style soft delete: retired memories keep their row
+                # (recoverable, surfaces in KB admin view) but are filtered out
+                # of every default read. ``purge_deleted`` reaps them after a TTL.
+                if "deleted_at" not in columns:
+                    conn.execute("ALTER TABLE memories ADD COLUMN deleted_at REAL DEFAULT 0")
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_memories_user_type ON memories(user_id, memory_type)"
                 )
@@ -168,8 +178,8 @@ class SQLiteDocumentStore:
                 conn.execute(
                     """INSERT INTO memories
                        (memory_id, user_id, content, memory_type, importance, properties,
-                        timestamp, created_at, updated_at, utility, access_count, last_used)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        timestamp, created_at, updated_at, utility, access_count, last_used, deleted_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                        ON CONFLICT(memory_id) DO UPDATE SET
                          user_id = excluded.user_id,
                          content = excluded.content,
@@ -178,6 +188,7 @@ class SQLiteDocumentStore:
                          properties = excluded.properties,
                          timestamp = excluded.timestamp,
                          updated_at = excluded.updated_at,
+                         deleted_at = 0,
                          utility = CASE WHEN ? IS NOT NULL THEN ? ELSE memories.utility END,
                          access_count = CASE WHEN ? IS NOT NULL THEN ? ELSE memories.access_count END,
                          last_used = CASE WHEN ? IS NOT NULL THEN ? ELSE memories.last_used END""",
@@ -198,16 +209,72 @@ class SQLiteDocumentStore:
         return mid
 
     def delete_memory(self, memory_id: str) -> bool:
+        """Soft-delete: mark ``deleted_at`` instead of removing the row.
+
+        Karpathy's append-and-review never truly discards a note — it sinks.
+        A retired memory stays recoverable (KB admin view, evolution-log
+        traceability) and is reaped only by ``purge_deleted`` after a TTL.
+        The embedding vector is dropped immediately (no point recomputing
+        recall for a retired memory); links are left in place and naturally
+        filtered because both endpoints become invisible to default reads.
+        Returns True if a live row was retired (idempotent on already-deleted).
+        """
         with self._lock:
             conn = self._get_conn()
             try:
-                cur = conn.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
-                conn.execute("DELETE FROM memory_embeddings WHERE memory_id = ?", (memory_id,))
-                conn.execute(
-                    "DELETE FROM memory_links WHERE src = ? OR dst = ?", (memory_id, memory_id),
+                cur = conn.execute(
+                    "UPDATE memories SET deleted_at = ?, updated_at = ? "
+                    "WHERE memory_id = ? AND deleted_at = 0",
+                    (time.time(), time.time(), memory_id),
                 )
+                if cur.rowcount > 0:
+                    conn.execute("DELETE FROM memory_embeddings WHERE memory_id = ?", (memory_id,))
                 conn.commit()
                 return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def purge_deleted(self, before_days: int = 30) -> int:
+        """Hard-delete memories soft-deleted more than ``before_days`` ago.
+
+        Last-resort reaping to bound DB growth — Karpathy's review never
+        prunes, but a completely unbounded store is impractical. Runs in the
+        evolution loop tail, never in a user-facing path. Returns count purged.
+        """
+        cutoff = time.time() - max(1, int(before_days)) * 86400
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT memory_id FROM memories WHERE deleted_at > 0 AND deleted_at < ?",
+                    (cutoff,),
+                ).fetchall()
+                if not rows:
+                    return 0
+                ids = [str(r[0]) for r in rows]
+                # SQLite has a compile-time limit on bound variables
+                # (SQLITE_MAX_VARIABLE_NUMBER, historically 999 / 32766).
+                # The memory_links query uses 2× len(ids), so batch to stay
+                # well within the limit.
+                PURGE_BATCH = 500
+                for i in range(0, len(ids), PURGE_BATCH):
+                    batch = ids[i:i + PURGE_BATCH]
+                    placeholders = ",".join("?" * len(batch))
+                    conn.execute(
+                        f"DELETE FROM memories WHERE memory_id IN ({placeholders})",
+                        batch,
+                    )
+                    conn.execute(
+                        f"DELETE FROM memory_embeddings WHERE memory_id IN ({placeholders})",
+                        batch,
+                    )
+                    conn.execute(
+                        f"DELETE FROM memory_links WHERE src IN ({placeholders}) "
+                        f"OR dst IN ({placeholders})",
+                        (*batch, *batch),
+                    )
+                conn.commit()
+                return len(ids)
             finally:
                 conn.close()
 
@@ -233,7 +300,11 @@ class SQLiteDocumentStore:
                 conn.close()
 
     def linked_ids(self, memory_ids: list[str]) -> Dict[str, list[str]]:
-        """Bidirectional 1-hop lookup: for each id, its linked neighbor ids."""
+        """Bidirectional 1-hop lookup: for each id, its linked neighbor ids.
+
+        Retired (soft-deleted) neighbors are filtered out — link expansion
+        must never surface a memory that's been retired from default reads.
+        """
         ids = [str(m) for m in (memory_ids or []) if m]
         if not ids:
             return {}
@@ -245,8 +316,12 @@ class SQLiteDocumentStore:
         with self._lock:
             conn = self._get_conn()
             try:
+                # JOIN memories twice to drop links whose endpoint is retired.
                 rows = conn.execute(
-                    f"SELECT src, dst FROM memory_links WHERE {src_clause} OR {dst_clause}",
+                    f"""SELECT l.src, l.dst FROM memory_links l
+                        JOIN memories ms ON ms.memory_id = l.src AND ms.deleted_at = 0
+                        JOIN memories md ON md.memory_id = l.dst AND md.deleted_at = 0
+                        WHERE {src_clause} OR {dst_clause}""",
                     (*src_params, *dst_params),
                 ).fetchall()
             finally:
@@ -295,6 +370,8 @@ class SQLiteDocumentStore:
         user_id: str,
         memory_type: str = "",
         limit: int = 10,
+        *,
+        include_deleted: bool = False,
     ) -> List[Dict[str, Any]]:
         where = "WHERE user_id = ?"
         params: list[Any] = [user_id]
@@ -303,6 +380,7 @@ class SQLiteDocumentStore:
             params.append(memory_type)
         return self._select_memories(
             where, params, order_by="timestamp DESC, updated_at DESC", limit=limit,
+            include_deleted=include_deleted,
         )
 
     @staticmethod
@@ -325,6 +403,7 @@ class SQLiteDocumentStore:
             "utility": row[9] if len(row) > 9 else 0.0,
             "access_count": row[10] if len(row) > 10 else 0,
             "last_used": row[11] if len(row) > 11 else 0.0,
+            "deleted_at": row[12] if len(row) > 12 else 0.0,
         }
 
     def _select_memories(
@@ -334,13 +413,25 @@ class SQLiteDocumentStore:
         *,
         order_by: str = "",
         limit: int | None = None,
+        include_deleted: bool = False,
     ) -> List[Dict[str, Any]]:
         """Single chokepoint for memories-table reads.
 
         ``order_by`` is always an internal constant (never user input), so
         interpolating it is safe; values go through ``params`` as usual.
+        By default retired memories (``deleted_at > 0``) are filtered out;
+        the KB admin view passes ``include_deleted=True`` to surface them.
         """
-        sql = f"SELECT {_MEMORY_COLUMNS} FROM memories {where}"
+        # Soft-delete filter: default reads exclude retired rows. Handle the
+        # empty-WHERE case (list_all_memories with no memory_type) so we emit
+        # "WHERE deleted_at = 0" rather than a dangling "AND".
+        if include_deleted:
+            deleted_clause = ""
+        elif where:
+            deleted_clause = " AND deleted_at = 0"
+        else:
+            deleted_clause = "WHERE deleted_at = 0"
+        sql = f"SELECT {_MEMORY_COLUMNS} FROM memories {where}{deleted_clause}"
         if order_by:
             sql += f" ORDER BY {order_by}"
         final_params: list[Any] = list(params)
@@ -355,11 +446,15 @@ class SQLiteDocumentStore:
                 conn.close()
         return [self._row_to_doc(row) for row in rows]
 
-    def list_all_memories(self, *, memory_type: str = "", limit: int = 1000) -> List[Dict[str, Any]]:
+    def list_all_memories(
+        self, *, memory_type: str = "", limit: int = 1000, include_deleted: bool = False,
+    ) -> List[Dict[str, Any]]:
         """List memories across all user scopes (knowledge-base page)."""
         where = "WHERE memory_type = ?" if memory_type else ""
         params: list[Any] = [memory_type] if memory_type else []
-        return self._select_memories(where, params, order_by="timestamp DESC", limit=limit)
+        return self._select_memories(
+            where, params, order_by="timestamp DESC", limit=limit, include_deleted=include_deleted,
+        )
 
     def count_evolution_events_since(self, since_ts: float) -> int:
         with self._lock:
@@ -388,18 +483,80 @@ class SQLiteDocumentStore:
                 conn.close()
         return {str(ev): int(n) for ev, n in rows}
 
+    def judge_scorecard(self, *, lookback_days: int = 30) -> Dict[str, Any]:
+        """Self-iteration signal: how did past judge decisions turn out?
+
+        Joins decision events (rescue/reflection/prune) against later outcome
+        events (feedback_up/citation_click/engaged_read) on the same memory.
+        Returns counts AND rates — the judge prompt shows both so the model
+        doesn't overreact to small N (single-user traffic is low). All signals
+        come from ``memory_evolution_log`` (self-contained, no memories-table
+        join), so the scorecard is cheap and replayable.
+
+        - ``rescue``: rescued memories that later drew a positive outcome event.
+        - ``reflection``: meta-memories that later drew a positive outcome event.
+        - ``prune_of_accessed``: pruned memories that had been accessed before
+          retirement (access_count_after > 0) — a potential over-pruning signal.
+        """
+        cutoff = time.time() - max(1, int(lookback_days)) * 86400
+        positive = ("feedback_up", "citation_click", "engaged_read")
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                # Distinct memory_ids that drew a positive outcome in the window.
+                pos_rows = conn.execute(
+                    "SELECT DISTINCT memory_id FROM memory_evolution_log "
+                    f"WHERE event IN ({','.join('?' * len(positive))}) AND created_at >= ?",
+                    (*positive, cutoff),
+                ).fetchall()
+                positive_mids = {str(r[0]) for r in pos_rows}
+
+                def _hit_rate(event: str) -> tuple[int, int]:
+                    rows = conn.execute(
+                        "SELECT memory_id FROM memory_evolution_log "
+                        "WHERE event = ? AND created_at >= ?",
+                        (event, cutoff),
+                    ).fetchall()
+                    mids = [str(r[0]) for r in rows]
+                    hits = sum(1 for m in mids if m in positive_mids)
+                    return hits, len(mids)
+
+                rescue_hits, rescue_total = _hit_rate("rescue")
+                refl_hits, refl_total = _hit_rate("reflection")
+                prune_rows = conn.execute(
+                    "SELECT access_count_after FROM memory_evolution_log "
+                    "WHERE event = 'prune' AND created_at >= ?",
+                    (cutoff,),
+                ).fetchall()
+                prune_total = len(prune_rows)
+                prune_of_accessed = sum(1 for (acc,) in prune_rows if int(acc or 0) > 0)
+            finally:
+                conn.close()
+
+        def _rate(num: int, den: int) -> float:
+            return round(num / den, 2) if den > 0 else 0.0
+
+        return {
+            "rescue": {"hits": rescue_hits, "total": rescue_total, "rate": _rate(rescue_hits, rescue_total)},
+            "reflection": {"hits": refl_hits, "total": refl_total, "rate": _rate(refl_hits, refl_total)},
+            "prune_of_accessed": {"count": prune_of_accessed, "total": prune_total, "rate": _rate(prune_of_accessed, prune_total)},
+            "lookback_days": int(lookback_days),
+        }
+
     def list_stale_memories(
         self,
         *,
         min_age_days: int,
         exclude_types: tuple[str, ...] = (),
         limit: int = 200,
+        include_deleted: bool = False,
     ) -> List[Dict[str, Any]]:
         """Gather candidates for the periodic LLM evolution review.
 
         This SQL filter is candidate *gathering* (instrumentation-based:
         age + never retrieved), not scoring — the keep/merge/prune decision
-        itself is made by the LLM judge.
+        itself is made by the LLM judge. Stale candidates are always live
+        (``deleted_at=0``) unless ``include_deleted`` is set.
         """
         cutoff = time.time() - max(1, int(min_age_days)) * 86400
         where = "WHERE timestamp < ? AND access_count = 0"
@@ -407,7 +564,33 @@ class SQLiteDocumentStore:
         if exclude_types:
             where += f" AND memory_type NOT IN ({','.join('?' * len(exclude_types))})"
             params.extend(exclude_types)
-        return self._select_memories(where, params, order_by="timestamp ASC", limit=limit)
+        return self._select_memories(
+            where, params, order_by="timestamp ASC", limit=limit, include_deleted=include_deleted,
+        )
+
+    def touch_last_used(self, memory_id: str) -> bool:
+        """Bump ``last_used`` to now without incrementing access_count.
+
+        Implements Karpathy's "rescue to the top": a review that decides a
+        forgotten memory still deserves attention floats it above its
+        creation recency via the attention sort (``attention_key`` uses
+        ``last_used``). Unlike ``increment_access`` (which records a real
+        injection), this is a review decision — it repositions but doesn't
+        claim the memory was used. Returns True if a live row was touched.
+        """
+        now = time.time()
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    "UPDATE memories SET last_used = ?, updated_at = ? "
+                    "WHERE memory_id = ? AND deleted_at = 0",
+                    (now, now, memory_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
 
     def update_importance_utility(
         self,
@@ -439,14 +622,18 @@ class SQLiteDocumentStore:
             finally:
                 conn.close()
 
-    def get_memories_by_ids(self, memory_ids: list[str]) -> List[Dict[str, Any]]:
+    def get_memories_by_ids(
+        self, memory_ids: list[str], *, include_deleted: bool = False,
+    ) -> List[Dict[str, Any]]:
         ids = [str(m) for m in (memory_ids or []) if m]
         if not ids:
             return []
         from ...utils.common import build_in_clause
 
         in_clause, in_params = build_in_clause("memory_id", ids)
-        return self._select_memories(f"WHERE {in_clause}", list(in_params))
+        return self._select_memories(
+            f"WHERE {in_clause}", list(in_params), include_deleted=include_deleted,
+        )
 
     def increment_access(self, memory_ids: list[str]) -> int:
         """Batch-increment access_count and refresh last_used for injected memories.
@@ -470,7 +657,7 @@ class SQLiteDocumentStore:
                         SET access_count = access_count + 1,
                             last_used = ?,
                             updated_at = ?
-                        WHERE {in_clause}""",
+                        WHERE {in_clause} AND deleted_at = 0""",
                     (now, now, *in_params),
                 )
                 conn.commit()
@@ -488,7 +675,8 @@ class SQLiteDocumentStore:
             conn = self._get_conn()
             try:
                 row = conn.execute(
-                    "SELECT utility, importance, access_count FROM memories WHERE memory_id = ?",
+                    "SELECT utility, importance, access_count FROM memories "
+                    "WHERE memory_id = ? AND deleted_at = 0",
                     (mid,),
                 ).fetchone()
                 if not row:

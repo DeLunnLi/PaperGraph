@@ -323,7 +323,7 @@ class AgentMemory:
                      tags: list[str] | None = None) -> list[dict[str, Any]]:
         """Doc-returning variant of :meth:`recent` (keeps memory_id for access tracking)."""
         uid = _shared_user_id() if shared else _agent_user_id(agent_name)
-        out: list[tuple[int, dict[str, Any]]] = []
+        out: list[dict[str, Any]] = []
         for mt in [str(x).strip() for x in (memory_types or []) if str(x).strip()]:
             for r in (self.store.search_memories(user_id=uid, memory_type=mt, limit=int(limit)) or []):
                 if not isinstance(r, dict):
@@ -341,8 +341,13 @@ class AgentMemory:
                         continue
                 c = str(r.get("content") or "").strip()
                 if c:
-                    out.append((int(r.get("timestamp") or 0), r))
-        return [r for _, r in sorted(out, key=lambda x: -x[0])[:max(1, int(limit))]]
+                    out.append(r)
+        # Karpathy "position = last touched": rescue (injection → last_used)
+        # floats a memory above creation recency. Stable sort keeps SQL
+        # timestamp-DESC as the final tiebreak.
+        from .policy import attention_key
+        ranked = sorted(out, key=attention_key, reverse=True)
+        return ranked[:max(1, int(limit))]
 
     def recent(self, *, agent_name: str, memory_types: list[str], limit: int, shared: bool,
                tags: list[str] | None = None) -> list[str]:

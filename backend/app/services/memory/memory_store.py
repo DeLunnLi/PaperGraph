@@ -285,7 +285,11 @@ class MemoryStore:
             for d in items or []:
                 if isinstance(d, dict):
                     docs.append(d)
-        return docs
+        # Karpathy "position = last touched": rescue (injection → last_used)
+        # floats a memory above its creation recency. Stable sort preserves the
+        # SQL timestamp-DESC order as the final tiebreak.
+        from .policy import attention_key
+        return sorted(docs, key=attention_key, reverse=True)
 
 
 

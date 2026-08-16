@@ -79,6 +79,33 @@ def _format_candidate(idx: int, doc: dict[str, Any], now: float) -> str:
     )
 
 
+def _format_scorecard(scorecard: dict[str, Any] | None) -> str:
+    """Render the judge's past-decision scorecard for prompt injection.
+
+    Self-iteration: the model reads how its prior rescue/reflection/prune
+    decisions turned out and self-calibrates. Counts shown alongside rates so
+    small-N (single-user traffic) doesn't cause overreaction — an empty or
+    tiny scorecard produces an empty string (no spurious calibration).
+    """
+    if not scorecard:
+        return ""
+    rescue = scorecard.get("rescue") or {}
+    refl = scorecard.get("reflection") or {}
+    prn = scorecard.get("prune_of_accessed") or {}
+    lookback = int(scorecard.get("lookback_days") or 0)
+    parts: list[str] = []
+    if rescue.get("total"):
+        parts.append(f"上浮决策 {rescue['total']} 次，其中 {rescue['hits']} 次后来被实际使用（{int(rescue['rate']*100)}%）")
+    if refl.get("total"):
+        parts.append(f"反思元记忆 {refl['total']} 条，其中 {refl['hits']} 条后来被使用（{int(refl['rate']*100)}%）")
+    if prn.get("total"):
+        parts.append(f"归档决策 {prn['total']} 次，其中 {prn['count']} 次归档了曾被访问过的记忆（{int(prn['rate']*100)}%，偏高说明可能过度删除）")
+    if not parts:
+        return ""
+    summary = "；".join(parts)
+    return f"【你过去{lookback}天的决策成绩单：{summary}。据此校准你的 rescue/prune 倾向，但样本小勿过度反应。】"
+
+
 def judge_select_memories(
     *,
     candidates: list[dict[str, Any]],
@@ -348,13 +375,32 @@ def judge_reflect(
 def judge_evolution_batch(
     *,
     candidates: list[dict[str, Any]],
+    scorecard: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Model-judged periodic review: keep / merge / prune stale memories.
+    """Model-judged periodic review (Karpathy "append-and-review"): rescue /
+    merge / keep / prune stale memories.
 
     Returns a list of decisions:
-    ``[{"memory_id": str, "action": "keep"|"merge"|"prune",
+    ``[{"memory_id": str, "action": "rescue"|"merge"|"keep"|"prune",
        "merge_into": str|None, "importance": float|None,
        "utility": float|None, "reason": str}]``
+
+    - ``rescue`` — still deserves attention: float to top (refresh last_used).
+      This is the core Karpathy review action — "fish through sunk notes and
+      rescue anything that deserves to not leave attention".
+    - ``merge`` — semantic duplicate of another candidate: combine (give
+      merge_into target id; source soft-archived).
+    - ``keep`` — leave as-is; may revise importance/utility.
+    - ``prune`` — truly worthless: soft-retire (recoverable; purged after a
+      TTL). Rare — the default for forgotten notes is to keep sinking, not
+      deletion.
+
+    ``scorecard`` (self-iteration): past-decision outcomes on this DB. When
+    provided, the model reads its own hit rate and self-calibrates (e.g. a
+    high prune-of-accessed rate → be more conservative about pruning accessed
+    memories). Counts are shown alongside rates so small-N doesn't cause
+    overreaction. Feeds the prompt, not learned weights.
+
     Empty list when the judge is unavailable (callers skip this cycle).
     """
     if not candidates or not _judge_enabled():
@@ -364,11 +410,17 @@ def judge_evolution_batch(
         return []
     now = time.time()
     lines = "\n".join(_format_candidate(i + 1, d, now) for i, d in enumerate(candidates))
+    scorecard_line = _format_scorecard(scorecard) if scorecard else ""
     system = (
-        "你是学术助手记忆系统的周期整理器。下列候选是长期未被检索命中的老记忆。"
-        "对每条决定：keep（仍有价值，可一并修正 importance/utility）、"
-        "merge（与另一条语义重复，给出 merge_into 目标 id）、prune（过时/无价值，删除）。"
-        "只输出 JSON：{\"decisions\": [{\"memory_id\": \"...\", \"action\": \"keep|merge|prune\", "
+        "你是学术助手记忆系统的周期 reviewer（参考 Karpathy 的 append-and-review："
+        "记忆默认保留、只下沉，极少删除）。下列候选是长期未被检索命中的老记忆。"
+        "对每条决定：rescue（仍值得注意，上浮到顶——刷新 last_used，优先考虑）、"
+        "merge（与另一条语义重复，给出 merge_into 目标 id，源归档）、"
+        "keep（保留现状，可修正 importance/utility）、"
+        "prune（确实无价值的垃圾，软归档删除——很少用）。"
+        "默认倾向 rescue/keep，prune 仅用于真正无价值的内容。"
+        + scorecard_line +
+        "只输出 JSON：{\"decisions\": [{\"memory_id\": \"...\", \"action\": \"rescue|merge|keep|prune\", "
         "\"merge_into\": null, \"importance\": null, \"utility\": null, \"reason\": \"一句话\"}, ...]}。"
         "id 必须原样取自候选列表，每条候选都要给出决定。"
     )
@@ -389,7 +441,7 @@ def judge_evolution_batch(
             continue
         mid = str(item.get("memory_id") or "")
         action = str(item.get("action") or "").strip().lower()
-        if mid not in valid or action not in ("keep", "merge", "prune"):
+        if mid not in valid or action not in ("rescue", "merge", "keep", "prune"):
             continue
         merge_into = item.get("merge_into")
         decision: dict[str, Any] = {

@@ -203,7 +203,7 @@ def test_evolve_applies_judge_decisions(store, monkeypatch):
 
     monkeypatch.setattr(
         memory_judge, "judge_evolution_batch",
-        lambda *, candidates: [
+        lambda *, candidates, scorecard=None: [
             {"memory_id": doomed, "action": "prune", "merge_into": None, "importance": None, "utility": None, "reason": "已过时"},
             {"memory_id": keeper, "action": "keep", "merge_into": None, "importance": 0.9, "utility": None, "reason": "核心价值"},
             {"memory_id": dup, "action": "merge", "merge_into": target, "importance": None, "utility": None, "reason": "语义重复"},
@@ -219,6 +219,83 @@ def test_evolve_applies_judge_decisions(store, monkeypatch):
     assert keeper_doc["importance"] == pytest.approx(0.9)  # judge revised
     events = {e["event"] for e in store.store.list_evolution_log()}
     assert {"prune", "merge", "keep"} <= events
+
+
+# ---------- self-iteration: judge scorecard ----------
+
+def test_judge_scorecard_aggregates_decision_outcomes(store):
+    """judge_scorecard joins past decisions to later positive outcomes on the
+    same memory_id. rescue → feedback_up/citation_click/engaged_read counts
+    as a hit; prune with access_count_after>0 flags potential over-pruning."""
+    from app.services.memory.memory_judge import _format_scorecard
+
+    rescued_mid = store.add(scope="paper", paper_id=1, kind="long", content="rescued valuable note", importance=0.6)
+    ignored_mid = store.add(scope="paper", paper_id=1, kind="long", content="rescued but ignored note", importance=0.4)
+    pruned_mid = store.add(scope="paper", paper_id=1, kind="long", content="pruned after access", importance=0.3)
+    # rescue both
+    store.store.log_evolution(rescued_mid, "rescue", reason="review")
+    store.store.log_evolution(ignored_mid, "rescue", reason="review")
+    # only the first gets a later positive outcome
+    store.store.log_evolution(rescued_mid, "citation_click", reason="reader cited")
+    # prune with access_count_after > 0 (over-pruning signal)
+    store.store.log_evolution(pruned_mid, "prune", access_count_after=3, reason="review")
+
+    sc = store.store.judge_scorecard(lookback_days=30)
+    assert sc["rescue"]["total"] == 2 and sc["rescue"]["hits"] == 1
+    assert sc["rescue"]["rate"] == 0.5
+    assert sc["prune_of_accessed"]["total"] == 1 and sc["prune_of_accessed"]["count"] == 1
+    assert sc["prune_of_accessed"]["rate"] == 1.0
+
+    # Scorecard renders into a prompt line with counts (so small-N is visible).
+    rendered = _format_scorecard(sc)
+    assert "上浮决策 2 次" in rendered and "其中 1 次后来被实际使用" in rendered
+    assert "归档决策 1 次" in rendered and "偏高说明可能过度删除" in rendered
+
+
+def test_judge_scorecard_empty_returns_empty_render(store):
+    """No decisions in window → empty scorecard → no prompt injection (no
+    spurious self-calibration on a fresh DB)."""
+    from app.services.memory.memory_judge import _format_scorecard
+
+    sc = store.store.judge_scorecard(lookback_days=30)
+    assert sc["rescue"]["total"] == 0
+    assert _format_scorecard(sc) == ""
+
+
+def test_evolve_rescue_floats_forgotten_memory(store, monkeypatch):
+    """Karpathy 'rescue to the top': a stale never-retrieved memory the judge
+    rescues gets its last_used bumped, so the attention sort floats it above
+    other forgotten memories that were merely kept."""
+    forgotten_rescued = store.add(scope="paper", paper_id=1, kind="long",
+                                  content="transformer scaling law details", importance=0.5)
+    forgotten_kept = store.add(scope="paper", paper_id=1, kind="long",
+                               content="recipe for apple pie", importance=0.4)
+    for m in (forgotten_rescued, forgotten_kept):
+        _backdate(store.db_path, m, days=30)
+    # Both stale + never retrieved (access_count=0) → both candidates.
+    # Pre-rescue: neither has last_used, attention order = timestamp DESC.
+    before = [d["memory_id"] for d in store._list_recent_docs(
+        scope="paper", paper_id=1, kinds=["long"], limit_per_kind=10)]
+    assert before[0] in (forgotten_rescued, forgotten_kept)
+
+    monkeypatch.setattr(
+        memory_judge, "judge_evolution_batch",
+        lambda *, candidates, scorecard=None: [
+            {"memory_id": forgotten_rescued, "action": "rescue",
+             "merge_into": None, "importance": None, "utility": None, "reason": "仍值得注意"},
+            {"memory_id": forgotten_kept, "action": "keep",
+             "merge_into": None, "importance": None, "utility": None, "reason": "保留"},
+        ],
+    )
+    stats = evolve_memory_db(db_path=store.db_path)
+    assert stats["rescued"] == 1
+
+    # Rescue bumped last_used → attention sort floats rescued to the top.
+    after = [d["memory_id"] for d in store._list_recent_docs(
+        scope="paper", paper_id=1, kinds=["long"], limit_per_kind=10)]
+    assert after[0] == forgotten_rescued
+    events = {e["event"] for e in store.store.list_evolution_log()}
+    assert "rescue" in events
 
 
 def test_stale_candidates_exclude_singletons_and_fresh(store):
@@ -351,6 +428,64 @@ def test_embedding_invalidated_on_content_change(store):
     store.store.add_memory(user_id="papergraph:paper:1", content="改写 内容", memory_type="short",
                            importance=0.5, memory_id=mid)
     assert store.store.list_embeddings() == {}
+
+
+# ---------- attention sort (Karpathy "position = last touched") ----------
+
+def test_attention_key_pure_function():
+    from app.services.memory.policy import attention_key
+
+    # Never touched: position falls back to timestamp.
+    a = attention_key({"last_used": 0, "timestamp": 100, "utility": 0.0})
+    assert a == (100, 0.0)
+    # Rescued (last_used > 0): position is last_used, floats above timestamp.
+    b = attention_key({"last_used": 500, "timestamp": 100, "utility": 1.0})
+    assert b == (500, 1.0)
+    assert b > a  # rescued ranks above never-touched even though both "created" at 100
+
+
+def test_attention_sort_rescued_floats_above_newer_unaccessed(store):
+    """Among old memories, a rescued one (injected → last_used bumped) floats
+    above a newer-but-never-injected one — Karpathy's 'things sink unless
+    rescued'. (A brand-new append still tops both: position = its timestamp.)
+
+    Contents are topically distinct so the write-conflict judge (CJK bigram
+    overlap) doesn't merge them into one memory.
+    """
+    import sqlite3 as _sqlite
+    import time as _time
+
+    rescued = store.add(scope="paper", paper_id=1, kind="long",
+                        content="transformer attention scale analysis", importance=0.6)
+    newer = store.add(scope="paper", paper_id=1, kind="long",
+                      content="recipe for braised pork belly", importance=0.5)
+    assert rescued != newer  # not merged by write-conflict
+    # Backdate BOTH into the past; newer is more recent than rescued.
+    _backdate(store.db_path, rescued, days=10)
+    _backdate(store.db_path, newer, days=5)
+    # Rescue ONLY the older one: bump last_used to now (as increment_access would).
+    with _sqlite.connect(store.db_path) as conn:
+        conn.execute("UPDATE memories SET last_used = ?, utility = ? WHERE memory_id = ?",
+                     (_time.time(), 1.5, rescued))
+        conn.commit()
+
+    docs = store._list_recent_docs(scope="paper", paper_id=1, kinds=["long"], limit_per_kind=10)
+    ids = [d.get("memory_id") for d in docs]
+    # Rescued (older creation, but touched now) ranks above newer-but-untouched.
+    assert ids.index(rescued) < ids.index(newer)
+
+
+def test_attention_sort_never_touched_falls_back_to_timestamp_desc(store):
+    """Among never-injected memories (last_used=0), newest creation wins —
+    preserves the pre-attention behaviour as the tiebreak."""
+    store.add(scope="paper", paper_id=1, kind="short", content="第一 条", importance=0.5)
+    import time as _time
+    _time.sleep(0.01)
+    second = store.add(scope="paper", paper_id=1, kind="short", content="第二 条", importance=0.5)
+
+    docs = store._list_recent_docs(scope="paper", paper_id=1, kinds=["short"], limit_per_kind=10)
+    ids = [d.get("memory_id") for d in docs]
+    assert ids[0] == second  # newest first
 
 
 def test_delete_memory_cascades_embedding(store):
