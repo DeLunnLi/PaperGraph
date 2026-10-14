@@ -43,6 +43,8 @@
         >
           <canvas
             :ref="(el) => setCanvasElement(item.number, el as HTMLCanvasElement | null)"
+            width="0"
+            height="0"
             class="pdf-canvas"
             :class="{ 'pdf-canvas--ready': item.rendered }"
           />
@@ -103,6 +105,9 @@ let pdfDocument: PDFDocumentProxy | null = null
 let loadingTask: PDFDocumentLoadingTask | null = null
 let observer: IntersectionObserver | null = null
 let loadGeneration = 0
+let renderGeneration = 0
+let renderPaused = false
+let renderStops: Promise<unknown> = Promise.resolve()
 let loadedEmitted = false
 let scrollRaf = 0
 let resizeObserver: ResizeObserver | null = null
@@ -110,6 +115,51 @@ let fitWidthTimer: ReturnType<typeof setTimeout> | null = null
 const pageElements = new Map<number, HTMLElement>()
 const canvasElements = new Map<number, HTMLCanvasElement>()
 const renderTasks = new Map<number, RenderTask>()
+// Keep page layout placeholders, but bound the expensive canvas pixel buffers.
+const retainedCanvases = new Set<number>()
+const visiblePages = new Set<number>()
+const MAX_RETAINED_CANVASES = 8
+const MAX_RETAINED_PIXELS = 16_000_000
+
+const stopRendering = () => {
+  renderGeneration += 1
+  renderPaused = true
+  observer?.disconnect()
+  visiblePages.clear()
+  const pending = [...renderTasks.values()]
+  renderTasks.clear()
+  for (const task of pending) {
+    try { task.cancel() } catch { /* completed task */ }
+  }
+  // Every reset waits for earlier cancellations too. A second zoom must not
+  // reuse a canvas while the first zoom's cancelled render is unwinding.
+  renderStops = Promise.allSettled([renderStops, ...pending.map((task) => task.promise)])
+  return renderStops
+}
+
+const touchCanvas = (page: number) => {
+  retainedCanvases.delete(page)
+  retainedCanvases.add(page)
+}
+const trimCanvases = (protectedPage = currentPage.value) => {
+  const pixels = () => [...retainedCanvases].reduce((total, page) => {
+    const canvas = canvasElements.get(page)
+    return total + (canvas ? canvas.width * canvas.height : 0)
+  }, 0)
+  while (retainedCanvases.size > MAX_RETAINED_CANVASES || pixels() > MAX_RETAINED_PIXELS) {
+    const candidates = [...retainedCanvases].filter((page) => page !== protectedPage && page !== currentPage.value)
+    const victim = candidates.find((page) => !visiblePages.has(page)) ?? candidates[0]
+    if (victim == null) break
+    const canvas = canvasElements.get(victim)
+    if (canvas) {
+      canvas.width = 0
+      canvas.height = 0
+    }
+    const item = pages.value[victim - 1]
+    if (item) item.rendered = false
+    retainedCanvases.delete(victim)
+  }
+}
 
 const normalizePage = (page: number) => {
   const upper = Math.max(1, pageCount.value || 1)
@@ -128,16 +178,24 @@ const setCanvasElement = (page: number, el: HTMLCanvasElement | null) => {
 const renderPage = async (pageNumber: number) => {
   const document = pdfDocument
   const item = pages.value[pageNumber - 1]
-  if (!document || !item || item.rendered || item.rendering) return
-  const generation = loadGeneration
+  if (renderPaused || !document || !item || item.rendering) return
+  if (item.rendered) {
+    touchCanvas(pageNumber)
+    return
+  }
+  const generation = renderGeneration
+  let task: RenderTask | undefined
   item.rendering = true
   try {
     const page = await document.getPage(pageNumber)
-    if (generation !== loadGeneration) return
+    if (generation !== renderGeneration) return
     const viewport = page.getViewport({ scale: scale.value })
     const canvas = canvasElements.get(pageNumber)
     if (!canvas) return
-    const ratio = Math.max(1, Math.min(1.5, window.devicePixelRatio || 1))
+    const ratio = Math.min(
+      Math.max(1, Math.min(1.5, window.devicePixelRatio || 1)),
+      Math.sqrt(MAX_RETAINED_PIXELS / (viewport.width * viewport.height)),
+    )
     canvas.width = Math.ceil(viewport.width * ratio)
     canvas.height = Math.ceil(viewport.height * ratio)
     canvas.style.width = `${Math.ceil(viewport.width)}px`
@@ -145,22 +203,24 @@ const renderPage = async (pageNumber: number) => {
     const context = canvas.getContext('2d')
     if (!context) throw new Error('浏览器无法创建 PDF 画布')
     context.setTransform(ratio, 0, 0, ratio, 0, 0)
-    const task = page.render({ canvasContext: context, viewport })
+    task = page.render({ canvasContext: context, viewport })
     renderTasks.set(pageNumber, task)
     await task.promise
-    if (generation !== loadGeneration) return
+    if (generation !== renderGeneration) return
     item.rendered = true
+    touchCanvas(pageNumber)
+    trimCanvases(pageNumber)
     if (!loadedEmitted && pageNumber === normalizePage(props.page || 1)) {
       loadedEmitted = true
       emit('loaded')
     }
   } catch (e) {
-    if ((e as Error).name !== 'RenderingCancelledException' && generation === loadGeneration) {
+    if ((e as Error).name !== 'RenderingCancelledException' && generation === renderGeneration) {
       error.value = `第 ${pageNumber} 页渲染失败：${(e as Error).message || '未知错误'}`
     }
   } finally {
-    item.rendering = false
-    renderTasks.delete(pageNumber)
+    if (generation === renderGeneration) item.rendering = false
+    if (task && renderTasks.get(pageNumber) === task) renderTasks.delete(pageNumber)
   }
 }
 
@@ -170,11 +230,18 @@ const connectObserver = () => {
   if (!root) return
   observer = new IntersectionObserver(
     (entries) => {
+      if (renderPaused) return
       for (const entry of entries) {
-        if (!entry.isIntersecting) continue
         const page = Number((entry.target as HTMLElement).dataset.page)
-        if (page > 0) void renderPage(page)
+        if (page <= 0) continue
+        if (entry.isIntersecting) {
+          visiblePages.add(page)
+          void renderPage(page)
+        } else {
+          visiblePages.delete(page)
+        }
       }
+      trimCanvases()
     },
     { root, rootMargin: '650px 0px', threshold: 0.01 },
   )
@@ -182,10 +249,13 @@ const connectObserver = () => {
 }
 
 const buildPageLayout = async () => {
-  if (!pdfDocument) return
-  const first = await pdfDocument.getPage(1)
+  const document = pdfDocument
+  const generation = renderGeneration
+  if (!document) return
+  const first = await document.getPage(1)
+  if (generation !== renderGeneration || document !== pdfDocument) return
   const viewport = first.getViewport({ scale: scale.value })
-  pages.value = Array.from({ length: pdfDocument.numPages }, (_, index) => ({
+  pages.value = Array.from({ length: document.numPages }, (_, index) => ({
     number: index + 1,
     width: Math.ceil(viewport.width),
     height: Math.ceil(viewport.height),
@@ -193,39 +263,45 @@ const buildPageLayout = async () => {
     rendering: false,
   }))
   await nextTick()
+  if (generation !== renderGeneration || document !== pdfDocument) return
   connectObserver()
   await gotoPage(props.page || 1, false)
 }
 
 const disposeDocument = async () => {
   loadGeneration += 1
-  observer?.disconnect()
+  const stopped = stopRendering()
   observer = null
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   if (fitWidthTimer) clearTimeout(fitWidthTimer)
   scrollRaf = 0
   fitWidthTimer = null
-  for (const task of renderTasks.values()) {
-    try { task.cancel() } catch { /* completed task */ }
-  }
-  renderTasks.clear()
+  retainedCanvases.clear()
+  visiblePages.clear()
   pageElements.clear()
-  for (const canvas of canvasElements.values()) {
-    canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
-  }
+  const oldCanvases = [...canvasElements.values()]
   canvasElements.clear()
-  try { await loadingTask?.destroy() } catch { /* no-op */ }
+  const oldLoadingTask = loadingTask
+  const oldDocument = pdfDocument
   loadingTask = null
-  if (pdfDocument) {
-    try { await pdfDocument.destroy() } catch { /* no-op */ }
-  }
   pdfDocument = null
   pages.value = []
+  await stopped
+  for (const canvas of oldCanvases) {
+    canvas.width = 0
+    canvas.height = 0
+  }
+  try { await oldLoadingTask?.destroy() } catch { /* no-op */ }
+  if (oldDocument) {
+    try { await oldDocument.destroy() } catch { /* no-op */ }
+  }
 }
 
 const loadDocument = async () => {
   const src = String(props.src || '').trim()
+  const generation = loadGeneration + 1
   await disposeDocument()
+  if (generation !== loadGeneration) return
   error.value = ''
   pageCount.value = 0
   loadedEmitted = false
@@ -242,7 +318,6 @@ const loadDocument = async () => {
   }
 
   loading.value = true
-  const generation = loadGeneration
   try {
     await ensurePdfjs()
     if (generation !== loadGeneration) return
@@ -253,6 +328,7 @@ const loadDocument = async () => {
       return
     }
     pdfDocument = document
+    renderPaused = false
     pageCount.value = document.numPages
     currentPage.value = normalizePage(props.page || 1)
     pageInput.value = currentPage.value
@@ -292,6 +368,8 @@ const updateCurrentPageFromScroll = () => {
     currentPage.value = nearestPage
     pageInput.value = nearestPage
   }
+  trimCanvases()
+  void renderPage(currentPage.value)
 }
 const onStageScroll = () => {
   if (scrollRaf) return
@@ -302,22 +380,38 @@ const onStageScroll = () => {
 }
 
 const rerenderForScale = async () => {
-  for (const task of renderTasks.values()) {
-    try { task.cancel() } catch { /* completed task */ }
-  }
-  renderTasks.clear()
+  const stopped = stopRendering()
+  const generation = renderGeneration
+  retainedCanvases.clear()
+  await stopped
+  if (generation !== renderGeneration) return
   if (!pdfDocument) return
   const first = await pdfDocument.getPage(1)
+  if (generation !== renderGeneration) return
   const viewport = first.getViewport({ scale: scale.value })
+  if (!pages.value.length) {
+    pages.value = Array.from({ length: pdfDocument.numPages }, (_, index) => ({
+      number: index + 1,
+      width: Math.ceil(viewport.width),
+      height: Math.ceil(viewport.height),
+      rendered: false,
+      rendering: false,
+    }))
+  }
   for (const item of pages.value) {
     item.width = Math.ceil(viewport.width)
     item.height = Math.ceil(viewport.height)
     item.rendered = false
     item.rendering = false
     const canvas = canvasElements.get(item.number)
-    if (canvas) canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+    if (canvas) {
+      canvas.width = 0
+      canvas.height = 0
+    }
   }
   await nextTick()
+  if (generation !== renderGeneration) return
+  renderPaused = false
   connectObserver()
   await gotoPage(currentPage.value, false)
 }
@@ -326,8 +420,11 @@ const changeZoom = async (delta: number) => {
   await rerenderForScale()
 }
 const fitWidth = async () => {
-  if (!pdfDocument || !stageRef.value) return
-  const page = await pdfDocument.getPage(currentPage.value)
+  const document = pdfDocument
+  const generation = renderGeneration
+  if (!document || !stageRef.value) return
+  const page = await document.getPage(currentPage.value)
+  if (document !== pdfDocument || generation !== renderGeneration) return
   const natural = page.getViewport({ scale: 1 })
   const available = Math.max(240, stageRef.value.clientWidth - 56)
   const nextScale = Math.max(0.5, Math.min(2.5, Number((available / natural.width).toFixed(2))))

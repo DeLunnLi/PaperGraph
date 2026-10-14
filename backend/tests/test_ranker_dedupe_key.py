@@ -82,7 +82,7 @@ class TestRankedPaperDedupeKey:
 
     def test_supplement_ranked_no_duplicates(self):
         """The supplement path must not add a paper already in the ranked list."""
-        ranker = LlmPaperRanker(recall_max=20, fine_top_k=5)
+        ranker = LlmPaperRanker(recall_max=20, fine_top_k=5, llm=object())
         p1 = _mk(arxiv_id="2401.12345", citations=100, year=2024, source="arxiv")
         p2 = _mk(arxiv_id="arxiv:2401.12345v2", citations=100, year=2024, source="openalex")
         p3 = _mk(doi="10.48550/arXiv.2401.12345", citations=100, year=2024, source="openalex")

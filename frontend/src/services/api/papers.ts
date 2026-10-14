@@ -35,8 +35,11 @@ export async function getPaper(id: number): Promise<Paper> {
   const response = await apiClient.get<Paper>(`/api/papers/${id}`)
   return response.data
 }
-export async function ensurePaperPdf(id: number): Promise<Paper> {
-  const response = await apiClient.post<Paper>(`/api/papers/${id}/ensure-pdf`, undefined, { timeout: 180000 })
+export async function ensurePaperPdf(id: number, options: { signal?: AbortSignal } = {}): Promise<Paper> {
+  const response = await apiClient.post<Paper>(`/api/papers/${id}/ensure-pdf`, undefined, {
+    timeout: 180000,
+    signal: options.signal,
+  })
   return response.data
 }
 export async function savePapers(papers: Paper[], options?: {

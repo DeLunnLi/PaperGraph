@@ -101,18 +101,23 @@ def get_library(
 
         tag_list = [t.strip() for t in tags.split(",")] if tags else None
         cat = (category or "").strip() or None
-        if q or year_from or year_to or read_status or tag_list or cat:
+        filters = dict(
+            query=q,
+            tags=tag_list,
+            year_from=year_from,
+            year_to=year_to,
+            read_status=read_status.value if read_status else None,
+            category=cat,
+            user_id=user_id,
+        )
+        filtered = bool(q or year_from is not None or year_to is not None or read_status or tag_list or cat)
+        if filtered:
             papers_data = db.search_library(
-                query=q,
-                tags=tag_list,
-                year_from=year_from,
-                year_to=year_to,
-                read_status=read_status.value if read_status else None,
-                category=cat,
+                **filters,
                 limit=limit,
                 offset=offset,
-                user_id=user_id,
             )
+            total = db.count_search_library(**filters)
         else:
             papers_data = db.get_all_papers(
                 limit=limit,
@@ -120,6 +125,7 @@ def get_library(
                 order_by="created_at DESC",
                 user_id=user_id,
             )
+            total = db.count_papers(user_id=user_id)
 
         ids_missing_pdf = [
             int(p.id)
@@ -132,9 +138,8 @@ def get_library(
                 if p.id is not None and int(p.id) in repaired:
                     p.local_pdf_path = repaired[int(p.id)]
 
-        total = db.count_papers(user_id=user_id) if not (q or year_from or year_to or read_status or tag_list or cat) else len(papers_data) + (1 if len(papers_data) >= limit else 0)
         papers = [litpaper_to_api_paper_fn(p) for p in papers_data]
-        return PapersResponse(success=True, total=total or len(papers), papers=papers)
+        return PapersResponse(success=True, total=total, papers=papers)
     except Exception as e:
         raise safe_http_500("papers_library_service", e)
 

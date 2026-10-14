@@ -714,28 +714,16 @@ def test_chat_memory_query_slice_disjoint_from_base(store, monkeypatch):
 def test_compress_deletes_only_summarized_batch(store, monkeypatch):
     """Compression must delete exactly the batch the summary covers."""
     monkeypatch.setattr(MemoryStore, "_summarize_via_llm", lambda self, docs: "压缩摘要")
-    monkeypatch.setattr(MemoryStore, "_llm_is_duplicate", lambda self, a, b: False)
-    topics = [
-        "transformer attention", "graph neural citation", "contrastive retrieval",
-        "bayesian uncertainty", "diffusion sampler", "federated gradient",
-        "quantization lora", "retrieval augmented", "citation context",
-        "prompt compression", "rope scaling", "experts routing",
-        "reflection loop", "function calling", "embedding clustering",
-        "temporal reasoning", "vision grounding", "code sandbox",
-        "active learning", "knowledge distillation", "architecture search",
-        "causal inference", "reward modeling", "speculative decoding",
-        "mixture depth", "sparse attention", "kv cache",
-        "beam search", "token healing", "watermark detection",
-    ]
-    for i in range(30):
-        store.add(scope="paper", paper_id=1, kind="working", content=f"{topics[i]} 问题", importance=0.5)
+    for i in range(store.config.working_compress_trigger):
+        store.store.add_memory(
+            user_id="papergraph:paper:1", content=f"问题 {i}", memory_type="working", timestamp=i,
+        )
     before = len(_docs(store, kinds=("working",)))
-    assert before >= 26
-    store.compress_working(scope="paper", paper_id=1, min_entries=6)
+    assert store.compress_working(scope="paper", paper_id=1) == "compressed"
     after = len(_docs(store, kinds=("working",)))
-    assert before - after == store.config.working_compress_batch  # exactly one batch
+    assert before - after == store.config.working_compress_batch
     logs = [e for e in store.store.list_evolution_log() if e["event"] == "prune"]
-    assert len(logs) == store.config.working_compress_batch  # every deletion logged
+    assert len(logs) == store.config.working_compress_batch
 
 
 def test_ttl_sweep_logs_prune(store, monkeypatch):

@@ -102,6 +102,10 @@ class Settings(BaseSettings):
         le=5,
         description="默认重试次数（不含首轮）",
     )
+    agent_runtime_max_concurrency: int = Field(
+        default=8, ge=1, le=64,
+        description="有超时限制的模型任务最大并发数；等待执行名额计入任务时限",
+    )
 
     papergraph_intent_parse_max_retries: int = Field(
         default=2,

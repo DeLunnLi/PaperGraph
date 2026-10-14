@@ -270,7 +270,7 @@
           </div>
         </div>
         <div v-else class="kb__trace-detail">
-          <a-button size="small" type="link" @click="activeTrace = null">← 返回会话列表</a-button>
+          <a-button size="small" type="link" @click="closeTrace">← 返回会话列表</a-button>
           <div v-for="(ev, i) in activeTraceEvents" :key="i" class="kb__trace-event">
             <div class="kb__trace-event-head">
               <span class="kb__trace-event-name">{{ ev.event }}</span>
@@ -285,7 +285,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   DatabaseOutlined,
   ThunderboltOutlined,
@@ -293,6 +293,8 @@ import {
   SyncOutlined,
 } from '@ant-design/icons-vue'
 import AButton from 'ant-design-vue/es/button'
+import ADrawer from 'ant-design-vue/es/drawer'
+import ASpace from 'ant-design-vue/es/space'
 import ASelect, { SelectOption as ASelectOption } from 'ant-design-vue/es/select'
 import ASpin from 'ant-design-vue/es/spin'
 import ATag from 'ant-design-vue/es/tag'
@@ -324,6 +326,11 @@ const loadingTraces = ref(false)
 const traceSessions = ref<TraceSession[]>([])
 const activeTrace = ref<string | null>(null)
 const activeTraceEvents = ref<TraceEvent[]>([])
+let memoriesRequestSeq = 0
+let evolutionRequestSeq = 0
+let statsRequestSeq = 0
+let traceRequestSeq = 0
+let paperOptionsRequestSeq = 0
 
 const avgUtility = computed(() => {
   if (!stats.value) return '—'
@@ -331,21 +338,12 @@ const avgUtility = computed(() => {
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}`
 })
 
-// 7 天活动趋势：由 evolution 时间线条目按天聚合（客户端计算）
+// The stats endpoint aggregates every event by calendar day in the user's time zone.
 const dailyActivity = computed(() => {
-  const days: { label: string; count: number; pct: number }[] = []
-  const now = new Date()
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date(now.getTime() - i * 86400000)
-    const key = `${d.getMonth() + 1}/${d.getDate()}`
-    days.push({ label: key, count: 0, pct: 0 })
-  }
-  const dayMs = 86400000
-  for (const e of evolution.value) {
-    const age = Date.now() / 1000 - (e.created_at || 0)
-    const idx = 6 - Math.floor(age / dayMs)
-    if (idx >= 0 && idx <= 6) days[idx].count += 1
-  }
+  const days = (stats.value?.activity_7d || []).map((day) => {
+    const [, month, date] = day.date.split('-')
+    return { label: `${Number(month)}/${Number(date)}`, count: day.count, pct: 0 }
+  })
   const max = Math.max(1, ...days.map((d) => d.count))
   for (const d of days) d.pct = d.count ? Math.max(8, Math.round((d.count / max) * 100)) : 0
   return days
@@ -433,14 +431,17 @@ const eventLabel = (event: string): string => {
 }
 
 const loadStats = async () => {
+  const requestSeq = ++statsRequestSeq
   try {
-    stats.value = await getKnowledgeStats()
+    const res = await getKnowledgeStats()
+    if (requestSeq === statsRequestSeq) stats.value = res
   } catch {
-    stats.value = null
+    if (requestSeq === statsRequestSeq) stats.value = null
   }
 }
 
 const loadMemories = async () => {
+  const requestSeq = ++memoriesRequestSeq
   loadingMemories.value = true
   try {
     const res = await getKnowledgeMemories({
@@ -450,11 +451,11 @@ const loadMemories = async () => {
       sort: sort.value,
       limit: 100,
     })
-    memories.value = res.items || []
+    if (requestSeq === memoriesRequestSeq) memories.value = res.items || []
   } catch {
-    memories.value = []
+    if (requestSeq === memoriesRequestSeq) memories.value = []
   } finally {
-    loadingMemories.value = false
+    if (requestSeq === memoriesRequestSeq) loadingMemories.value = false
   }
 }
 
@@ -471,9 +472,11 @@ const filterPaperOption = (input: string, option: { label?: string }) =>
 
 let paperOptionsLoaded = false
 const loadPaperOptions = async () => {
+  const requestSeq = ++paperOptionsRequestSeq
   paperOptionsLoaded = true
   try {
     const res = await getKnowledgeMemories({ scope: 'paper', sort: 'recency', limit: 500 })
+    if (requestSeq !== paperOptionsRequestSeq) return
     const seen = new Map<number, string>()
     for (const m of res.items || []) {
       if (m.paper_id && !seen.has(m.paper_id)) {
@@ -482,48 +485,73 @@ const loadPaperOptions = async () => {
     }
     paperOptions.value = [...seen.entries()].map(([id, title]) => ({ id, title }))
   } catch {
-    paperOptions.value = []
+    if (requestSeq === paperOptionsRequestSeq) {
+      paperOptions.value = []
+      paperOptionsLoaded = false
+    }
   }
 }
 
 const loadEvolution = async () => {
+  const requestSeq = ++evolutionRequestSeq
   loadingEvolution.value = true
   try {
     const res = await getKnowledgeEvolution(50)
-    evolution.value = res.items || []
+    if (requestSeq === evolutionRequestSeq) evolution.value = res.items || []
   } catch {
-    evolution.value = []
+    if (requestSeq === evolutionRequestSeq) evolution.value = []
   } finally {
-    loadingEvolution.value = false
+    if (requestSeq === evolutionRequestSeq) loadingEvolution.value = false
   }
 }
 
 const openTraces = async () => {
+  const requestSeq = ++traceRequestSeq
   tracesOpen.value = true
   activeTrace.value = null
+  activeTraceEvents.value = []
   loadingTraces.value = true
   try {
     const res = await getTraceSessions(100)
-    traceSessions.value = res.sessions || []
+    if (requestSeq === traceRequestSeq) traceSessions.value = res.sessions || []
   } catch {
-    traceSessions.value = []
+    if (requestSeq === traceRequestSeq) traceSessions.value = []
   } finally {
-    loadingTraces.value = false
+    if (requestSeq === traceRequestSeq) loadingTraces.value = false
   }
 }
 
 const openTrace = async (sessionId: string) => {
+  const requestSeq = ++traceRequestSeq
   activeTrace.value = sessionId
+  activeTraceEvents.value = []
   loadingTraces.value = true
   try {
     const res = await getTraceEvents(sessionId, 500)
-    activeTraceEvents.value = res.events || []
+    if (requestSeq === traceRequestSeq) activeTraceEvents.value = res.events || []
   } catch {
-    activeTraceEvents.value = []
+    if (requestSeq === traceRequestSeq) activeTraceEvents.value = []
   } finally {
-    loadingTraces.value = false
+    if (requestSeq === traceRequestSeq) loadingTraces.value = false
   }
 }
+
+const closeTrace = () => {
+  traceRequestSeq += 1
+  activeTrace.value = null
+  activeTraceEvents.value = []
+  loadingTraces.value = false
+}
+watch(tracesOpen, (open) => {
+  if (!open) closeTrace()
+})
+onBeforeUnmount(() => {
+  memoriesRequestSeq += 1
+  evolutionRequestSeq += 1
+  statsRequestSeq += 1
+  traceRequestSeq += 1
+  paperOptionsRequestSeq += 1
+})
 
 const payloadPreview = (payload: Record<string, unknown>): string => {
   try {

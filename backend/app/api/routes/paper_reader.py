@@ -19,7 +19,7 @@ from ...services.reader.paper_reader_service import PaperReaderService
 router = APIRouter(prefix="/ai", tags=["AI 分析"])
 
 
-def get_paper_reader_service() -> PaperReaderService:
+def get_paper_reader_service(user: dict = Depends(require_user)) -> PaperReaderService:
     db = get_database()
     return PaperReaderService(db=db)
 

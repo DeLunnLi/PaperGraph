@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import threading
+from copy import deepcopy
 from typing import Optional
 
 from cachetools import TTLCache
@@ -141,15 +143,19 @@ class IntentParser:
         if not msg:
             return SearchIntent()
 
-        cache_key = (msg.lower()[:200], (profile or "accuracy").strip().lower())
+        # Include the complete input: qualifiers such as years can occur after
+        # a long shared prefix. Keep cached plans isolated from later ranking
+        # and source-selection mutations by copying on both write and read.
+        prof = self._agent._normalize_profile(profile)
+        cache_key = (hashlib.sha256(msg.lower().encode("utf-8")).hexdigest(), prof)
         with _INTENT_CACHE_LOCK:
             cached = _INTENT_CACHE.get(cache_key)
         if cached is not None:
-            return cached
+            return deepcopy(cached)
 
-        intent = self._parse_with_retry(msg, profile)
+        intent = self._parse_with_retry(msg, prof)
         with _INTENT_CACHE_LOCK:
-            _INTENT_CACHE[cache_key] = intent
+            _INTENT_CACHE[cache_key] = deepcopy(intent)
         return intent
 
     def _parse_with_retry(self, msg: str, profile: str) -> SearchIntent:

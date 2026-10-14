@@ -599,7 +599,7 @@ class PaperDatabase:
             if user_id is not None:
                 query += " WHERE user_id = ?"
                 params.append(int(user_id))
-            query += f" ORDER BY {order_by}"
+            query += f" ORDER BY {order_by}, id DESC"
             # SQLite rejects `OFFSET` without a preceding `LIMIT`, so an
             # offset-only call (limit defaults to None) used to raise
             # OperationalError. `LIMIT -1` is SQLite's "no limit" sentinel.
@@ -635,6 +635,107 @@ class PaperDatabase:
             authors_map = self._fetch_authors_for_papers(conn, [paper_id])
         return self._row_to_paper_fast(row, authors_map.get(paper_id, []))
 
+    def _library_filter_sql(
+        self,
+        query: str | None = None,
+        tags: list[str] | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        read_status: str | None = None,
+        category: str | None = None,
+        user_id: int | None = None,
+    ) -> tuple[str, list[Any]]:
+        """Build the shared predicate for library pages and their exact count."""
+        clauses: list[str] = ["1=1"]
+        params: list[Any] = []
+        if user_id is not None:
+            clauses.append("p.user_id = ?")
+            params.append(int(user_id))
+        use_fts = False
+        match_expr = ""
+        clean_query = ""
+
+        if query and str(query).strip():
+            clean_query = re.sub(r'["\'*^]', " ", str(query)).strip()
+            if clean_query and self._library_fts_ready:
+                parts = [w for w in clean_query.split() if w.strip()]
+                if parts:
+                    match_expr = " AND ".join(f'"{w}"' for w in parts)
+                    use_fts = True
+
+        if use_fts:
+            clauses.append(
+                "(p.id IN (SELECT rowid FROM papers_fts WHERE papers_fts MATCH ?)"
+                " OR p.id IN (SELECT pa.paper_id FROM paper_authors pa JOIN authors a ON pa.author_id = a.id WHERE a.name LIKE ?))"
+            )
+            params.extend([match_expr, f"%{clean_query}%"])
+        elif query and str(query).strip():
+            clauses.append("(p.title LIKE ? OR p.abstract LIKE ? OR p.id IN (SELECT pa.paper_id FROM paper_authors pa JOIN authors a ON pa.author_id = a.id WHERE a.name LIKE ?))")
+            like = f"%{str(query).strip()}%"
+            params.extend([like, like, like])
+
+        if category:
+            cat = category.strip()
+            if cat.endswith("/*"):
+                prefix = cat[:-2].strip()
+                if prefix == "未分类":
+                    clauses.append(
+                        "(p.category IS NULL OR TRIM(COALESCE(p.category, '')) IN ('', '未分类') "
+                        "OR TRIM(COALESCE(p.category, '')) LIKE '未分类/%')"
+                    )
+                elif prefix:
+                    clauses.append(
+                        "(TRIM(COALESCE(p.category, '')) = ? OR TRIM(COALESCE(p.category, '')) LIKE ?)"
+                    )
+                    params.extend([prefix, prefix + "/%"])
+            elif cat == "未分类":
+                clauses.append(
+                    "(p.category IS NULL OR TRIM(COALESCE(p.category, '')) IN ('', '未分类'))"
+                )
+            else:
+                clauses.append("TRIM(COALESCE(p.category, '')) = ?")
+                params.append(cat)
+
+        if year_from is not None:
+            clauses.append("(p.year IS NOT NULL AND p.year >= ?)")
+            params.append(year_from)
+        if year_to is not None:
+            clauses.append("(p.year IS NOT NULL AND p.year <= ?)")
+            params.append(year_to)
+        if read_status:
+            clauses.append("p.read_status = ?")
+            params.append(read_status)
+        if tags:
+            # Match any requested tag, with the same case-sensitive equality
+            # as the former Python set intersection. Guard malformed JSON and
+            # non-array legacy values before feeding them to json_each.
+            placeholders = ",".join("?" for _ in tags)
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each("
+                "CASE WHEN json_valid(p.tags) THEN "
+                "CASE WHEN json_type(p.tags) = 'array' THEN p.tags ELSE '[]' END "
+                "ELSE '[]' END) AS tag "
+                f"WHERE tag.type = 'text' AND tag.value COLLATE BINARY IN ({placeholders}))"
+            )
+            params.extend(tags)
+        return " AND ".join(clauses), params
+
+    def count_search_library(
+        self,
+        query: str | None = None,
+        tags: list[str] | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        read_status: str | None = None,
+        category: str | None = None,
+        user_id: int | None = None,
+    ) -> int:
+        where, params = self._library_filter_sql(
+            query=query, tags=tags, year_from=year_from, year_to=year_to,
+            read_status=read_status, category=category, user_id=user_id,
+        )
+        return int(self._query(f"SELECT COUNT(*) FROM papers p WHERE {where}", params, fetch="one")[0])
+
     def search_library(
         self,
         query: str | None = None,
@@ -647,77 +748,13 @@ class PaperDatabase:
         offset: int = 0,
         user_id: int | None = None,
     ) -> list[Paper]:
+        where, params = self._library_filter_sql(
+            query=query, tags=tags, year_from=year_from, year_to=year_to,
+            read_status=read_status, category=category, user_id=user_id,
+        )
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            clauses: list[str] = ["1=1"]
-            params: list[Any] = []
-            if user_id is not None:
-                clauses.append("p.user_id = ?")
-                params.append(int(user_id))
-            use_fts = False
-            match_expr = ""
-            clean_query = ""
-
-            if query and str(query).strip():
-                clean_query = re.sub(r'["\'*^]', " ", str(query)).strip()
-                if clean_query and self._library_fts_ready:
-                    parts = [w for w in clean_query.split() if w.strip()]
-                    if parts:
-                        match_expr = " AND ".join(f'"{w}"' for w in parts)
-                        use_fts = True
-
-            if use_fts:
-                base_from = "papers p"
-                clauses.append(
-                    "(p.id IN (SELECT rowid FROM papers_fts WHERE papers_fts MATCH ?)"
-                    " OR p.id IN (SELECT pa.paper_id FROM paper_authors pa JOIN authors a ON pa.author_id = a.id WHERE a.name LIKE ?))"
-                )
-                params.append(match_expr)
-                like_author = f"%{clean_query}%"
-                params.append(like_author)
-            elif query and str(query).strip():
-                clauses.append("(p.title LIKE ? OR p.abstract LIKE ? OR p.id IN (SELECT pa.paper_id FROM paper_authors pa JOIN authors a ON pa.author_id = a.id WHERE a.name LIKE ?))")
-                like = f"%{str(query).strip()}%"
-                params.extend([like, like, like])
-                base_from = "papers p"
-            else:
-                base_from = "papers p"
-
-            if category:
-                cat = category.strip()
-                if cat.endswith("/*"):
-                    prefix = cat[:-2].strip()
-                    if prefix == "未分类":
-                        clauses.append(
-                            "(p.category IS NULL OR TRIM(COALESCE(p.category, '')) IN ('', '未分类') "
-                            "OR TRIM(COALESCE(p.category, '')) LIKE '未分类/%')"
-                        )
-                    elif prefix:
-                        clauses.append(
-                            "(TRIM(COALESCE(p.category, '')) = ? OR TRIM(COALESCE(p.category, '')) LIKE ?)"
-                        )
-                        params.extend([prefix, prefix + "/%"])
-                elif cat == "未分类":
-                    clauses.append(
-                        "(p.category IS NULL OR TRIM(COALESCE(p.category, '')) IN ('', '未分类'))"
-                    )
-                else:
-                    clauses.append("TRIM(COALESCE(p.category, '')) = ?")
-                    params.append(cat)
-
-            if year_from is not None:
-                clauses.append("(p.year IS NOT NULL AND p.year >= ?)")
-                params.append(year_from)
-            if year_to is not None:
-                clauses.append("(p.year IS NOT NULL AND p.year <= ?)")
-                params.append(year_to)
-            if read_status:
-                clauses.append("p.read_status = ?")
-                params.append(read_status)
-
-            order_clause = "ORDER BY p.created_at DESC"
-
-            sql = f"SELECT p.* FROM {base_from} WHERE {' AND '.join(clauses)} {order_clause} LIMIT ?"
+            sql = f"SELECT p.* FROM papers p WHERE {where} ORDER BY p.created_at DESC, p.id DESC LIMIT ?"
             params.append(int(limit))
             if offset:
                 sql += " OFFSET ?"
@@ -728,11 +765,7 @@ class PaperDatabase:
                 return []
             paper_ids = [int(r["id"]) for r in rows]
             authors_map = self._fetch_authors_for_papers(conn, paper_ids)
-            papers = [self._row_to_paper_fast(row, authors_map.get(int(row["id"]), [])) for row in rows]
-            if tags:
-                tag_set = set(tags)
-                papers = [p for p in papers if tag_set.intersection(set(p.tags))]
-            return papers
+            return [self._row_to_paper_fast(row, authors_map.get(int(row["id"]), [])) for row in rows]
 
     def update_paper(self, paper_id: int, user_id: int, **fields) -> bool:
         allowed = {"notes", "tags", "rating", "read_status", "importance", "category", "abstract"}

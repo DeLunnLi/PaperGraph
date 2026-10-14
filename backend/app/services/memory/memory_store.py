@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any
 
@@ -12,6 +13,9 @@ from .sqlite_document_store_compat import SQLiteDocumentStore
 logger = logging.getLogger(__name__)
 
 class MemoryStore:
+
+    _compression_guard = threading.Lock()
+    _compressions_in_flight: set[tuple[str, str]] = set()
 
     def __init__(self, db_path: str, config: Any | None = None) -> None:
         # Reader memory uses synthetic papergraph:* identities and therefore must
@@ -229,16 +233,7 @@ class MemoryStore:
         self._maybe_link(result, content, scope=scope, paper_id=paper_id, kind=kind)
 
         if kind == "working":
-            working_docs = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=["working"], limit_per_kind=100)
-            if len(working_docs) > pol.working_compress_trigger:
-                working_docs.sort(key=lambda d: self._ts_of(d), reverse=True)
-                to_compress = working_docs[pol.working_compress_keep_head : pol.working_compress_keep_head + pol.working_compress_batch]
-                if to_compress:
-                    compressed = self._summarize_via_llm(to_compress)
-                    if compressed:
-                        # Delete exactly the batch that was summarized
-                        self._delete_docs(to_compress, reason="working 超限压缩")
-                        self.add(scope=scope, paper_id=paper_id, kind="long", content=compressed, importance=0.6)
+            self.compress_working(scope=scope, paper_id=paper_id)
 
         return result
 
@@ -315,21 +310,47 @@ class MemoryStore:
             logger.debug("memory_store._summarize_via_llm failed", exc_info=True)
             return ""
 
-    def compress_working(self, *, scope: str = "paper", paper_id: int | None = None, min_entries: int = 6) -> str:
-        entries = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=["working"], limit_per_kind=999)
-        if len(entries) < min_entries:
-            return "not enough entries to compress"
+    def compress_working(self, *, scope: str = "paper", paper_id: int | None = None, min_entries: int | None = None) -> str:
+        """Summarize one old batch, sharing the policy across both entry paths.
 
-        to_compress = entries[5 : 5 + int(self.config.working_compress_batch)]
-        if not to_compress:
-            return "nothing to compress"
-        compressed = self._summarize_via_llm(to_compress)
-        if not compressed:
+        The optional legacy threshold can only raise the policy threshold.
+        Concurrent requests for the same DB/scope join the in-flight work
+        instead of paying for another summary of the same entries.
+        """
+        user_id = self._user_id_for(scope, paper_id)
+        key = (os.path.realpath(self.db_path), user_id)
+        with self._compression_guard:
+            if key in self._compressions_in_flight:
+                return "compression in progress"
+            self._compressions_in_flight.add(key)
+        try:
+            pol = self.config
+            threshold = max(int(pol.working_compress_trigger), int(min_entries or 0))
+            batch = max(1, int(pol.working_compress_batch))
+            keep = max(0, int(pol.working_compress_keep_head))
+            required = max(threshold, keep + batch)
+            entries = self.store.search_memories(
+                user_id=user_id, memory_type="working", limit=required, oldest_first=True,
+            )
+            if len(entries) < required:
+                return "not enough entries to compress"
+            # Keep the newest head and summarize the oldest full batch, even
+            # when a backlog is larger than the trigger (bounded SQL read).
+            to_compress = entries[:batch]
+            compressed = self._summarize_via_llm(to_compress)
+            if not compressed:
+                return "compression failed"
+            mid = self.store.archive_with_summary(
+                to_compress, user_id=user_id, content=compressed,
+                properties=self._properties(scope, paper_id, "long", {}),
+            )
+            return "compressed" if mid else "compression inputs changed"
+        except Exception:
+            logger.debug("memory_store.compress_working failed", exc_info=True)
             return "compression failed"
-        # Delete exactly the batch that was summarized — never more (silent loss)
-        self._delete_docs(to_compress, reason="working 压缩为长期记忆")
-        self.add(scope=scope, paper_id=paper_id, kind="long", content=compressed, importance=0.6)
-        return "compressed"
+        finally:
+            with self._compression_guard:
+                self._compressions_in_flight.discard(key)
 
 
 
@@ -358,17 +379,6 @@ class MemoryStore:
             if len(contents) >= limit:
                 break
         return contents
-
-    def _collect_candidate_docs(
-        self, *, scope: str, paper_id: int | None, kinds: list[str], limit_per_kind: int, label: str
-    ) -> list[tuple[str, dict[str, Any]]]:
-        """Fetch recent docs and project them onto ``(label, doc)`` pairs."""
-        return [
-            (label, doc)
-            for doc in self._list_recent_docs(
-                scope=scope, paper_id=paper_id, kinds=kinds, limit_per_kind=limit_per_kind,
-            )
-        ]
 
     def _rank_with_judge(
         self,
@@ -441,43 +451,56 @@ class MemoryStore:
                     if self.store.delete_memory(_mid):
                         self.store.log_evolution(_mid, "prune", reason="working TTL 过期")
 
-        # Bucketed candidate gathering keeps kind diversity; quotas sum to ≤
-        # the judge candidate cap (24) so no bucket is truncated away —
-        # working (the freshest Q&A context) must always reach the judge.
-        buckets: list[tuple[str, dict[str, Any]]] = []
-        buckets += self._collect_candidate_docs(
-            scope="global", paper_id=None, kinds=["preference"], limit_per_kind=3, label="preference",
-        )
-        buckets += self._collect_candidate_docs(
-            scope="global", paper_id=None, kinds=["reflection"], limit_per_kind=3, label="洞察",
-        )
-        buckets += self._collect_candidate_docs(
-            scope="paper", paper_id=paper_id, kinds=["paper_summary", "long"], limit_per_kind=4, label="long",
-        )
-        buckets += self._collect_candidate_docs(
-            scope="paper", paper_id=paper_id, kinds=["short", "working"], limit_per_kind=4, label="working",
-        )
-        label_of: dict[str, str] = {}
-        docs: list[dict[str, Any]] = []
-        for label, doc in buckets:
-            mid = self._memory_id_of(doc)
-            if mid:
-                label_of[mid] = label
-                docs.append(doc)
-        # Semantic recall bucket: long-tail memories the recency buckets miss.
-        # Prepended so the judge's candidate cap can't truncate them away
-        # (they carry the query-relevance signal recency docs lack).
+        # Allocate inside the actual judge cap. Reserve recent short/working
+        # slots first, then distribute the remaining budget among the other
+        # buckets; semantic recall must never push recent questions out.
+        from ...settings import get_settings
+
+        pol = self.config
+        cap = max(4, int(get_settings().memory_judge_max_candidates))
+        recent_quota = max(1, int(pol.recent_candidates_per_kind))
+        groups: list[tuple[str, list[dict[str, Any]]]] = []
+        for scope, pid, kind, quota, label in [
+            ("paper", paper_id, "working", recent_quota, "working"),
+            ("paper", paper_id, "short", recent_quota, "working"),
+            ("global", None, "preference", int(pol.global_candidates_per_kind), "preference"),
+            ("global", None, "reflection", int(pol.global_candidates_per_kind), "洞察"),
+            ("paper", paper_id, "paper_summary", recent_quota, "long"),
+            ("paper", paper_id, "long", recent_quota, "long"),
+        ]:
+            groups.append((label, self._list_recent_docs(
+                scope=scope, paper_id=pid, kinds=[kind], limit_per_kind=quota,
+            )))
         recall_hint = (query or "").strip() or (context_hint or "").strip()
         if recall_hint:
-            recalled_docs: list[dict[str, Any]] = []
-            # Cap recalled docs so the union pool stays within the judge's
-            # candidate cap (recall 6 + buckets 18 = 24).
-            for doc in self._semantic_recall_docs(paper_id=paper_id, query=recall_hint, exclude_ids=set(label_of))[:6]:
+            gathered_ids = {self._memory_id_of(doc) for _, group in groups for doc in group}
+            recalled = self._semantic_recall_docs(paper_id=paper_id, query=recall_hint, exclude_ids=gathered_ids)
+            groups.insert(2, ("recalled", recalled[:max(0, int(pol.semantic_candidates))]))
+
+        label_of: dict[str, str] = {}
+        docs: list[dict[str, Any]] = []
+
+        def take_one(group: tuple[str, list[dict[str, Any]]]) -> bool:
+            label, candidates = group
+            while candidates and len(docs) < cap:
+                doc = candidates.pop(0)
                 mid = self._memory_id_of(doc)
-                if mid:
-                    label_of[mid] = "recalled"
-                    recalled_docs.append(doc)
-            docs = recalled_docs + docs
+                if not mid or mid in label_of or not self._content_of(doc):
+                    continue
+                label_of[mid] = label
+                docs.append(doc)
+                return True
+            return False
+
+        for _ in range(min(recent_quota, cap // 2)):
+            for group in groups[:2]:
+                take_one(group)
+        while len(docs) < cap:
+            added = False
+            for group in groups[2:] + groups[:2]:
+                added = take_one(group) or added
+            if not added:
+                break
 
         max_items = int(self.config.max_context_items) + max(1, int(query_limit))
         ranked = self._rank_with_judge(

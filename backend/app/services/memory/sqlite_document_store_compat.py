@@ -234,6 +234,59 @@ class SQLiteDocumentStore:
             finally:
                 conn.close()
 
+    def archive_with_summary(
+        self, docs: list[dict[str, Any]], *, user_id: str, content: str,
+        properties: dict[str, Any],
+    ) -> str:
+        """Persist a summary and retire its unchanged inputs atomically.
+
+        The model runs outside the transaction. Recheck its source snapshots
+        under a write lock so a concurrent edit cannot be lost to an obsolete
+        summary. Any insert/archive/log failure rolls back the entire batch.
+        """
+        originals = {str(d["memory_id"]): str(d.get("content") or "") for d in docs}
+        if not originals or not content.strip():
+            return ""
+        ids = list(originals)
+        placeholders = ",".join("?" * len(ids))
+        now, mid = time.time(), uuid.uuid4().hex
+        props = dict(properties, compressed_memory_ids=ids)
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    f"SELECT memory_id, content, utility, importance, access_count FROM memories "
+                    f"WHERE memory_id IN ({placeholders}) AND user_id = ? "
+                    "AND memory_type = 'working' AND deleted_at = 0",
+                    (*ids, user_id),
+                ).fetchall()
+                if {str(r[0]): str(r[1]) for r in rows} != originals:
+                    conn.rollback()
+                    return ""
+                conn.execute(
+                    "INSERT INTO memories (memory_id, user_id, content, memory_type, importance, "
+                    "properties, timestamp, created_at, updated_at) VALUES (?, ?, ?, 'long', 0.6, ?, ?, ?, ?)",
+                    (mid, user_id, content, json.dumps(props, ensure_ascii=False), now, now, now),
+                )
+                conn.execute(
+                    f"UPDATE memories SET deleted_at = ?, updated_at = ? WHERE memory_id IN ({placeholders})",
+                    (now, now, *ids),
+                )
+                conn.execute(f"DELETE FROM memory_embeddings WHERE memory_id IN ({placeholders})", ids)
+                conn.executemany(
+                    "INSERT INTO memory_evolution_log (memory_id, event, utility_after, importance_after, "
+                    "access_count_after, reason, created_at) VALUES (?, 'prune', ?, ?, ?, ?, ?)",
+                    [(r[0], r[2], r[3], r[4], "working 压缩为长期记忆", now) for r in rows],
+                )
+                conn.commit()
+                return mid
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
     def purge_deleted(self, before_days: int = 30) -> int:
         """Hard-delete memories soft-deleted more than ``before_days`` ago.
 
@@ -369,9 +422,10 @@ class SQLiteDocumentStore:
         self,
         user_id: str,
         memory_type: str = "",
-        limit: int = 10,
+        limit: int | None = 10,
         *,
         include_deleted: bool = False,
+        oldest_first: bool = False,
     ) -> List[Dict[str, Any]]:
         where = "WHERE user_id = ?"
         params: list[Any] = [user_id]
@@ -379,7 +433,7 @@ class SQLiteDocumentStore:
             where += " AND memory_type = ?"
             params.append(memory_type)
         return self._select_memories(
-            where, params, order_by="timestamp DESC, updated_at DESC", limit=limit,
+            where, params, order_by=("timestamp ASC, updated_at ASC" if oldest_first else "timestamp DESC, updated_at DESC"), limit=limit,
             include_deleted=include_deleted,
         )
 
@@ -447,14 +501,85 @@ class SQLiteDocumentStore:
         return [self._row_to_doc(row) for row in rows]
 
     def list_all_memories(
-        self, *, memory_type: str = "", limit: int = 1000, include_deleted: bool = False,
+        self, *, memory_type: str = "", limit: int | None = 1000, include_deleted: bool = False,
+        scope: str = "all", paper_id: int | None = None, sort: str = "recency",
     ) -> List[Dict[str, Any]]:
         """List memories across all user scopes (knowledge-base page)."""
-        where = "WHERE memory_type = ?" if memory_type else ""
-        params: list[Any] = [memory_type] if memory_type else []
+        where, params = self._memory_filters(scope=scope, paper_id=paper_id, memory_type=memory_type)
+        column = {"recency": "timestamp", "access": "access_count", "utility": "utility", "importance": "importance"}[sort]
+        default = 0.5 if sort == "importance" else 0
         return self._select_memories(
-            where, params, order_by="timestamp DESC", limit=limit, include_deleted=include_deleted,
+            where, params, order_by=f"COALESCE({column}, {default}) DESC, timestamp DESC, memory_id DESC",
+            limit=limit, include_deleted=include_deleted,
         )
+
+    @staticmethod
+    def _memory_filters(*, scope: str = "all", paper_id: int | None = None, memory_type: str = "") -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if memory_type:
+            clauses.append("memory_type = ?")
+            params.append(memory_type)
+        if scope == "global":
+            clauses.append("user_id = 'papergraph:global'")
+        elif scope == "paper":
+            if paper_id is None:
+                clauses.append("user_id LIKE 'papergraph:paper:%'")
+            else:
+                clauses.append("user_id = ?")
+                params.append(f"papergraph:paper:{int(paper_id)}")
+        elif scope == "agent":
+            clauses.append("user_id != 'papergraph:global' AND user_id NOT LIKE 'papergraph:paper:%'")
+        elif scope != "all":
+            raise ValueError(f"Unknown memory scope: {scope}")
+        return ("WHERE " + " AND ".join(clauses) if clauses else ""), params
+
+    def count_memories(self, *, scope: str = "all", paper_id: int | None = None, memory_type: str = "") -> int:
+        where, params = self._memory_filters(scope=scope, paper_id=paper_id, memory_type=memory_type)
+        where += " AND deleted_at = 0" if where else "WHERE deleted_at = 0"
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                return int(conn.execute(f"SELECT COUNT(*) FROM memories {where}", params).fetchone()[0])
+            finally:
+                conn.close()
+
+    def memory_statistics(self) -> Dict[str, Any]:
+        """Aggregate every live memory without loading/truncating content."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(utility), 0), COALESCE(SUM(access_count), 0), "
+                    "COALESCE(SUM(utility < -0.05), 0), "
+                    "COALESCE(SUM(COALESCE(utility, 0) BETWEEN -0.05 AND 0.05), 0), "
+                    "COALESCE(SUM(utility > 0.05), 0) FROM memories WHERE deleted_at = 0"
+                ).fetchone()
+                kinds = conn.execute(
+                    "SELECT memory_type, COUNT(*) FROM memories WHERE deleted_at = 0 GROUP BY memory_type"
+                ).fetchall()
+            finally:
+                conn.close()
+        return {
+            "total": int(row[0]), "utility_sum": float(row[1]), "total_accesses": int(row[2]),
+            "by_kind": {str(kind): int(n) for kind, n in kinds},
+            "utility_distribution": dict(zip(("negative", "neutral", "positive"), map(int, row[3:]))),
+        }
+
+    def evolution_day_counts(self, day_ranges: list[tuple[str, float, float]]) -> Dict[str, int]:
+        """Count timestamp ranges in SQL; callers supply timezone-aware days."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                return {
+                    label: int(conn.execute(
+                        "SELECT COUNT(*) FROM memory_evolution_log WHERE created_at >= ? AND created_at < ?",
+                        (start, end),
+                    ).fetchone()[0])
+                    for label, start, end in day_ranges
+                }
+            finally:
+                conn.close()
 
     def count_evolution_events_since(self, since_ts: float) -> int:
         with self._lock:

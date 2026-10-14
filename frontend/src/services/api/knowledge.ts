@@ -34,6 +34,7 @@ export interface KnowledgeStats {
   avg_utility: number
   total_accesses: number
   evolution_events_24h: number
+  activity_7d?: { date: string; count: number }[]
   health?: KnowledgeHealth
 }
 
@@ -54,7 +55,8 @@ export async function getKnowledgeMemories(params: {
 }
 
 export async function getKnowledgeStats(): Promise<KnowledgeStats> {
-  const response = await apiClient.get('/api/knowledge/stats')
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  const response = await apiClient.get('/api/knowledge/stats', { params: { time_zone: timeZone } })
   return response.data
 }
 

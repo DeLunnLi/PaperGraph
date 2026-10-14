@@ -233,7 +233,7 @@ class PaperReaderService:
             store=store, paper_id=paper_id,
             user_message=user_message, assistant_reply=reply,
         )
-        background_tasks.add_task(store.compress_working, scope="paper", paper_id=int(paper_id), min_entries=6)
+        background_tasks.add_task(store.compress_working, scope="paper", paper_id=int(paper_id))
 
         return {
             "reply": reply.strip(),

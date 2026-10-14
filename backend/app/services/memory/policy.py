@@ -49,6 +49,9 @@ class MemoryPolicy:
     link_expansion_max: int = 2        # [关联] memories appended per context block
     semantic_similarity_floor: float = 0.2   # recall gathering floor (judge still decides)
     embed_batch_size: int = 16
+    recent_candidates_per_kind: int = 4
+    global_candidates_per_kind: int = 3
+    semantic_candidates: int = 6
 
     # --- implicit signals ---
     engaged_read_grace_sec: int = 600  # chat may precede the frontend timer
