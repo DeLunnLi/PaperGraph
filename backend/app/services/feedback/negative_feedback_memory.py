@@ -9,8 +9,13 @@ from typing import Any
 from ..llm.agent_runtime import run_json_task
 from ..llm.llm_service import get_llm
 from ...utils.common import exec_sql
+from ...utils.db_init import ensure_once
 
 def ensure_tables(db_path: str) -> None:
+    ensure_once(db_path, _create_tables)
+
+
+def _create_tables(db_path: str) -> None:
     exec_sql(db_path,
         """CREATE TABLE IF NOT EXISTS negative_pref_memory (
           id INTEGER PRIMARY KEY AUTOINCREMENT,

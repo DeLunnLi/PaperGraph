@@ -10,14 +10,7 @@ def clip_text(text: str | None, n: int) -> str:
     t = (text or "").strip()
     if len(t) <= n:
         return t
-    t = t[:n]
-    while t:
-        try:
-            t.encode('utf-8')
-            break
-        except UnicodeEncodeError:
-            t = t[:-1]
-    return t
+    return t[:n]
 
 def dedupe_tags(tags: list[str], max_tags: int = 12) -> list[str]:
     out: list[str] = []
@@ -63,7 +56,7 @@ def nearest_major_in(raw: str, whitelist: tuple[str, ...]) -> str:
         return "未分类"
     return whitelist[0] if whitelist else "未分类"
 
-def parse_taxonomy_majors(raw: str) -> list[str | None]:
+def parse_taxonomy_majors(raw: str) -> list[str] | None:
     d = parse_llm_json(raw)
     if not isinstance(d, dict):
         return None

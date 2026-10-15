@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
@@ -95,6 +97,11 @@ def _arxiv_entry_published_naive(entry: Any) -> Optional[datetime]:
         return None
 
 
+# A standalone boolean OR used as a separator. Word-bounded and case-insensitive
+# so it never splits inside real words ("sensor", "Oregon", "OR-Tools").
+_OR_SPLIT = re.compile(r"\s+OR\s+", re.IGNORECASE)
+
+
 def _arxiv_clause_for_phrase(searcher, phrase: str, style: str) -> str:
     p = (phrase or "").replace('"', " ").strip()
     if not p:
@@ -111,11 +118,21 @@ def _arxiv_query_part(
     if not q:
         return None
     st = style if style in ("all", "ti_abs") else "all"
-    phrases = [
+    raw_phrases = [
         p.replace('"', " ").strip()
         for p in split_query_phrases(q)
         if p.strip()
-    ][: max(1, int(max_phrases))]
+    ]
+    # Callers (and the LLM-built daily query) may pass boolean OR between terms.
+    # split_query_phrases() only splits on , ; and newlines, so without this an
+    # OR query collapses into ONE literal phrase — arXiv then matches the string
+    # "a  OR  b" verbatim, returning stale/irrelevant hits that the days_back
+    # filter later drops entirely. Treat OR as a phrase separator instead; the
+    # clauses below are already joined with +OR+.
+    phrases: List[str] = []
+    for p in raw_phrases:
+        phrases.extend(t.strip() for t in _OR_SPLIT.split(p) if t.strip())
+    phrases = phrases[: max(1, int(max_phrases))]
     clauses = [
         c
         for c in (_arxiv_clause_for_phrase(searcher, p, st) for p in phrases)
@@ -213,19 +230,28 @@ async def _search_arxiv_by_keyword_list_async(
 ) -> List[Paper]:
     n = max(1, len(keywords))
     per = max(8, min(60, (max_results + n - 1) // n + 8))
+    kws = [str(kw).strip() for kw in keywords[:16] if str(kw).strip()]
     merged, seen = [], set()
-    for kw in keywords[:16]:
-        kwt = str(kw).strip()
-        if not kwt:
-            continue
-        for p in await search_arxiv(
-            searcher, query, per, **{**kwargs, "llm_keywords": [kwt]}
-        ):
-            dk = _arxiv_paper_dedupe_key(searcher, p)
-            if dk in seen:
+    sem = asyncio.Semaphore(4)
+
+    async def _one(kwt: str) -> List[Paper]:
+        async with sem:
+            return await search_arxiv(
+                searcher, query, per, **{**kwargs, "llm_keywords": [kwt]}
+            )
+
+    # Wave of 4 concurrent keyword searches; stop early once we have enough.
+    for start in range(0, len(kws), 4):
+        results = await asyncio.gather(*[_one(k) for k in kws[start:start + 4]], return_exceptions=True)
+        for res in results:
+            if not isinstance(res, list):
                 continue
-            seen.add(dk)
-            merged.append(p)
+            for p in res:
+                dk = _arxiv_paper_dedupe_key(searcher, p)
+                if dk in seen:
+                    continue
+                seen.add(dk)
+                merged.append(p)
         if len(merged) >= max_results:
             break
     return merged[:max_results]
@@ -236,22 +262,27 @@ async def _search_arxiv_by_author_list(
 ) -> list[Paper]:
     if not author_names:
         return []
-    merged, seen = [], set()
-    for name in author_names[:3]:
-        nm = name.strip()
-        if not nm or text_has_cjk(nm):
-            continue
+    names = [n.strip() for n in author_names[:3] if n.strip() and not text_has_cjk(n.strip())]
+    if not names:
+        return []
+
+    async def _one(nm: str) -> list[Paper]:
         akw = dict(kwargs)
         akw["authors"] = [nm]
         akw["llm_keywords"] = []
-        for p in await search_arxiv(searcher, "", max(5, max_results), **akw):
+        return await search_arxiv(searcher, "", max(5, max_results), **akw)
+
+    results = await asyncio.gather(*[_one(nm) for nm in names], return_exceptions=True)
+    merged, seen = [], set()
+    for res in results:
+        if not isinstance(res, list):
+            continue
+        for p in res:
             dk = _arxiv_paper_dedupe_key(searcher, p)
             if dk in seen:
                 continue
             seen.add(dk)
             merged.append(p)
-        if len(merged) >= max_results:
-            break
     return merged[:max_results]
 
 
@@ -398,6 +429,7 @@ async def search_arxiv(
                 )
             )
         except Exception:
+            logger.debug("arxiv: entry parse failed", exc_info=True)
             continue
 
     searcher._bump_stat("arxiv_requests")

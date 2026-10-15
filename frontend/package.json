@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --force",
-    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:only": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -27,6 +29,7 @@
     "vue-router": "^4.2.5"
   },
   "devDependencies": {
+    "@types/d3": "^7.4.3",
     "@types/node": "^22.19.17",
     "@vitejs/plugin-vue": "^5.0.0",
     "jsdom": "^24.1.3",

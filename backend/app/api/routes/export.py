@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from typing import Any, Literal
@@ -18,6 +19,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 
 from ..deps import require_user
+from ...utils.common import sqlite_connect
 
 from ...settings import get_settings
 
@@ -26,7 +28,6 @@ router = APIRouter(prefix="/export", tags=["导出"])
 
 
 def _get_db_path() -> str:
-    import os
     s = get_settings()
     return os.path.join(s.data_dir, "papers.db")
 
@@ -113,6 +114,7 @@ def _export_memory(conn: sqlite3.Connection, user_id: int) -> list[dict]:
                  "shared": bool(r[4]), "scope": r[5], "paper_id": r[6], "created_at": r[7]}
                 for r in rows]
     except Exception:
+        logger.warning("export._export_memory failed", exc_info=True)
         return []
 
 
@@ -130,6 +132,7 @@ def _export_relations(conn: sqlite3.Connection, user_id: int) -> list[dict]:
         return [{"source": r[0], "target": r[1], "relation": r[2], "score": r[3],
                  "evidence": r[4], "created_at": r[5]} for r in rows]
     except Exception:
+        logger.warning("export._export_relations failed", exc_info=True)
         return []
 
 
@@ -148,6 +151,7 @@ def _export_feedback(conn: sqlite3.Connection, user_id: int | None = None) -> li
         return [{"date": r[0], "paper": r[1], "title": r[2], "action": r[3],
                  "source": r[4], "created_at": r[5]} for r in rows]
     except Exception:
+        logger.warning("export._export_feedback failed", exc_info=True)
         return []
 
 
@@ -162,8 +166,7 @@ async def export_json(
     """Export knowledge base as a portable JSON file (filtered by user)."""
     db_path = _get_db_path()
     user_id = user["user_id"]
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite_connect(db_path, row_factory=True)
     try:
         data: dict[str, Any] = {
             "version": "1.0",

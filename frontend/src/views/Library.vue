@@ -114,7 +114,7 @@
                 </span>
               </template>
               <template v-if="column.key === 'authors'">
-                <span class="lib-authors-cell">{{ formatAuthors(record, { max: 3, suffix: ' et al.', empty: '—' }) }}</span>
+                <span class="lib-authors-cell">{{ formatAuthors(record as Paper, { max: 3, suffix: ' et al.', empty: '—' }) }}</span>
               </template>
               <template v-if="column.key === 'year'">
                 <span class="lib-year">{{ record.year ?? '—' }}</span>
@@ -132,8 +132,8 @@
               </template>
               <template v-if="column.key === 'actions'">
                 <span class="lib-cell-actions" @click.stop>
-                  <a-button type="link" size="small" @click="goReader(record)">阅读</a-button>
-                  <a-button type="link" danger size="small" @click="onDelete(record)">删除</a-button>
+                  <a-button type="link" size="small" @click="goReader(record as Paper)">阅读</a-button>
+                  <a-button type="link" danger size="small" @click="onDelete(record as Paper)">删除</a-button>
                 </span>
               </template>
             </template>
@@ -223,8 +223,22 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { message, Modal, Upload } from 'ant-design-vue'
-import type { UploadFile, UploadProps } from 'ant-design-vue'
+import message from 'ant-design-vue/es/message'
+import AAlert from 'ant-design-vue/es/alert'
+import AButton from 'ant-design-vue/es/button'
+import ACard from 'ant-design-vue/es/card'
+import ADropdown from 'ant-design-vue/es/dropdown'
+import { InputSearch as AInputSearch } from 'ant-design-vue/es/input'
+import AModal from 'ant-design-vue/es/modal'
+import AProgress from 'ant-design-vue/es/progress'
+import ASelect, { SelectOption as ASelectOption } from 'ant-design-vue/es/select'
+import ASpace from 'ant-design-vue/es/space'
+import ASpin from 'ant-design-vue/es/spin'
+import ASwitch from 'ant-design-vue/es/switch'
+import ATable from 'ant-design-vue/es/table'
+import ATag from 'ant-design-vue/es/tag'
+import AUpload, { UploadDragger as AUploadDragger } from 'ant-design-vue/es/upload'
+import type { UploadFile, UploadProps } from 'ant-design-vue/es/upload'
 import type { UploadRequestOption } from 'ant-design-vue/es/vc-upload/interface'
 import { ExportOutlined, FilePdfOutlined, InboxOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import { getLibrary, getLibraryCategoryFolders, deletePaper, importLocalPdf } from '@/services/api'
@@ -288,11 +302,11 @@ const beforePdfUpload: UploadProps['beforeUpload'] = (file) => {
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
   if (!isPdf) {
     message.error('仅支持 PDF 文件')
-    return Upload.LIST_IGNORE
+    return AUpload.LIST_IGNORE
   }
   if (file.size > 200 * 1024 * 1024) {
     message.error('PDF 文件不能超过 200 MiB')
-    return Upload.LIST_IGNORE
+    return AUpload.LIST_IGNORE
   }
   return true
 }
@@ -402,7 +416,11 @@ const loadFolders = async () => {
         .filter((f) => (f.children?.length ?? 0) > 0)
         .map((f) => `sub-${f.category}`)
     }
-  } catch {
+  } catch (e) {
+    // Not surfaced as a toast: the category sidebar is secondary UI and the
+    // paper list still loads. But swallowing it entirely made an empty
+    // sidebar indistinguishable from "you have no categories".
+    console.error('Failed to load library category folders:', e)
   }
 }
 const load = async () => {
@@ -472,7 +490,7 @@ const onDelete = (record: Paper) => {
     message.warning('无 ID，无法删除')
     return
   }
-  Modal.confirm({
+  AModal.confirm({
     title: '确认删除该文献？',
     onOk: async () => {
       try {
@@ -486,12 +504,12 @@ const onDelete = (record: Paper) => {
     },
   })
 }
-const onSelectChange = (keys: string[]) => {
-  selectedRowKeys.value = keys
+const onSelectChange = (keys: (string | number)[]) => {
+  selectedRowKeys.value = keys.map(String)
 }
 const batchDelete = () => {
   if (selectedRowKeys.value.length === 0) return
-  Modal.confirm({
+  AModal.confirm({
     title: `确认删除选中的 ${selectedRowKeys.value.length} 篇文献？`,
     content: '删除后无法恢复。',
     okText: '删除',

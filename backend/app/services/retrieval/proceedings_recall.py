@@ -162,24 +162,23 @@ async def _recall_from_discovered_links(
     papers: list[LitPaper] = []
     seen_titles: set[str] = set()
     link_limit = min(len(links), max(8, max_results // 3))
+    target = max(8, int(max_results))
 
-    for item in links[:link_limit]:
+    async def _process_one(item: dict[str, Any]) -> list[tuple[str, dict[str, Any], str]]:
         link = str(item.get("link") or "").strip()
         if not link:
-            continue
-
+            return []
         page = str(item.get("raw_content") or "").strip()
         if len(page) < 200:
             try:
                 page = await _fetch_discovered_page(searcher, link)
             except Exception:
                 page = ""
-
         llm_items = await _llm_extract_papers_from_page(
             page, venue=venue, year=year, topic=topic, limit=max_results,
         )
         # Empty extraction usually means this is not a paper listing.
-
+        out: list[tuple[str, dict[str, Any], str]] = []
         for lp in llm_items:
             title = _clean_paper_title(lp["title"].strip())
             if not title or len(title) < 8 or len(title) > 300:
@@ -187,19 +186,33 @@ async def _recall_from_discovered_links(
             tl = title.lower()
             if any(w in tl for w in ("workshop", "challenge", "tutorial", "demo track", "competition")):
                 continue
-            key = title.lower()
-            if key in seen_titles:
+            out.append((title, lp, link))
+        return out
+
+    items = links[:link_limit]
+    # Wave of 4 concurrent fetch+LLM-extract; stop early once we have enough.
+    for start in range(0, len(items), 4):
+        wave = items[start:start + 4]
+        results = await asyncio.gather(
+            *[_process_one(it) for it in wave], return_exceptions=True
+        )
+        for res in results:
+            if not isinstance(res, list):
                 continue
-            seen_titles.add(key)
-            papers.append(
-                _paper_from_title(
-                    searcher, title=title, venue=venue, year=year,
-                    source_url=link, authors=lp.get("authors", []),
-                    source="tavily",
+            for title, lp, link in res:
+                key = title.lower()
+                if key in seen_titles:
+                    continue
+                seen_titles.add(key)
+                papers.append(
+                    _paper_from_title(
+                        searcher, title=title, venue=venue, year=year,
+                        source_url=link, authors=lp.get("authors", []),
+                        source="tavily",
+                    )
                 )
-            )
-            if len(papers) >= max(8, int(max_results)):
-                return papers
+        if len(papers) >= target:
+            break
     return papers
 
 

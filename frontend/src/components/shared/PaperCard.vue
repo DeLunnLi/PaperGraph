@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import AButton from 'ant-design-vue/es/button'
+import { ListItem as AListItem } from 'ant-design-vue/es/list'
+import ATag from 'ant-design-vue/es/tag'
 import LatexInline from '@/components/LatexInline.vue'
 import type { Paper } from '@/types'
 import { formatAuthors, paperVenue } from '@/utils/citation'

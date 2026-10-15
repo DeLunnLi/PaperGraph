@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ...services.auth.user_service import register_user, login_user
 from ..deps import check_rate_limit, require_user
@@ -31,14 +32,16 @@ class AuthResponse(BaseModel):
 @router.post("/register", response_model=AuthResponse)
 async def register(req: RegisterRequest, request: Request):
     check_rate_limit(request.client.host if request.client else "unknown", max_requests=5)
-    result = register_user(req.username, req.password)
+    # bcrypt.hashpw is deliberately CPU-expensive — keep it off the event loop
+    result = await run_in_threadpool(register_user, req.username, req.password)
     return AuthResponse(**result)
 
 
 @router.post("/login", response_model=AuthResponse)
 async def login(req: LoginRequest, request: Request):
     check_rate_limit(request.client.host if request.client else "unknown", max_requests=10)
-    result = login_user(req.username, req.password)
+    # bcrypt.checkpw blocks ~100-300ms — off the event loop
+    result = await run_in_threadpool(login_user, req.username, req.password)
     return AuthResponse(**result)
 
 

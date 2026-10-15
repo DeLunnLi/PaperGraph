@@ -1,11 +1,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 def extract_pdf_text_full(abspath: str | None) -> str:
     """Extract full PDF text via the enhanced extractor (pymupdf4llm → fitz → OCR, with dedup)."""
@@ -36,22 +39,24 @@ def extract_pdf_tables_markdown(abspath: str | None) -> str:
     try:
         import fitz
         doc = fitz.open(abspath)
-        for page in doc:
-            try:
-                tabs = page.find_tables()
-            except Exception:
-                tabs = None
-            if tabs:
-                for tab in tabs:
-                    try:
-                        md = tab.to_markdown()
-                        if md and "|" in str(md) and len(str(md)) > 20:
-                            tables.append(str(md).strip())
-                    except Exception:
-                        pass
-        doc.close()
+        try:
+            for page in doc:
+                try:
+                    tabs = page.find_tables()
+                except Exception:
+                    tabs = None
+                if tabs:
+                    for tab in tabs:
+                        try:
+                            md = tab.to_markdown()
+                            if md and "|" in str(md) and len(str(md)) > 20:
+                                tables.append(str(md).strip())
+                        except Exception:
+                            logger.debug("reader_context: fitz table.to_markdown failed", exc_info=True)
+        finally:
+            doc.close()
     except Exception:
-        pass
+        logger.debug("reader_context: fitz find_tables strategy failed for %s", abspath, exc_info=True)
 
     if not tables:
         # Method 2: pymupdf4llm Markdown — parses full doc
@@ -65,6 +70,7 @@ def extract_pdf_tables_markdown(abspath: str | None) -> str:
 
     if not tables:
         # Method 3: fitz text blocks — last resort
+        doc = None
         try:
             import fitz
             doc = fitz.open(abspath)
@@ -92,9 +98,11 @@ def extract_pdf_tables_markdown(abspath: str | None) -> str:
                     result = [" | ".join(str(cols[c][r]) for c in range(ncols)) for r in range(nrows)]
                     result.insert(1, " | ".join("---" for _ in range(ncols)))
                     tables.append("\n".join(result))
-            doc.close()
         except Exception:
-            pass
+            logger.debug("reader_context: fitz text-blocks table strategy failed for %s", abspath, exc_info=True)
+        finally:
+            if doc is not None:
+                doc.close()
 
     return "\n\n".join(tables) if tables else ""
 
@@ -329,31 +337,19 @@ def extract_pdf_text_full_cached(db_path: str, paper_id: int, abspath: str | Non
         return ex, True
     return "", False
 
-def extract_pdf_pages_cached(db_path: str, paper_id: int, abspath: str | None) -> tuple[list[dict], bool]:
-    """Return (pages, cached). pages = list[{"page":N,"text":...}], cached=True if from cache."""
-    if not abspath or not os.path.isfile(abspath):
-        return [], False
-    _ex, pages = _cache_get(db_path, int(paper_id), abspath, max_age_days=45)
-    if pages is not None:
-        return pages, True
-    # Cache miss for pages but maybe excerpt present without pages — recompute pages only.
-    if _ex is not None:
-        pages = extract_pdf_text_with_pages(abspath)
-        if pages:
-            _cache_set(db_path, int(paper_id), abspath, _ex, pages)
-        return pages, False
-    return [], False
-
 def _cache_delete(db_path: str, paper_id: int) -> None:
     if not db_path:
         return
+    conn = None
     try:
         conn = sqlite3.connect(db_path)
         conn.execute("DELETE FROM paper_pdf_excerpt_cache WHERE paper_id=?", (int(paper_id),))
         conn.commit()
-        conn.close()
     except Exception:
         pass
+    finally:
+        if conn is not None:
+            conn.close()
 
 def compute_and_cache_excerpt(db_path: str, paper_id: int, pdf_abspath: str) -> None:
     # Skip the (seconds-level) full re-parse when a fresh cached excerpt for
@@ -363,9 +359,19 @@ def compute_and_cache_excerpt(db_path: str, paper_id: int, pdf_abspath: str) -> 
     cached, _pages = _cache_get(db_path, int(paper_id), pdf_abspath, max_age_days=45)
     if cached:
         return
-    ex = extract_pdf_text_full(pdf_abspath)
-    if ex.strip():
-        pages = extract_pdf_text_with_pages(pdf_abspath)
+    # Parse once: pymupdf4llm page_chunks gives both per-page text and (joined)
+    # the full text. Only when page-chunk parsing yields nothing (scanned PDF /
+    # pymupdf4llm failure) do we fall back to the OCR-aware full-text extractor.
+    # Previously this ran two complete pymupdf4llm.to_markdown passes per miss.
+    pages = extract_pdf_text_with_pages(pdf_abspath)
+    if pages:
+        from .pdf_extract import _clean_math_whitespace
+        ex = _clean_math_whitespace("\n\n".join(str(p.get("text") or "") for p in pages)).strip()
+    else:
+        ex = ""
+    if not ex:
+        ex = extract_pdf_text_full(pdf_abspath).strip()
+    if ex:
         _cache_set(db_path, int(paper_id), pdf_abspath, ex, pages if pages else None)
     else:
         _cache_delete(db_path, int(paper_id))
@@ -494,24 +500,37 @@ def format_paper_reader_block(
         )
     return "\n".join(lines)
 
-def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None = None) -> tuple[Any | None, str, str, bool, list[dict]]:
+def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None = None) -> tuple[Any | None, str, str, bool, list[dict], str | None]:
     p = db.get_paper_by_id(int(paper_id), user_id=user_id)
     if not p:
-        return None, "", "", False, []
+        return None, "", "", False, [], None
     pdf_path = _ensure_reader_pdf_available(db, p, user_id=user_id)
-    excerpt, is_cached = extract_pdf_text_full_cached(getattr(db, "db_path", ""), int(paper_id), pdf_path)
-    pages: list[dict] = []
+    db_path = getattr(db, "db_path", "")
+    # Single cache read (was two: extract_pdf_text_full_cached + extract_pdf_pages_cached
+    # each opened their own connection and ran the same SELECT + os.stat).
+    cached_excerpt, cached_pages = (None, None)
+    is_cached = False
     if pdf_path:
-        pages, _pages_cached = extract_pdf_pages_cached(getattr(db, "db_path", ""), int(paper_id), pdf_path)
+        cached_excerpt, cached_pages = _cache_get(db_path, int(paper_id), pdf_path, max_age_days=45)
+        is_cached = cached_excerpt is not None
+    excerpt = cached_excerpt or ""
+    pages: list[dict] = list(cached_pages) if cached_pages else []
+    if pdf_path:
         if not pages and is_cached and excerpt:
             # excerpt was cached before pages column existed; recompute lazily.
             pages = extract_pdf_text_with_pages(pdf_path)
-    if pdf_path and not excerpt:
-        excerpt = extract_pdf_text_full(pdf_path)
-        if excerpt.strip():
-            if not pages:
-                pages = extract_pdf_text_with_pages(pdf_path)
-            _cache_set(getattr(db, "db_path", ""), int(paper_id), pdf_path, excerpt, pages if pages else None)
+        if not excerpt:
+            # Cache miss: parse once. page_chunks yields both per-page text and
+            # (joined) the full text; only fall back to the OCR-aware full-text
+            # extractor when page-chunk parsing yields nothing (scanned PDF).
+            pages = pages or extract_pdf_text_with_pages(pdf_path)
+            if pages:
+                from .pdf_extract import _clean_math_whitespace
+                excerpt = _clean_math_whitespace("\n\n".join(str(pg.get("text") or "") for pg in pages)).strip()
+            if not excerpt:
+                excerpt = extract_pdf_text_full(pdf_path)
+            if excerpt.strip():
+                _cache_set(db_path, int(paper_id), pdf_path, excerpt, pages if pages else None)
     merged_for_refs = excerpt.strip()
     refs_raw = ""
     if not (getattr(p, "references", None) or []):
@@ -536,7 +555,8 @@ def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None =
                     p.abstract = _full[:2000]
                     excerpt = _full  # 替代 PDF 正文
                     db.update_paper(p.id, abstract=p.abstract)
-        except Exception: pass
+        except Exception:
+            logger.debug("reader_context: tavily abstract backfill failed for paper %s", int(paper_id), exc_info=True)
     reader_artifact_block = ""
     if merged_for_refs:
         try:
@@ -558,13 +578,52 @@ def build_reader_context_for_paper(db: Any, paper_id: int, user_id: int | None =
         references_section_raw=refs_raw,
         reader_artifact_block=reader_artifact_block,
     )
-    # Detect if PDF is still being parsed: if paper has a PDF path but no excerpt cached yet
+    # Detect if PDF is still being parsed: if paper has a PDF path but no excerpt cached yet.
+    # Reuses the pdf_path already resolved above — no second DB query.
     pdf_parsing = False
     try:
-        pdf_path = db.get_library_pdf_abspath(int(paper_id), user_id=user_id)
         if pdf_path and os.path.isfile(pdf_path):
             # Check if excerpt is empty or too short — means parsing hasn't completed
             pdf_parsing = len((excerpt or "").strip()) < 200
     except Exception:
         pass
-    return p, block, merged_for_refs, pdf_parsing, pages
+    # Citation-graph × personal-memory cross signal (P2b): surface the
+    # library papers this paper cites / is cited-by, flagging those the user
+    # already has reader notes on. Skipped when user_id is unknown (can't
+    # isolate) or the graph is empty — never bloats the reader context.
+    if user_id is not None:
+        try:
+            from ..graph.kg_citations import get_citation_neighbors
+
+            nb = get_citation_neighbors(db_path, int(paper_id), user_id=int(user_id))
+            graph_block = _format_citation_graph_block(nb)
+            if graph_block:
+                block = (block + "\n\n" + graph_block).strip() if block else graph_block
+        except Exception:
+            logger.debug("reader_context: citation graph block failed for %s", int(paper_id), exc_info=True)
+    return p, block, merged_for_refs, pdf_parsing, pages, pdf_path
+
+
+def _format_citation_graph_block(neighbors: dict) -> str:
+    """Render citation-graph neighbors as a concise reader-context block.
+
+    Capped (cites ≤ 5, cited_by ≤ 3) so the reader prompt stays bounded.
+    Papers the user has reader memories for are marked 「你有笔记」 — the
+    citation-graph × personal-memory cross signal ("本文引用的 X 你读过").
+    Empty input → empty string (no spurious block).
+    """
+    cites = (neighbors or {}).get("cites") or []
+    cited_by = (neighbors or {}).get("cited_by") or []
+    if not cites and not cited_by:
+        return ""
+    parts: list[str] = []
+    if cites:
+        items = []
+        for c in cites[:5]:
+            tag = "（你有笔记）" if c.get("has_memory") else ""
+            items.append(f"{c.get('title') or c.get('paper_id')}{tag}")
+        parts.append("本文引用了你库中的：" + "、".join(items))
+    if cited_by:
+        items = [f"{c.get('title') or c.get('paper_id')}" for c in cited_by[:3]]
+        parts.append("本文被你库中的 " + "、".join(items) + " 引用")
+    return "【引用图谱】" + "；".join(parts) + "。"

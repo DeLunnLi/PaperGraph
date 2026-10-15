@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from ...core.search import sanitize_pinned_topic_keywords
 from ...utils.author_query_match import pick_primary_english_author_for_query
+
+logger = logging.getLogger(__name__)
 from .plan_helpers import (
     is_pinned_single_year,
     is_strict_venue_match,
@@ -252,5 +255,5 @@ async def enrich_recall_context_from_tavily(ctx: RecallContext, plan: ResolvedSe
             ctx.search_kwargs["dois"] = dois[:5]
         ctx.tavily_keywords = list(ctx.canonical_titles)[:4]
     except Exception:
-        pass
+        logger.debug("enrich_recall_context_from_tavily failed", exc_info=True)
     return ctx

@@ -60,7 +60,7 @@
               </p>
             </template>
             <a-space>
-              <a-button type="primary" :loading="acquiringPdf" @click="acquirePdf">获取论文 PDF</a-button>
+              <a-button type="primary" :loading="acquiringPdf" @click="acquirePdf()">获取论文 PDF</a-button>
               <a-button v-if="paperExternalUrl(paper)" type="link" :href="paperExternalUrl(paper)!" target="_blank" rel="noopener noreferrer">
                 打开原文链接
               </a-button>
@@ -93,7 +93,7 @@
         <div
           ref="scrollRef"
           class="paper-reader__messages"
-          @wheel.stop="onChatWheel"
+          @wheel.stop
           @scroll.stop
         >
           <div v-if="loadingPaper && messages.length === 0" class="paper-reader__msg paper-reader__msg--assistant">
@@ -105,8 +105,8 @@
             </div>
           </div>
           <div
-            v-for="(m, i) in messages"
-            :key="i"
+            v-for="m in messages"
+            :key="m._uid"
             class="paper-reader__msg"
             :class="'paper-reader__msg--' + m.role"
           >
@@ -127,10 +127,14 @@
                     :key="ci"
                     type="button"
                     class="paper-reader__citation-chip"
-                    :title="c.snippet || `跳转到第 ${c.page} 页`"
-                    @click.stop="gotoCitationPage(c.page)"
+                    :class="{
+                      'paper-reader__citation-chip--verified': c.verified === true,
+                      'paper-reader__citation-chip--unverified': c.verified === false,
+                    }"
+                    :title="citationTooltip(c)"
+                    @click.stop="gotoCitationPage(c.page, m)"
                   >
-                    {{ c.marker }}
+                    {{ c.marker }}<span v-if="c.verified === true" class="paper-reader__citation-mark">✓</span><span v-else-if="c.verified === false" class="paper-reader__citation-mark">⚠</span>
                   </button>
                 </div>
               </div>
@@ -194,12 +198,12 @@
             :rows="1"
             :auto-size="{ minRows: 1, maxRows: 6 }"
             placeholder="基于当前文献提问…"
-            :disabled="sending"
+            :disabled="sending || loadingPaper || loadingHistory"
             @compositionstart="onCompositionStart"
             @compositionend="onCompositionEnd"
             @press-enter.exact.prevent="send"
           />
-          <a-button type="primary" :loading="sending" :disabled="!draft.trim()" aria-label="发送消息" @click="send">发送</a-button>
+          <a-button type="primary" :loading="sending" :disabled="!draft.trim() || loadingPaper || loadingHistory" aria-label="发送消息" @click="send">发送</a-button>
           </div>
           <div class="paper-reader__composer-hint">Enter 发送 · 回答将优先引用论文正文</div>
         </div>
@@ -210,7 +214,14 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import message from 'ant-design-vue/es/message'
+import AButton from 'ant-design-vue/es/button'
+import ADropdown from 'ant-design-vue/es/dropdown'
+import AEmpty from 'ant-design-vue/es/empty'
+import ASkeleton from 'ant-design-vue/es/skeleton'
+import ASpace from 'ant-design-vue/es/space'
+import ASpin from 'ant-design-vue/es/spin'
+import { Textarea as ATextarea } from 'ant-design-vue/es/input'
 import { RobotOutlined, CopyOutlined } from '@ant-design/icons-vue'
 import {
   getPaper,
@@ -219,6 +230,7 @@ import {
   postPaperReaderOpening,
   postPaperReaderChat,
   getPaperReaderHistory,
+  postReaderFeedback,
   postReadingLog,
   savePapers,
 } from '@/services/api'
@@ -234,18 +246,25 @@ const route = useRoute()
 const router = useRouter()
 const paper = ref<Paper | null>(null)
 const loadingPaper = ref(true)
+const loadingHistory = ref(true)
 const loadError = ref('')
 const pdfParsing = ref(false)
 const pdfStreamUrl = ref('')
 const acquiringPdf = ref(false)
 const pdfAcquireError = ref('')
 const pdfViewerRef = ref<InstanceType<typeof PdfJsViewer> | null>(null)
+let _msgUidSeq = 0
+const _nextMsgUid = () => ++_msgUidSeq
 const messages = ref<
   {
     role: 'user' | 'assistant'
     content: string
     related_papers?: Paper[]
     citations?: PaperReaderCitation[]
+    _uid: number
+    turn_id?: number | null
+    citationClickSent?: boolean
+    citationClickPending?: boolean
   }[]
 >([])
 const draft = ref('')
@@ -253,6 +272,7 @@ const sending = ref(false)
 const { composing, onCompositionStart, onCompositionEnd } = useImeGuard()
 const inputKey = ref(0)
 let paperLoadSeq = 0
+let activePdfAbortController: AbortController | null = null
 const mobilePane = ref<'pdf' | 'chat'>('pdf')
 const scrollRef = ref<HTMLElement | null>(null)
 const splitRef = ref<HTMLElement | null>(null)
@@ -273,7 +293,7 @@ const readingSession = ref<{ paperId: number; startedAtMs: number } | null>(null
 let chatRequestSeq = 0
 let activeChatAbortController: AbortController | null = null
 let activeChatPaperId: number | null = null
-let activeAssistantPlaceholderIndex: number | null = null
+let activeAssistantPlaceholderUid: number | null = null
 const normalizeAssistantText = (s: string): string => {
   const raw = String(s || '')
   if (raw.includes('```')) return raw.replace(/\r\n/g, '\n')
@@ -315,33 +335,42 @@ const isPaperContextCurrent = (targetPaperId: number, loadSeq?: number) => (
 )
 const loadLocalPdf = async (targetPaperId?: number, loadSeq?: number) => {
   const resolvedPaperId = targetPaperId ?? paperId.value
+  const resolvedLoadSeq = loadSeq ?? paperLoadSeq
   if (resolvedPaperId == null || !hasLocalPdfForViewer.value) return
   resetPdfStreamUrl()
   const url = await getLibraryPdfStreamUrl(resolvedPaperId)
   // A rapid paper switch during the await would leave this stale URL
   // overwriting the new paper's pdfStreamUrl — drop it if we've moved on.
-  if (loadSeq != null && loadSeq !== paperLoadSeq) return
+  if (!isPaperContextCurrent(resolvedPaperId, resolvedLoadSeq)) return
   pdfStreamUrl.value = url
 }
-const acquirePdf = async (showSuccess = true, loadSeq?: number) => {
+const cancelPdfAcquisition = () => {
+  activePdfAbortController?.abort()
+  activePdfAbortController = null
+  acquiringPdf.value = false
+}
+const acquirePdf = async (showSuccess = true, loadSeq = paperLoadSeq) => {
   const targetPaperId = paperId.value
   if (targetPaperId == null || acquiringPdf.value) return
+  const abortController = new AbortController()
+  activePdfAbortController = abortController
   acquiringPdf.value = true
   pdfAcquireError.value = ''
   try {
-    const ensuredPaper = await ensurePaperPdf(targetPaperId)
+    const ensuredPaper = await ensurePaperPdf(targetPaperId, { signal: abortController.signal })
     if (!isPaperContextCurrent(targetPaperId, loadSeq)) return
     paper.value = ensuredPaper
     await loadLocalPdf(targetPaperId, loadSeq)
     if (!isPaperContextCurrent(targetPaperId, loadSeq)) return
     if (showSuccess) message.success('PDF 已获取，正在加载原文')
   } catch (e: unknown) {
-    if (!isPaperContextCurrent(targetPaperId, loadSeq)) return
+    if (isAbortError(e) || !isPaperContextCurrent(targetPaperId, loadSeq)) return
     pdfAcquireError.value = (e as Error).message || '未能获取论文 PDF'
     pdfReady.value = true
     void maybeStartOpening()
   } finally {
-    if (isPaperContextCurrent(targetPaperId, loadSeq)) {
+    if (activePdfAbortController === abortController) {
+      activePdfAbortController = null
       acquiringPdf.value = false
     }
   }
@@ -357,11 +386,10 @@ const closeTab = () => {
   } catch {
   }
 }
-const onChatWheel = (e: WheelEvent) => {
-  e.stopPropagation()
-}
 onBeforeUnmount(() => {
+  paperLoadSeq += 1
   cancelActiveChat('已取消当前提问')
+  cancelPdfAcquisition()
   resetPdfStreamUrl()
   cleanupSplitPane()
   void flushReadingSession()
@@ -375,7 +403,11 @@ const flushReadingSession = async () => {
   if (!Number.isFinite(sec) || sec < 8) return
   try {
     await postReadingLog({ paper_id: s.paperId, duration_sec: Math.min(sec, 60 * 60 * 6), client_ts: Math.floor(Date.now() / 1000) })
-  } catch {
+  } catch (e) {
+    // Deliberately not user-facing (this fires on unload), but it feeds the
+    // reading calendar and behaviour analytics — dropping it without a trace
+    // makes "my reading time is missing" impossible to diagnose.
+    console.error('Failed to record reading session:', e)
   }
 }
 const scrollBottom = async () => {
@@ -385,8 +417,8 @@ const scrollBottom = async () => {
 }
 const cancelActiveChat = (reason = '已取消当前提问') => {
   chatRequestSeq += 1
-  if (activeAssistantPlaceholderIndex != null) {
-    const msg = messages.value[activeAssistantPlaceholderIndex]
+  if (activeAssistantPlaceholderUid != null) {
+    const msg = messages.value.find((m) => m._uid === activeAssistantPlaceholderUid)
     if (msg?.role === 'assistant' && msg.content === '正在思考…') {
       msg.content = reason
       msg.related_papers = undefined
@@ -398,33 +430,62 @@ const cancelActiveChat = (reason = '已取消当前提问') => {
     activeChatAbortController = null
   }
   activeChatPaperId = null
-  activeAssistantPlaceholderIndex = null
+  activeAssistantPlaceholderUid = null
   sending.value = false
 }
-const gotoCitationPage = (page: number) => {
+const citationTooltip = (c: PaperReaderCitation): string => {
+  const parts: string[] = [`跳转到第 ${c.page} 页`]
+  if (c.quote) {
+    parts.push(`原文：${c.quote}`)
+    parts.push(c.verified === true ? '✓ 引用已在页面核验' : c.verified === false ? '⚠ 引用未在该页找到（可能改写）' : '引用未核验')
+  } else if (c.verified === false) {
+    parts.push('⚠ 引用未在该页找到')
+  }
+  if (c.snippet) parts.push(c.snippet)
+  return parts.join('\n')
+}
+
+const gotoCitationPage = async (page: number, target: (typeof messages.value)[number]) => {
   if (!page || page < 1) return
   void pdfViewerRef.value?.gotoPage(page)
+  if (target.role !== 'assistant' || !target.turn_id || target.citationClickSent || target.citationClickPending || paperId.value == null) return
+  target.citationClickPending = true
+  try {
+    const res = await postReaderFeedback({
+      paper_id: paperId.value,
+      turn_id: target.turn_id,
+      signal: 'citation_click',
+    })
+    if (res.success) target.citationClickSent = true
+  } catch {
+    // A later click may retry a failed feedback request.
+  } finally {
+    target.citationClickPending = false
+  }
 }
 const mapHistoryTurns = (
-  turns: { role?: string; content?: string | null; created_at?: number }[]
-): { role: 'user' | 'assistant'; content: string; related_papers?: Paper[] }[] =>
+  turns: { id?: number | null; role?: string; content?: string | null; created_at?: number }[]
+): { role: 'user' | 'assistant'; content: string; related_papers?: Paper[]; _uid: number; turn_id?: number | null }[] =>
   turns
     .filter((t) => t && (t.role === 'user' || t.role === 'assistant') && String(t.content || '').trim())
     .map((t) => {
       const role = t.role as 'user' | 'assistant'
       const content = role === 'assistant' ? normalizeAssistantText(String(t.content)) : String(t.content)
-      return { role, content }
+      return { role, content, _uid: _nextMsgUid(), turn_id: t.id ?? null }
     })
 const ensureOpeningAndHistory = async (reloadHistory = false, showError = true, loadSeq?: number) => {
-  if (paperId.value == null) return
+  const targetPaperId = paperId.value
+  const resolvedLoadSeq = loadSeq ?? paperLoadSeq
+  if (targetPaperId == null) return
+  if (reloadHistory) loadingHistory.value = true
   try {
-    const res = await postPaperReaderOpening(paperId.value)
-    if (loadSeq != null && loadSeq !== paperLoadSeq) return
+    const res = await postPaperReaderOpening(targetPaperId)
+    if (!isPaperContextCurrent(targetPaperId, resolvedLoadSeq)) return
     if (!res.success || !res.opening) return
     if (res.pdf_parsing) pdfParsing.value = true
     if (reloadHistory) {
-      const h = await getPaperReaderHistory(paperId.value, 200).catch(() => null)
-      if (loadSeq != null && loadSeq !== paperLoadSeq) return
+      const h = await getPaperReaderHistory(targetPaperId, 200).catch(() => null)
+      if (!isPaperContextCurrent(targetPaperId, resolvedLoadSeq)) return
       if (h?.success && Array.isArray(h.turns) && h.turns.length > 0) {
         const restored = mapHistoryTurns(h.turns)
         if (restored.length > 0) {
@@ -436,17 +497,19 @@ const ensureOpeningAndHistory = async (reloadHistory = false, showError = true, 
     }
     const hasAssistantMessage = messages.value.some((m) => m.role === 'assistant')
     if (!hasAssistantMessage) {
-      messages.value.push({ role: 'assistant', content: normalizeAssistantText(res.opening) })
+      messages.value.push({ role: 'assistant', content: normalizeAssistantText(res.opening), _uid: _nextMsgUid() })
       await scrollBottom()
     }
   } catch (e: unknown) {
-    if (showError) {
+    if (showError && isPaperContextCurrent(targetPaperId, resolvedLoadSeq)) {
       message.error((e as Error).message || '导读加载失败')
     }
+  } finally {
+    if (reloadHistory && isPaperContextCurrent(targetPaperId, resolvedLoadSeq)) loadingHistory.value = false
   }
 }
 const maybeStartOpening = async (reloadHistory = false, showError = true) => {
-  if (openingStarted.value) return
+  if (openingStarted.value || loadingHistory.value) return
   if (paperId.value == null) return
   if (hasLocalPdfForViewer.value && !pdfReady.value) return
   openingStarted.value = true
@@ -455,7 +518,7 @@ const maybeStartOpening = async (reloadHistory = false, showError = true) => {
 }
 const send = async () => {
   const text = draft.value.trim()
-  if (!text || paperId.value == null || sending.value) return
+  if (!text || paperId.value == null || sending.value || loadingPaper.value || loadingHistory.value) return
   if (composing.value) return
   const currentPaperId = paperId.value
   const requestSeq = chatRequestSeq + 1
@@ -464,9 +527,10 @@ const send = async () => {
   activeChatAbortController = abortController
   activeChatPaperId = currentPaperId
   sending.value = true
-  messages.value.push({ role: 'user', content: text })
-  const assistantIdx = messages.value.push({ role: 'assistant', content: '正在思考…' }) - 1
-  activeAssistantPlaceholderIndex = assistantIdx
+  messages.value.push({ role: 'user', content: text, _uid: _nextMsgUid() })
+  const assistantUid = _nextMsgUid()
+  messages.value.push({ role: 'assistant', content: '正在思考…', _uid: assistantUid })
+  activeAssistantPlaceholderUid = assistantUid
   draft.value = ''
   inputKey.value += 1
   await nextTick()
@@ -478,7 +542,7 @@ const send = async () => {
       user_message: text,
     }, { signal: abortController.signal })
     if (chatRequestSeq !== requestSeq || activeChatPaperId !== currentPaperId || paperId.value !== currentPaperId) return
-    const target = messages.value[assistantIdx]
+    const target = messages.value.find((m) => m._uid === assistantUid)
     if (!target || target.role !== 'assistant') return
     if (res.success && res.reply) {
       const rp = Array.isArray((res as any).related_papers) ? ((res as any).related_papers as Paper[]) : []
@@ -486,6 +550,7 @@ const send = async () => {
       target.content = normalizeAssistantText(res.reply)
       target.related_papers = rp.length ? rp : undefined
       target.citations = cites.length ? cites : undefined
+      target.turn_id = typeof res.assistant_turn_id === 'number' ? res.assistant_turn_id : null
     } else {
       target.content = '（无回复）'
       target.related_papers = undefined
@@ -496,7 +561,7 @@ const send = async () => {
     if (cancelled || chatRequestSeq !== requestSeq || activeChatPaperId !== currentPaperId || paperId.value !== currentPaperId) {
       return
     }
-    const target = messages.value[assistantIdx]
+    const target = messages.value.find((m) => m._uid === assistantUid)
     if (target?.role === 'assistant') {
       target.content = '请求失败，请检查网络或 LLM 配置。'
       target.related_papers = undefined
@@ -507,7 +572,7 @@ const send = async () => {
     if (chatRequestSeq === requestSeq && activeChatAbortController === abortController) {
       activeChatAbortController = null
       activeChatPaperId = null
-      activeAssistantPlaceholderIndex = null
+      activeAssistantPlaceholderUid = null
       sending.value = false
     }
     await scrollBottom()
@@ -547,37 +612,43 @@ const onCopyCitation = async ({ key }: { key: string }) => {
 }
 const loadPaper = async () => {
   const loadSeq = ++paperLoadSeq
+  const targetPaperId = paperId.value
   cancelActiveChat('已取消上一篇论文的提问')
-  await flushReadingSession()
+  cancelPdfAcquisition()
   loadingPaper.value = true
+  loadingHistory.value = true
   loadError.value = ''
   paper.value = null
   resetPdfStreamUrl()
   pdfAcquireError.value = ''
   pdfReady.value = false
+  pdfParsing.value = false
   openingStarted.value = false
   messages.value = []
+  void flushReadingSession()
   await nextTick()
+  if (loadSeq !== paperLoadSeq) return
   initDefaultSplitIfNeeded()
-  if (paperId.value == null) {
+  if (targetPaperId == null) {
     loadError.value = '无效的文献 ID'
     loadingPaper.value = false
+    loadingHistory.value = false
     return
   }
-  readingSession.value = { paperId: paperId.value, startedAtMs: Date.now() }
+  readingSession.value = { paperId: targetPaperId, startedAtMs: Date.now() }
   try {
     // Fetch paper metadata and chat history in parallel — history only needs
     // the route paperId, not paper.value. The PDF branch still waits on
     // getPaper because it depends on paper.value.local_pdf_path / source_url.
     const [paperData, histData] = await Promise.all([
-      getPaper(paperId.value),
-      getPaperReaderHistory(paperId.value, 200).catch(() => null),
+      getPaper(targetPaperId),
+      getPaperReaderHistory(targetPaperId, 200).catch(() => null),
     ])
     if (loadSeq !== paperLoadSeq) return
     paper.value = paperData
     if (hasLocalPdfForViewer.value) {
       try {
-        await loadLocalPdf(paperId.value, loadSeq)
+        await loadLocalPdf(targetPaperId, loadSeq)
         if (loadSeq !== paperLoadSeq) return
       } catch (e: unknown) {
         if (loadSeq !== paperLoadSeq) return
@@ -600,8 +671,14 @@ const loadPaper = async () => {
           await scrollBottom()
         }
       }
-    } catch {
+    } catch (e) {
+      // Falls through to generating a fresh opening below, so the page still
+      // works — but the user silently loses their prior conversation, which
+      // is worth a trace.
+      console.error('Failed to restore reader chat history:', e)
     }
+    if (loadSeq !== paperLoadSeq) return
+    loadingHistory.value = false
     if (messages.value.length === 0) {
       void maybeStartOpening()
     } else if (messages.value[0]?.role === 'user') {
@@ -613,6 +690,8 @@ const loadPaper = async () => {
   } finally {
     if (loadSeq === paperLoadSeq) {
       loadingPaper.value = false
+      // Reloading the opening may already be restoring history again.
+      if (!openingStarted.value) loadingHistory.value = false
     }
   }
 }
@@ -1019,6 +1098,29 @@ onMounted(() => {
 .paper-reader__citation-chip:hover {
   background: var(--pg-primary, #6366f1);
   color: var(--pg-text-inverse);
+}
+/* Passage-level grounding: ✓ = quote verified on page (green), ⚠ = not found (amber) */
+.paper-reader__citation-chip--verified {
+  color: var(--pg-success, #15803d);
+  background: var(--pg-success-soft, #dcfce7);
+  border-color: var(--pg-success-border, #bbf7d0);
+}
+.paper-reader__citation-chip--verified:hover {
+  background: var(--pg-success, #16a34a);
+  color: var(--pg-text-inverse);
+}
+.paper-reader__citation-chip--unverified {
+  color: var(--pg-warning, #b45309);
+  background: var(--pg-warning-soft, #fef3c7);
+  border-color: var(--pg-warning-border, #fde68a);
+}
+.paper-reader__citation-chip--unverified:hover {
+  background: var(--pg-warning, #d97706);
+  color: var(--pg-text-inverse);
+}
+.paper-reader__citation-mark {
+  margin-left: 4px;
+  font-weight: 700;
 }
 .paper-reader__related-title {
   font-size: 12px;

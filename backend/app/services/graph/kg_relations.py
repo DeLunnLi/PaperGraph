@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -40,8 +41,13 @@ def _prune_recent_fingerprints(now: float) -> None:
             _kg_recent_fingerprints.pop(k, None)
 
 from ...utils.common import exec_sql
+from ...utils.db_init import ensure_once
 
 def ensure_tables(db_path: str) -> None:
+    ensure_once(db_path, _create_tables)
+
+
+def _create_tables(db_path: str) -> None:
     exec_sql(db_path,
         """CREATE TABLE IF NOT EXISTS paper_relations (
           source_paper_id INTEGER NOT NULL,
@@ -85,8 +91,6 @@ def _row_to_paper_meta(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 def _pdf_abspath_from_row(db_path: str, local_pdf_path: str | None) -> str | None:
-    import os
-
     if not local_pdf_path or not str(local_pdf_path).strip():
         return None
     data_root = os.path.dirname(os.path.abspath(db_path))
@@ -167,51 +171,52 @@ def fetch_new_and_candidates(
     lexical_pool: int = 480,
 ) -> tuple[dict[str, Any | None], list[dict[str, Any]]]:
     conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM papers WHERE id=?", (int(new_paper_id),))
-    row = cur.fetchone()
-    if not row:
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM papers WHERE id=?", (int(new_paper_id),))
+        row = cur.fetchone()
+        if not row:
+            return None, []
+        new_meta = _row_to_paper_meta(row)
+
+        cat = (new_meta.get("category") or "").strip()
+        year = new_meta.get("year")
+        params: list[Any] = []
+        where = ["id != ?"]
+        params.append(int(new_paper_id))
+
+        if cat:
+            where.append("(category = ? OR category LIKE ?)")
+            params.extend([cat, f"{cat.split('/')[0]}%"])
+
+        if year:
+            try:
+                y = int(year)
+                where.append("(year IS NULL OR year >= ?)")
+                params.append(max(1900, y - 8))
+            except Exception:
+                pass
+
+        wsql = " AND ".join(where)
+        cur.execute(
+            f"SELECT * FROM papers WHERE {wsql} ORDER BY created_at DESC LIMIT ?",
+            (*params, int(sql_limit)),
+        )
+        sql_metas = [_row_to_paper_meta(r) for r in cur.fetchall()]
+
+        cur.execute(
+            """
+            SELECT * FROM papers
+            WHERE id != ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (int(new_paper_id), int(lexical_pool)),
+        )
+        pool_rows = cur.fetchall()
+    finally:
         conn.close()
-        return None, []
-    new_meta = _row_to_paper_meta(row)
-
-    cat = (new_meta.get("category") or "").strip()
-    year = new_meta.get("year")
-    params: list[Any] = []
-    where = ["id != ?"]
-    params.append(int(new_paper_id))
-
-    if cat:
-        where.append("(category = ? OR category LIKE ?)")
-        params.extend([cat, f"{cat.split('/')[0]}%"])
-
-    if year:
-        try:
-            y = int(year)
-            where.append("(year IS NULL OR year >= ?)")
-            params.append(max(1900, y - 8))
-        except Exception:
-            pass
-
-    wsql = " AND ".join(where)
-    cur.execute(
-        f"SELECT * FROM papers WHERE {wsql} ORDER BY created_at DESC LIMIT ?",
-        (*params, int(sql_limit)),
-    )
-    sql_metas = [_row_to_paper_meta(r) for r in cur.fetchall()]
-
-    cur.execute(
-        """
-        SELECT * FROM papers
-        WHERE id != ?
-        ORDER BY created_at DESC
-        LIMIT ?
-        """,
-        (int(new_paper_id), int(lexical_pool)),
-    )
-    pool_rows = cur.fetchall()
-    conn.close()
 
     new_lex = _lexical_token_set(new_meta)
     new_ref_sigs = _reference_signatures(new_meta.get("references") or [])
@@ -255,37 +260,39 @@ def upsert_relations(db_path: str, source_paper_id: int, edges: list[dict[str, A
     ensure_tables(db_path)
     now = int(time.time())
     conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    n = 0
-    for e in edges:
-        try:
-            tid = int(e.get("target_paper_id"))
-        except Exception:
-            continue
-        rel = str(e.get("relation") or "").strip()[:32]
-        if len(rel) < 2 or len(rel) > 32:
-            continue
-        try:
-            score = float(e.get("score") or 0.0)
-        except Exception:
-            score = 0.0
-        ev = str(e.get("evidence") or "").strip()[:240]
-        if tid <= 0 or tid == int(source_paper_id):
-            continue
-        cur.execute(
-            """
-            INSERT INTO paper_relations(source_paper_id, target_paper_id, relation, score, evidence, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_paper_id, target_paper_id, relation) DO UPDATE SET
-              score=excluded.score,
-              evidence=excluded.evidence,
-              updated_at=excluded.updated_at
-            """,
-            (int(source_paper_id), int(tid), rel, float(score), ev, now, now),
-        )
-        n += 1
-    conn.commit()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        n = 0
+        for e in edges:
+            try:
+                tid = int(e.get("target_paper_id"))
+            except Exception:
+                continue
+            rel = str(e.get("relation") or "").strip()[:32]
+            if len(rel) < 2 or len(rel) > 32:
+                continue
+            try:
+                score = float(e.get("score") or 0.0)
+            except Exception:
+                score = 0.0
+            ev = str(e.get("evidence") or "").strip()[:240]
+            if tid <= 0 or tid == int(source_paper_id):
+                continue
+            cur.execute(
+                """
+                INSERT INTO paper_relations(source_paper_id, target_paper_id, relation, score, evidence, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_paper_id, target_paper_id, relation) DO UPDATE SET
+                  score=excluded.score,
+                  evidence=excluded.evidence,
+                  updated_at=excluded.updated_at
+                """,
+                (int(source_paper_id), int(tid), rel, float(score), ev, now, now),
+            )
+            n += 1
+        conn.commit()
+    finally:
+        conn.close()
     return n
 
 def build_relations_for_new_paper(db_path: str, new_paper_id: int) -> int:

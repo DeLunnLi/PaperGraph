@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import sqlite3
 import time
@@ -9,6 +10,9 @@ from collections import Counter
 
 from ...models.schemas import FeedbackActionEnum as FeedbackAction
 from ...utils.common import exec_sql
+from ...utils.db_init import ensure_once
+
+logger = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def _conn(db_path: str):
@@ -21,6 +25,10 @@ def _conn(db_path: str):
         conn.close()
 
 def ensure_tables(db_path: str) -> None:
+    ensure_once(db_path, _create_tables)
+
+
+def _create_tables(db_path: str) -> None:
     exec_sql(db_path,
         """CREATE TABLE IF NOT EXISTS daily_recommend_feedback (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,9 +117,7 @@ def record_feedback(
                         _upsert_interest_evolution(cur, date_key, kw.strip(), category, weight, "feedback", now)
         return True
     except Exception as e:
-        import logging
-
-        logging.getLogger(__name__).warning(f"记录推荐反馈失败: {e}")
+        logger.warning("记录推荐反馈失败: %s", e)
         return False
 
 def _action_to_weight(action: FeedbackAction) -> float:
@@ -210,6 +216,11 @@ def _upsert_interest_evolution(
     source: str,
     now: int,
 ) -> None:
+    # SQLite treats NULLs as distinct in UNIQUE constraints, so ON CONFLICT
+    # never fires when category is NULL — weights silently stop accumulating
+    # and duplicate rows pile up.  Coalesce to an empty-string sentinel so the
+    # constraint matches consistently without a schema migration.
+    cat = (category or "").strip() if category else ""
     cur.execute(
         """
         INSERT INTO user_interest_evolution (date_key, keyword, category, interaction_weight, source, created_at)
@@ -218,7 +229,7 @@ def _upsert_interest_evolution(
           interaction_weight = interaction_weight + excluded.interaction_weight,
           created_at = excluded.created_at
         """,
-        (str(date_key), keyword.lower(), category, weight, source, now),
+        (str(date_key), keyword.lower(), cat, weight, source, now),
     )
 
 def get_skipped_papers(

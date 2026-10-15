@@ -1,4 +1,4 @@
-import { ref, type Ref } from 'vue'
+import { onScopeDispose, ref, shallowRef, toRaw, type Ref } from 'vue'
 interface SearchConversation<TMessage> {
   id: string
   title: string
@@ -22,7 +22,10 @@ export function useSearchConversations<TMessage>({
   stateStorageKey = 'searchAgentState',
   conversationsStorageKey = 'searchAgentConversations',
 }: UseSearchConversationsOptions<TMessage>) {
-  const conversations = ref<SearchConversation<TMessage>[]>([])
+  // shallowRef: conversation entries are replaced wholesale (never mutated in
+  // place), so deep reactivity would only cost proxy overhead. It also keeps the
+  // generic TMessage intact, which ref() would erode via UnwrapRefSimple.
+  const conversations = shallowRef<SearchConversation<TMessage>[]>([])
   const currentConversationId = ref<string | null>(null)
   const PERSIST_DEBOUNCE_MS = 900
   const CONVERSATION_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -32,7 +35,25 @@ export function useSearchConversations<TMessage>({
   let statePersistTimer: ReturnType<typeof setTimeout> | null = null
 
   function cloneMessages(value: TMessage[]): TMessage[] {
-    return JSON.parse(JSON.stringify(value)) as TMessage[]
+    // structuredClone is native and faster than a JSON round-trip, but it throws
+    // DataCloneError on Proxy objects — and `messages` is a deep reactive ref, so
+    // every element is a Proxy. toRaw() unwraps the outer array; the per-item
+    // toRaw handles nested reactive objects. JSON stays as the last-resort
+    // fallback (e.g. values holding functions/DOM nodes that can't be cloned).
+    const raw = toRaw(value).map((item) => toRaw(item))
+    if (typeof structuredClone === 'function') {
+      try {
+        return structuredClone(raw)
+      } catch {
+        // fall through to JSON
+      }
+    }
+    try {
+      return JSON.parse(JSON.stringify(raw)) as TMessage[]
+    } catch (e) {
+      console.error('Failed to clone messages:', e)
+      return []
+    }
   }
   function generateId(): string {
     return Date.now().toString(36) + Math.random().toString(36).slice(2)
@@ -91,7 +112,12 @@ export function useSearchConversations<TMessage>({
           timestamp: Date.now(),
         })
       )
-    } catch {
+    } catch (e) {
+      // Most likely a QuotaExceededError (or Safari private mode, where
+      // setItem always throws). Silently dropping it meant search state just
+      // stopped being restored with no clue why; the sibling persist/load
+      // helpers all log, so match them.
+      console.error('Failed to save search state:', e)
     }
   }
   function saveState(immediate = false) {
@@ -148,11 +174,11 @@ export function useSearchConversations<TMessage>({
       messageCount: messages.value.length,
     }
     const existingIndex = conversations.value.findIndex((c) => c.id === convId)
-    if (existingIndex >= 0) conversations.value.splice(existingIndex, 1, next)
-    else conversations.value.unshift(next)
-    if (conversations.value.length > MAX_CONVERSATIONS) {
-      conversations.value.splice(MAX_CONVERSATIONS)
-    }
+    const merged =
+      existingIndex >= 0
+        ? conversations.value.map((item, i) => (i === existingIndex ? next : item))
+        : [next, ...conversations.value]
+    conversations.value = merged.slice(0, MAX_CONVERSATIONS)
     saveConversations()
   }
   function ensureCurrentConversationId(): string {
@@ -180,9 +206,8 @@ export function useSearchConversations<TMessage>({
     clearState()
   }
   function removeConversation(id: string) {
-    const index = conversations.value.findIndex((c) => c.id === id)
-    if (index < 0) return
-    conversations.value.splice(index, 1)
+    if (!conversations.value.some((c) => c.id === id)) return
+    conversations.value = conversations.value.filter((c) => c.id !== id)
     saveConversations()
     if (currentConversationId.value === id) createNewConversation(false)
   }
@@ -204,6 +229,13 @@ export function useSearchConversations<TMessage>({
     }
     return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
   }
+
+  // Safety net: clear debounce timers if the owning component forgets to flush.
+  onScopeDispose(() => {
+    if (conversationsPersistTimer) clearTimeout(conversationsPersistTimer)
+    if (statePersistTimer) clearTimeout(statePersistTimer)
+  })
+
   return {
     conversations,
     currentConversationId,

@@ -1,15 +1,18 @@
-import DOMPurify from 'dompurify'
+import DOMPurify, { type Config } from 'dompurify'
 import { ensureKatex, renderKatex } from '@/utils/katex'
 
 // Warm katex (lazy chunk) so math renders without a flash when it arrives.
 void ensureKatex()
 
+// `satisfies` (not `as const`, not a plain annotation): DOMPurify's Config wants
+// mutable string[] for FORBID_*, while the literal type must survive so the
+// sanitize() overload returning `string` is selected over `TrustedHTML`.
 const SANITIZE_CONFIG = {
   USE_PROFILES: { html: true, mathMl: true },
   ALLOW_UNKNOWN_PROTOCOLS: false,
   FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'style'],
   FORBID_ATTR: ['style'],
-} as const
+} satisfies Config
 
 function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, SANITIZE_CONFIG)
@@ -65,6 +68,18 @@ function cacheRender(key: string, value: string): void {
   }
   _RENDER_CACHE.set(key, value)
 }
+// Same bounded memoization for plain renderMarkdown: PaperReader calls it in
+// the template for every assistant message, so any component re-render (each
+// composer keystroke included) would otherwise re-run the full regex pipeline
+// + DOMPurify over the whole conversation.
+const _MD_CACHE = new Map<string, string>()
+function cacheMarkdown(key: string, value: string): void {
+  if (_MD_CACHE.size >= _RENDER_CACHE_MAX) {
+    const first = _MD_CACHE.keys().next().value
+    if (first !== undefined) _MD_CACHE.delete(first)
+  }
+  _MD_CACHE.set(key, value)
+}
 export function repairTabSeparatedPseudoTables(text: string): string {
   const raw = String(text || '').replace(/\r\n/g, '\n')
   const lines = raw.split('\n')
@@ -113,7 +128,10 @@ export function repairTabSeparatedPseudoTables(text: string): string {
 }
 export function renderMarkdown(text: string): string {
   if (!text) return ''
-  const repaired = repairTabSeparatedPseudoTables(String(text))
+  const cacheKey = String(text)
+  const cached = _MD_CACHE.get(cacheKey)
+  if (cached !== undefined) return cached
+  const repaired = repairTabSeparatedPseudoTables(cacheKey)
   const normalized = repaired.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
   let html = normalized
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -124,10 +142,11 @@ export function renderMarkdown(text: string): string {
     .replace(/^### (.*$)/gim, '<h3>$1</h3>').replace(/^## (.*$)/gim, '<h2>$1</h2>').replace(/^# (.*$)/gim, '<h1>$1</h1>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>')
     .replace(/^\* (.*$)/gim, '<li>$1</li>').replace(/^- (.*$)/gim, '<li>$1</li>')
-    .replace(/^\d+\. (.*$)/gim, '<li>$1</li>')
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, (match) => {
-    const hasNumbers = /^\d+\. /.test(text.substring(text.indexOf(match) - 10, text.indexOf(match)))
-    return hasNumbers ? `<ol>${match}</ol>` : `<ul>${match}</ul>`
+    .replace(/^\d+\. (.*$)/gim, '<li data-ol>$1</li>')
+  html = html.replace(/(<li(?: data-ol)?>.*<\/li>\n?)+/g, (match) => {
+    const isOrdered = match.includes(' data-ol>')
+    const inner = isOrdered ? match.replace(/ data-ol/g, '') : match
+    return isOrdered ? `<ol>${inner}</ol>` : `<ul>${inner}</ul>`
   })
   html = html.replace(/((?:^\|.+\|\n?)+)/gm, (tableBlock) => {
     const rows = tableBlock.trim().split('\n').filter(r => r.includes('|'))
@@ -146,5 +165,7 @@ export function renderMarkdown(text: string): string {
     if (trimmed.startsWith('<h') || trimmed.startsWith('<ul') || trimmed.startsWith('<ol') || trimmed.startsWith('<pre') || trimmed.startsWith('<li') || trimmed === '<hr>' || trimmed.startsWith('<hr ')) return trimmed
     return `<p>${trimmed.replace(/\n/g, '<br>')}</p>`
   }).filter(p => p && p !== '<p><br></p>' && p !== '<p></p>').join('\n')
-  return sanitizeHtml(html)
+  const result = sanitizeHtml(html)
+  cacheMarkdown(cacheKey, result)
+  return result
 }

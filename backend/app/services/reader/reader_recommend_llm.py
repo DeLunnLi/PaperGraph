@@ -204,10 +204,10 @@ def rerank_reader_recommend_pairs_by_llm(
 
     if not order or len(order) < max(2, (n + 1) // 2):
         try:
-            from ...agents.support.reader_reference_lookup_tool import rerank_reader_pairs_by_anchor
+            from ...agents.support.reader_reference_lookup_tool import rerank_reader_pairs_by_anchor_refs_first
 
             kn = max(1, min(hint, n, READER_RECOMMEND_MAX_RESULTS))
-            return rerank_reader_pairs_by_anchor(snap, bib, k=kn) + head
+            return rerank_reader_pairs_by_anchor_refs_first(snap, bib, k=kn) + head
         except Exception:
             return bib[: max(1, min(hint, n, READER_RECOMMEND_MAX_RESULTS))] + head
 

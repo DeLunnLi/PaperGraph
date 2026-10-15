@@ -19,6 +19,7 @@ fitz = pytest.importorskip("fitz")
 
 from app.services.reader import paper_reader_context as prc
 from app.services.reader.paper_reader_context import (
+    _cache_get,
     _cache_set,
     compute_and_cache_excerpt,
 )
@@ -53,6 +54,12 @@ def test_cached_excerpt_skips_reparse(db_path, sample_pdf, monkeypatch):
 
     compute_and_cache_excerpt(db_path, 42, sample_pdf)  # must return without parsing
 
+    # Also assert the cached value survived untouched. Without this the test
+    # only proves "no re-parse" — the excerpt could be silently wiped or
+    # replaced and this file would still pass.
+    cached, _ = _cache_get(db_path, 42, sample_pdf)
+    assert cached == "cached excerpt text"
+
 
 def test_missing_cache_falls_through_to_parse(db_path, sample_pdf, monkeypatch):
     # No cache entry → extract_pdf_text_full runs; stub it to a known string and
@@ -67,3 +74,30 @@ def test_missing_cache_falls_through_to_parse(db_path, sample_pdf, monkeypatch):
 
     compute_and_cache_excerpt(db_path, 99, sample_pdf)
     assert calls["n"] == 1
+    # The parsed text must actually land in the cache, not just be computed.
+    cached, _ = _cache_get(db_path, 99, sample_pdf)
+    assert cached == "freshly parsed excerpt"
+
+
+def test_pages_present_skips_full_parse(db_path, sample_pdf, monkeypatch):
+    # Round-7 perf fix: when page-chunk parsing yields pages, the full-text
+    # extractor must NOT run a second pymupdf4llm pass — the excerpt is derived
+    # by joining page texts. extract_pdf_text_full should never be called.
+    def _boom(abspath):
+        raise AssertionError("extract_pdf_text_full should not run when pages parse OK")
+    monkeypatch.setattr(prc, "extract_pdf_text_full", _boom)
+    monkeypatch.setattr(
+        prc,
+        "extract_pdf_text_with_pages",
+        lambda abspath: [{"page": 1, "text": "PAGE_ONE"}, {"page": 2, "text": "PAGE_TWO"}],
+    )
+
+    compute_and_cache_excerpt(db_path, 7, sample_pdf)  # must derive excerpt from pages only
+
+    # The excerpt must be *derived from the page texts*. Previously this test
+    # only checked that the full-text extractor stayed unused, so replacing the
+    # join with a constant still passed.
+    cached, pages = _cache_get(db_path, 7, sample_pdf)
+    assert cached is not None
+    assert "PAGE_ONE" in cached and "PAGE_TWO" in cached
+    assert pages and [p["page"] for p in pages] == [1, 2]

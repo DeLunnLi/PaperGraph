@@ -127,24 +127,6 @@ a {
   background: rgba(82, 82, 91, 0.38);
 }
 
-/* 玻璃拟态容器 —— 通用工具类 */
-.pg-glass {
-  background: var(--pg-glass-bg);
-  backdrop-filter: var(--pg-glass-blur);
-  -webkit-backdrop-filter: var(--pg-glass-blur);
-  border: 1px solid var(--pg-glass-border);
-  box-shadow: var(--pg-shadow-sm);
-}
-.pg-glass--strong {
-  background: var(--pg-glass-bg-strong);
-}
-.pg-card {
-  background: var(--pg-surface);
-  border: 1px solid var(--pg-border);
-  border-radius: var(--pg-radius-lg);
-  box-shadow: var(--pg-shadow-xs);
-}
-
 .ant-btn,
 .ant-input,
 .ant-input-affix-wrapper,

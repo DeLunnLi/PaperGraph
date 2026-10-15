@@ -7,6 +7,8 @@ import os
 import re
 from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
+
 import requests
 
 from .conference_landing_pdf import fetch_pdf_url_from_html_page, is_safe_public_http_url, safe_public_get
@@ -15,8 +17,6 @@ from .paper import Paper
 # ── SSRF / size guards ────────────────────────────────────────
 _MAX_PDF_BYTES = 200 * 1024 * 1024   # 200 MiB hard ceiling
 _MAX_REDIRECTS = 5
-
-_log = logging.getLogger(__name__)
 
 def _is_pkp_ojs_article_download_url(url: str) -> bool:
     return bool(re.search(r"/article/download/\d+/\d+", (url or ""), re.I))
@@ -75,7 +75,7 @@ def _pdf_download_candidates(paper: Paper, email: str) -> list[str]:
         resolved = resolve_paper_pdf_url(paper, email=email)
         _push(resolved)
     except Exception as ex:
-        _log.warning("resolve_paper_pdf_url 异常（已忽略）: %s", ex, exc_info=True)
+        logger.warning("resolve_paper_pdf_url 异常（已忽略）: %s", ex, exc_info=True)
 
     # Last resort: derive PDF URL from abstract page URL pattern
     if not out and su:
@@ -141,13 +141,12 @@ def resolve_paper_pdf_url(paper: Paper, email: str = "") -> str | None:
     if ax:
         return ax
 
-    # Recover arXiv PDF URL from DOI/source URL.
-    if not ax:
-        for field_val in (getattr(paper, "doi", None) or "", getattr(paper, "source_url", None) or ""):
-            m = re.search(r"arxiv/([\d.]+)", str(field_val), re.I)
-            if m:
-                ax = f"https://arxiv.org/pdf/{m.group(1)}"
-                return ax
+    # Recover arXiv PDF URL from DOI/source URL (ax is falsy here — the
+    # truthy case returned above).
+    for field_val in (getattr(paper, "doi", None) or "", getattr(paper, "source_url", None) or ""):
+        m = re.search(r"arxiv/([\d.]+)", str(field_val), re.I)
+        if m:
+            return f"https://arxiv.org/pdf/{m.group(1)}"
 
     probe_candidates: list[str] = []
     seen: set[str] = set()
@@ -164,6 +163,7 @@ def resolve_paper_pdf_url(paper: Paper, email: str = "") -> str | None:
             if got:
                 return got
         except Exception:
+            logger.debug("pdf_download: html pdf-link probe failed for %s", cand_url, exc_info=True)
             continue
 
     # OpenReview forum pages expose PDFs at /pdf?id=...
@@ -180,7 +180,7 @@ def resolve_paper_pdf_url(paper: Paper, email: str = "") -> str | None:
                 if r.status_code == 200 and r.headers.get("content-type", "").startswith("application/pdf"):
                     return doi_u
         except Exception:
-            pass
+            logger.debug("doi direct-pdf probe failed for %s", doi_u, exc_info=True)
 
     return None
 
@@ -200,7 +200,7 @@ def download_paper_pdf_to_path(paper: Paper, dest_abspath: str, email: str = "")
 
         for url in urls:
             if not is_safe_public_http_url(url):
-                _log.warning("SSRF blocked: %s", url)
+                logger.warning("SSRF blocked: %s", url)
                 continue
             tmp = dest_abspath + ".part"
             try:
@@ -216,7 +216,7 @@ def download_paper_pdf_to_path(paper: Paper, dest_abspath: str, email: str = "")
                             if chunk:
                                 total += len(chunk)
                                 if total > _MAX_PDF_BYTES:
-                                    _log.warning("PDF exceeded %d MiB, aborting", _MAX_PDF_BYTES // (1024 * 1024))
+                                    logger.warning("PDF exceeded %d MiB, aborting", _MAX_PDF_BYTES // (1024 * 1024))
                                     break
                                 f.write(chunk)
                         else:
@@ -240,6 +240,6 @@ def download_paper_pdf_to_path(paper: Paper, dest_abspath: str, email: str = "")
         return False
 
     except Exception as ex:
-        _log.warning("download_paper_pdf_to_path 异常: %s", ex, exc_info=True)
+        logger.warning("download_paper_pdf_to_path 异常: %s", ex, exc_info=True)
         _cleanup_temp_file(dest_abspath + ".part")
         return False

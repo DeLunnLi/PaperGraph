@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ACollapse, { CollapsePanel as ACollapsePanel } from 'ant-design-vue/es/collapse'
 export interface SearchToolCall {
   name: string
   status: 'running' | 'success' | 'error'

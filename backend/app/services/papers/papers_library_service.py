@@ -1,12 +1,33 @@
 import logging
 import os
+import re
 import threading
 import time
+
+from cachetools import TTLCache
 
 from fastapi import BackgroundTasks, HTTPException, Request
 
 from ...settings import get_settings
 from ...utils.common import safe_http_500
+
+# The repair walk does a full os.walk of the library PDF tree — cache its
+# result briefly per (user, missing-id set) so repeat library lists don't
+# re-walk the filesystem on every request.
+_REPAIR_CACHE: TTLCache = TTLCache(maxsize=64, ttl=60)
+_REPAIR_CACHE_LOCK = threading.Lock()
+
+
+def _repair_missing_pdfs(db, ids_missing_pdf: list[int], *, user_id: int) -> dict[int, str]:
+    key = (int(user_id), tuple(sorted(int(i) for i in ids_missing_pdf)))
+    with _REPAIR_CACHE_LOCK:
+        cached = _REPAIR_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    repaired = db.repair_library_local_pdf_paths_batch(ids_missing_pdf, user_id=user_id)
+    with _REPAIR_CACHE_LOCK:
+        _REPAIR_CACHE[key] = dict(repaired)
+    return repaired
 from ...models.schemas import (
     DeletePaperResponse,
     LibraryCategoriesResponse,
@@ -80,18 +101,23 @@ def get_library(
 
         tag_list = [t.strip() for t in tags.split(",")] if tags else None
         cat = (category or "").strip() or None
-        if q or year_from or year_to or read_status or tag_list or cat:
+        filters = dict(
+            query=q,
+            tags=tag_list,
+            year_from=year_from,
+            year_to=year_to,
+            read_status=read_status.value if read_status else None,
+            category=cat,
+            user_id=user_id,
+        )
+        filtered = bool(q or year_from is not None or year_to is not None or read_status or tag_list or cat)
+        if filtered:
             papers_data = db.search_library(
-                query=q,
-                tags=tag_list,
-                year_from=year_from,
-                year_to=year_to,
-                read_status=read_status.value if read_status else None,
-                category=cat,
+                **filters,
                 limit=limit,
                 offset=offset,
-                user_id=user_id,
             )
+            total = db.count_search_library(**filters)
         else:
             papers_data = db.get_all_papers(
                 limit=limit,
@@ -99,6 +125,7 @@ def get_library(
                 order_by="created_at DESC",
                 user_id=user_id,
             )
+            total = db.count_papers(user_id=user_id)
 
         ids_missing_pdf = [
             int(p.id)
@@ -106,14 +133,13 @@ def get_library(
             if p.id is not None and not (getattr(p, "local_pdf_path", None) or "").strip()
         ]
         if ids_missing_pdf:
-            repaired = db.repair_library_local_pdf_paths_batch(ids_missing_pdf, user_id=user_id)
+            repaired = _repair_missing_pdfs(db, ids_missing_pdf, user_id=user_id)
             for p in papers_data:
                 if p.id is not None and int(p.id) in repaired:
                     p.local_pdf_path = repaired[int(p.id)]
 
-        total = db.count_papers(user_id=user_id) if not (q or year_from or year_to or read_status or tag_list or cat) else len(papers_data) + (1 if len(papers_data) >= limit else 0)
         papers = [litpaper_to_api_paper_fn(p) for p in papers_data]
-        return PapersResponse(success=True, total=total or len(papers), papers=papers)
+        return PapersResponse(success=True, total=total, papers=papers)
     except Exception as e:
         raise safe_http_500("papers_library_service", e)
 
@@ -149,7 +175,6 @@ def save_papers(
                 lit_p.arxiv_id = (api_p.arxiv_id or "").strip()
             # Fill missing arXiv ID from DOI/source URL.
             if not (getattr(lit_p, "arxiv_id", None) or "").strip():
-                import re
                 for field_val in ((api_p.doi or "").strip(), (api_p.source_url or "").strip()):
                     m = re.search(r"arxiv/([\d.]+)", field_val, re.I)
                     if m:
@@ -159,7 +184,6 @@ def save_papers(
             if not (getattr(lit_p, "venue_type", None) or "").strip():
                 j = (getattr(lit_p, "journal", None) or "").strip()
                 if j:
-                    import re
                     if re.search(r"(?i)\b(journal|transactions|letters|magazine|review|annals|acta|bulletin)\b", j):
                         lit_p.venue_type = "journal"
                     else:
@@ -168,7 +192,6 @@ def save_papers(
             # Fill missing DOI from source URL.
             if not (getattr(lit_p, "doi", None) or "").strip():
                 su = (api_p.source_url or "").strip()
-                import re
                 m = re.search(r"doi\.org/(10\.\S+)", su, re.I)
                 if m:
                     lit_p.doi = m.group(1)
@@ -217,12 +240,8 @@ def save_papers(
                         llm_classified += 1
             except Exception as e:
                 logger.warning("大模型归类未执行：%s", e)
-                for lit_p in lit_list:
-                    lit_p.category = normalize_library_category_display(getattr(lit_p, "category", None))
         elif lit_list:
-
-            for lit_p in lit_list:
-                lit_p.category = normalize_library_category_display(getattr(lit_p, "category", None))
+            pass
 
         for lit_p in lit_list:
             lit_p.category = normalize_library_category_display(getattr(lit_p, "category", None))
@@ -230,11 +249,11 @@ def save_papers(
         t_after_classify = time.perf_counter()
 
         # Backfill missing abstracts via Tavily.
+        from ...settings import get_settings as _gs
+        _ak = getattr(_gs(), "tavily_api_key", "").strip()
         for lit_p in lit_list:
             if not (lit_p.abstract or "").strip() and lit_p.title:
                 try:
-                    from ...settings import get_settings as _gs
-                    _ak = getattr(_gs(), "tavily_api_key", "").strip()
                     if _ak:
                         import httpx
                         _resp = httpx.post("https://api.tavily.com/search", json={
@@ -254,6 +273,12 @@ def save_papers(
                 if pid is None or int(pid) <= 0:
                     continue
                 build_relations_for_new_paper(db.db_path, int(pid))
+                try:
+                    from ..graph.kg_citations import build_citation_edges_for_paper
+
+                    build_citation_edges_for_paper(db.db_path, int(pid), user_id=user_id)
+                except Exception:
+                    logger.debug("save_papers.citation_edges_failed pid=%s", pid, exc_info=True)
             except Exception:
                 continue
         t_after_kg = time.perf_counter()

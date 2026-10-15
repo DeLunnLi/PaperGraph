@@ -6,6 +6,7 @@ each annotated with page range metadata for citation traceability.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,6 @@ def chunk_pages(
         clean_text = chunk_text
         clean_text = clean_text.replace(PAGE_MARK, "")  # remove markers
         # Remove leading page number if present (from marker)
-        import re
         clean_text = re.sub(r"^\d+\x00", "", clean_text)
         clean_text = clean_text.replace("\x00", "")
         clean_text = clean_text.strip()

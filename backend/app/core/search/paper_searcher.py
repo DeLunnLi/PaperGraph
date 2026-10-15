@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-from requests import Session
-from requests.adapters import HTTPAdapter
 
 from ..paper import Paper
 from app.exceptions import SearchSourceError
@@ -36,7 +34,7 @@ def abbreviate_journal(journal: str | None) -> str | None:
         return m.group(1).upper()
 
     caps = [w for w in re.findall(r"\b[A-Z]{3,8}\b", j)
-            if w not in ("IEEE", "ACM", "SIG", "CVF", "THE", "FOR", "AND", "WITH", "ON", "IN")]
+            if w not in ("IEEE", "ACM", "SIG", "CVF", "THE", "FOR", "AND", "WITH")]
     if caps:
         return caps[0]
     return j
@@ -79,6 +77,12 @@ class RateLimiter:
     def __init__(self, *, fixed_delays: dict[str, float]) -> None:
         self._fixed = dict(fixed_delays)
         self._last: dict[str, float] = {}
+        # One lock per source serializes concurrent callers. Without it,
+        # coroutines can observe the same old timestamp, sleep together, and
+        # issue a burst immediately afterwards — violating upstream quotas.
+        # Locks are recreated when the caller changes event loop because a
+        # PaperSearcher can also be used via the sync wrapper in tests/CLIs.
+        self._locks: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
 
     def _delay_for(self, source: str) -> float:
         return float(self._fixed.get(source, 0.0))
@@ -86,13 +90,21 @@ class RateLimiter:
     async def wait_async(self, source: str) -> None:
         delay = self._delay_for(source)
         if delay <= 0:
-            self._last[source] = time.time()
+            self._last[source] = time.monotonic()
             return
-        now = time.time()
-        elapsed = now - self._last.get(source, 0.0)
-        if elapsed < delay:
-            await asyncio.sleep(delay - elapsed)
-        self._last[source] = time.time()
+
+        loop = asyncio.get_running_loop()
+        lock_entry = self._locks.get(source)
+        if lock_entry is None or lock_entry[0] is not loop:
+            lock_entry = (loop, asyncio.Lock())
+            self._locks[source] = lock_entry
+
+        async with lock_entry[1]:
+            now = time.monotonic()
+            elapsed = now - self._last.get(source, 0.0)
+            if elapsed < delay:
+                await asyncio.sleep(delay - elapsed)
+            self._last[source] = time.monotonic()
 
 _DEFAULT_PAPER_SEARCHER_DOWNLOAD_DIR = str(Path(__file__).resolve().parents[3] / "downloads" / "papers")
 
@@ -140,12 +152,28 @@ class PaperSearcher:
         self.email, self.api_key, self.download_dir = _email, api_key, download_dir
         self._httpx_trust_env = bool(httpx_trust_env)
         os.makedirs(self.download_dir, exist_ok=True)
-        self._rate = RateLimiter(fixed_delays={"arxiv": 0.1, "openalex": 0.15, "dblp": 0.35, "europe_pmc": 0.15})
-        # Configure session with connection pooling
-        self._session = Session()
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=50)
-        self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
+        # arXiv's API terms require "no more than one request every three
+        # seconds" (https://info.arxiv.org/help/api/tou.html). The previous 0.1s
+        # exceeded that by 30x, which gets the whole host 429'd — and because
+        # _run_one swallows source errors into [], searches then silently
+        # returned fewer results instead of failing loudly.
+        # semantic_scholar: the unauthenticated Graph API is aggressively
+        # throttled (observed 429 on requests only ~5s apart) and it had no
+        # delay at all, so its very first call could 429 — silently, because the
+        # source returns [] on 429.
+        self._rate = RateLimiter(
+            fixed_delays={
+                "arxiv": 3.0,
+                "openalex": 0.15,
+                "dblp": 0.35,
+                "europe_pmc": 0.15,
+                "semantic_scholar": 3.0,
+                # Crossref is more permissive (esp. the polite pool via mailto),
+                # but it was previously unthrottled while issuing parallel DOI
+                # lookups.
+                "crossref": 0.2,
+            }
+        )
         self._async_client: Optional[httpx.AsyncClient] = None
         self._async_client_loop: Optional[asyncio.AbstractEventLoop] = None
         self.stats = {"arxiv_requests": 0, "dblp_requests": 0, "openalex_requests": 0,
@@ -274,13 +302,18 @@ class PaperSearcher:
         if venue_kw and unique_results:
             matched = [p for p in unique_results if self._paper_matches_venue_proceedings(p, venue_kw)]
             if matched and len(matched) >= max(1, len(unique_results) * 0.15):
-                non_matched = [p for p in unique_results if p not in matched]
+                # Use an id-set to avoid O(n*m) deep __eq__ comparisons on
+                # Pydantic Paper objects (triggered by ``p not in matched``).
+                matched_ids = {id(p) for p in matched}
+                non_matched = [p for p in unique_results if id(p) not in matched_ids]
                 unique_results = matched + non_matched
 
         if year_from is not None:
-            unique_results = [p for p in unique_results if (p.year or 0) >= int(year_from)]
+            # Papers with unknown year (common from DBLP / some OpenAlex results)
+            # must survive year filtering — dropping them silently loses recall.
+            unique_results = [p for p in unique_results if p.year is None or (p.year) >= int(year_from)]
         if year_to is not None:
-            unique_results = [p for p in unique_results if (p.year or 9999) <= int(year_to)]
+            unique_results = [p for p in unique_results if p.year is None or (p.year) <= int(year_to)]
 
         sort_mode = (kwargs.get("sort") or "relevance").lower().strip()
         if sort_mode == "date":
@@ -340,7 +373,7 @@ class PaperSearcher:
             if not _mcp_enabled():
                 sources = [s for s in sources if s != "mcp"]
         except Exception:
-            pass
+            logger.debug("paper_searcher: mcp enabled check failed", exc_info=True)
 
         raw_authors_kw = kwargs.get("authors") or kwargs.get("author") or []
         if isinstance(raw_authors_kw, str): raw_authors_kw = [raw_authors_kw]

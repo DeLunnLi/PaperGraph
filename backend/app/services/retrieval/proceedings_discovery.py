@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from functools import lru_cache
@@ -115,18 +116,25 @@ async def discover_proceedings_domains(
     from .web_presearch import tavily_search_async
 
     host_scores: dict[str, float] = {}
-    for q in _discovery_queries(venue, year):
-        try:
-            items = await tavily_search_async(
+    queries = _discovery_queries(venue, year)
+    results = await asyncio.gather(
+        *[
+            tavily_search_async(
                 api_key=api_key,
                 query=q,
                 max_results=8,
                 include_domains=None,
                 httpx_client=httpx_client,
             )
-        except Exception as e:
-            logger.debug("[proceedings_discovery] query failed %r: %s", q[:60], e)
+            for q in queries
+        ],
+        return_exceptions=True,
+    )
+    for q, res in zip(queries, results):
+        if isinstance(res, Exception):
+            logger.debug("[proceedings_discovery] query failed %r: %s", q[:60], res)
             continue
+        items = res
 
         for it in items or []:
             link = str(it.get("link") or it.get("url") or "").strip()

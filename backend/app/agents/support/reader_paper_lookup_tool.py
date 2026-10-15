@@ -17,6 +17,9 @@ from .reader_reference_lookup_tool import (
 
 logger = logging.getLogger(__name__)
 
+_REF_ARXIV = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|\barXiv:\s*)([\w.]+)", re.I)
+_REF_ARXIV_ID_LOOSE = re.compile(r"(?:^|[^\w])arxiv\s*:?\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b", re.I)
+
 def _normalize_ref_blob_for_match(blob: str) -> str:
     u = (blob or "").lower()
     u = re.sub(r"\s+", " ", u)
@@ -227,8 +230,6 @@ class ReaderPaperLookupTool(Tool):
             logger.warning("reader_paper_lookup_import_failed", exc_info=exc)
             return ToolResponse.error("IMPORT_FAILED", f"reader_paper_lookup：检索模块不可用。{exc}")
 
-        _REF_ARXIV = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|\barXiv:\s*)([\w.]+)", re.I)
-        _REF_ARXIV_ID_LOOSE = re.compile(r"(?:^|[^\w])arxiv\s*:?\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b", re.I)
         ax_match = _REF_ARXIV.search(q) or _REF_ARXIV_ID_LOOSE.search(q)
         ax_id = ""
         if ax_match:

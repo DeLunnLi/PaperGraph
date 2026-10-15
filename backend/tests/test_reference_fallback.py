@@ -45,7 +45,7 @@ def test_reference_fallback_returns_non_empty(monkeypatch):
         calls["kwargs"] = {"max_results": max_results}
         return [canned_paper]
 
-    import app.agents.paper_analysis_agent as paa
+    import app.agents.support.reader_reco_mixin as paa
     monkeypatch.setattr(paa, "resolve_references_via_openalex", _fake_resolve)
 
     ctx = ReaderCtx(snap={"references": ["Test Paper Title 2024"], "title": "Cur Paper"})

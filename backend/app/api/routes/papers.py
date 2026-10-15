@@ -132,7 +132,7 @@ async def save_papers(
     with route_errors("save_papers"):
         # save_papers runs synchronous LLM/HTTP/PDF work (classify, Tavily, KG,
         # download) — run it off the event loop so other requests stay responsive.
-        return await run_in_threadpool(
+        resp = await run_in_threadpool(
             save_papers_service,
             db=db,
             request=request,
@@ -141,6 +141,34 @@ async def save_papers(
             litpaper_to_api_paper_fn=litpaper_to_api_paper,
             user_id=user["user_id"],
         )
+        # 程序性记忆：从搜索结果保存 = 该查询策略有效，记录下来供未来搜索参考
+        if request.search_query and (resp.added or resp.updated):
+            _titles = [str(getattr(p, "title", "") or "")[:60] for p in request.papers[:3]]
+            background_tasks.add_task(
+                _record_search_strategy,
+                query=request.search_query,
+                titles=[t for t in _titles if t],
+            )
+        return resp
+
+
+def _record_search_strategy(query: str, titles: list[str]) -> None:
+    """Write a procedural memory: this query led to saved papers."""
+    try:
+        from ...services.memory.agent_memory import get_agent_memory
+
+        q = (query or "").strip()[:120]
+        if not q or not titles:
+            return
+        get_agent_memory().add(
+            agent_name="search",
+            content=f"查询「{q}」→ 用户保存了《{'》《'.join(titles[:3])}》",
+            memory_type="procedural",
+            importance=0.55,
+            tags=["search", "procedural"],
+        )
+    except Exception:
+        logger.debug("record_search_strategy failed", exc_info=True)
 
 @router.post("/import-pdf", response_model=LocalPdfImportResponse)
 async def import_pdf_to_library(
@@ -240,10 +268,17 @@ async def daily_papers(
             return resp
 
 @router.post("/reading/log")
-def log_reading_session(body: ReadingLogRequest, db_path=Depends(get_db_path), user: dict = Depends(require_user)):
+def log_reading_session(body: ReadingLogRequest, background_tasks: BackgroundTasks, db_path=Depends(get_db_path), user: dict = Depends(require_user)):
     from ...services.reading_log.log import append_session
+    from ...services.reader.reader_feedback_service import record_engaged_read
     append_session(db_path, paper_id=int(body.paper_id), user_id=user["user_id"], duration_sec=int(body.duration_sec),
                    client_ts=int(body.client_ts) if body.client_ts is not None else None)
+    # 隐式信号：长阅读会话为会话窗口内注入过的记忆记功（judge 归因，后台执行）
+    background_tasks.add_task(
+        record_engaged_read,
+        db_path=db_path, paper_id=int(body.paper_id),
+        user_id=user["user_id"], duration_sec=int(body.duration_sec),
+    )
     return {"success": True}
 
 @router.get("/reading/calendar", response_model=ReadingCalendarResponse)

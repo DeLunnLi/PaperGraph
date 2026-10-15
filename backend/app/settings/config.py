@@ -102,6 +102,10 @@ class Settings(BaseSettings):
         le=5,
         description="默认重试次数（不含首轮）",
     )
+    agent_runtime_max_concurrency: int = Field(
+        default=8, ge=1, le=64,
+        description="有超时限制的模型任务最大并发数；等待执行名额计入任务时限",
+    )
 
     papergraph_intent_parse_max_retries: int = Field(
         default=2,
@@ -177,6 +181,56 @@ class Settings(BaseSettings):
     trace_cleanup_interval_sec: int = Field(
         default=3600, ge=0, le=86400,
         description="trace 清理后台任务间隔秒数；0=禁用后台任务（仅启动时清理一次）",
+    )
+
+    # ---- 自进化记忆（LLM 判别，无写死评分公式） ----
+    memory_llm_judge_enabled: bool = Field(
+        default=True,
+        description="记忆检索/反馈/进化是否由 LLM 判别；关闭后检索回退为按时间排序、反馈只记日志",
+    )
+    memory_judge_max_candidates: int = Field(
+        default=24, ge=4, le=100,
+        description="单次 LLM 判别的候选记忆上限（控制 prompt 大小与延迟）",
+    )
+    memory_evolution_interval_sec: int = Field(
+        default=21600, ge=0, le=86400,
+        description="记忆进化后台任务间隔秒数（默认 6h）；0=禁用后台任务（仅启动时跑一次）",
+    )
+    memory_evolution_batch_size: int = Field(
+        default=20, ge=4, le=100,
+        description="周期进化时每批送 LLM 审查的候选记忆条数",
+    )
+    memory_evolution_min_age_days: int = Field(
+        default=7, ge=1, le=365,
+        description="进入 LLM 周期审查的候选条件之一：记忆年龄超过该天数且从未被检索命中",
+    )
+    memory_semantic_recall_enabled: bool = Field(
+        default=True,
+        description="记忆检索是否启用 embedding 语义召回桶（候选收集；不可用/关闭时回退纯 recency 候选）",
+    )
+    memory_semantic_top_k: int = Field(
+        default=8, ge=1, le=50,
+        description="语义召回桶送入 LLM 判别的候选条数上限",
+    )
+    memory_semantic_backfill_cap: int = Field(
+        default=48, ge=0, le=500,
+        description="单次检索调用最多惰性回填的记忆 embedding 条数（限制延迟）",
+    )
+    memory_engaged_read_min_sec: int = Field(
+        default=240, ge=0, le=86400,
+        description="阅读时长达到该秒数才触发 engaged_read 记忆归因（防刷）",
+    )
+    memory_reflection_enabled: bool = Field(
+        default=True,
+        description="周期进化中是否启用反思阶段（LLM 跨记忆提炼元记忆）",
+    )
+    memory_reflection_min_events: int = Field(
+        default=5, ge=1, le=1000,
+        description="距上次反思以来至少新增这么多进化/反馈事件才触发新一轮反思（活动门控）",
+    )
+    memory_reflection_lookback_days: int = Field(
+        default=7, ge=1, le=90,
+        description="反思证据的回望窗口（天）",
     )
 
     papergraph_daily_auto_refresh: bool = Field(default=True)

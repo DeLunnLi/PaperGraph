@@ -24,7 +24,7 @@
   </div>
 </template>
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, shallowRef } from 'vue'
 import { getReadingCalendar } from '@/services/api/papers'
 type Level = 0 | 1 | 2 | 3 | 4
 type MonthCell =
@@ -41,7 +41,7 @@ type MonthCell =
     }
 const syncing = ref(false)
 const days = ref(366)
-const items = ref<{ date: string; seconds: number; sessions: number }[]>([])
+const items = shallowRef<{ date: string; seconds: number; sessions: number }[]>([])
 const weekDays = ['日', '一', '二', '三', '四', '五', '六']
 function pad2(n: number) {
   return String(n).padStart(2, '0')

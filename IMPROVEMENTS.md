@@ -55,24 +55,26 @@
 **文件**: `requirements.txt`
 
 **变更**:
-- 移除: `hello-agents>=1.0.0` ❌
-- 新增: `openai>=1.109.0` ✅
 - 新增: `cachetools>=5.3.0` ✅
+
+**更正（此前记录有误）**: `hello-agents` **仍是必需依赖**，未被移除。
+它为 `HelloAgentsLLM`、`SimpleAgent`、`ToolRegistry`、`Tool`/`ToolResponse`
+和 `CircuitBreaker` 提供支撑，被 `app/services/llm/llm_service.py`、
+`app/agents/support/reader_tools_mixin.py`、`reader_paper_lookup_tool.py`、
+`reader_pdf_parse_tool.py` 与 `app/core/search/sources/base.py` 直接 import。
+`openai` 从未被引入，代码中无任何 `import openai`。
 
 ---
 
 ## 待办改进（需进一步评估）
 
-### 5. 大型文件拆分
+### 5. 大型文件拆分 ✅ 已完成
 **目标**: `app/agents/paper_analysis_agent.py` (909行 → <500行)
 
-**建议拆分方案**:
-```
-app/agents/support/
-├── reader_recommendation.py    # 论文推荐逻辑
-├── reader_extraction.py        # LLM 提取解析
-└── reader_tools_factory.py     # 工具构建
-```
+已在 `refactor: paper_analysis_agent 拆分为 support mixins` 中完成，
+当前 241 行，逻辑拆分至 `app/agents/support/` 下的 mixins
+（`reader_reco_mixin.py`、`reader_output_mixin.py`、`reader_tools_mixin.py`
+、`classification_mixin.py` 等）。
 
 ### 6. 配置验证增强
 **建议**: 使用 Pydantic 的 `@field_validator` 进行运行时配置验证
@@ -88,12 +90,25 @@ app/agents/support/
 ## 测试状态
 
 ```bash
-$ python -m pytest tests/ -v
+$ python -m pytest tests/ -q
 
-======================== 32 passed, 1 skipped in 1.30s =========================
+======================== 325 passed in 38.49s =========================
 ```
 
 所有现有测试通过 ✅
+
+> 注意：测试依赖 `hello-agents` 等运行时依赖，需在项目专用环境中执行
+> （如 conda 环境 `papergraph`），否则会出现模块导入失败。
+
+### 前端类型检查
+
+```bash
+$ npm run typecheck   # vue-tsc --noEmit
+```
+
+此前 `vite build` 不做类型检查，12 处类型错误长期未被发现（其中 7 处源于缺失
+`@types/d3`）。现已全部修复，并将 `typecheck` 接入 `build`，防止回归。
+若需跳过类型检查快速打包，可用 `npm run build:only`。
 
 ---
 

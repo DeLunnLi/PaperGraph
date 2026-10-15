@@ -104,8 +104,6 @@ export function useSearchAgentChat({
     })
     onConversationDirty?.()
     hasSearched.value = true
-    await nextTick()
-    userInput.value = ''
     isLoading.value = true
     onRequestStateChange?.(true)
     const pIdx = messages.value.push({

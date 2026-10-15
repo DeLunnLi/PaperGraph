@@ -10,7 +10,6 @@ from fastapi import BackgroundTasks, HTTPException
 from starlette.concurrency import run_in_threadpool
 
 from ...agents import get_paper_analysis_agent
-from ...agents.support.reader_reference_lookup_tool import READER_RELATED_FROM_BIBLIOGRAPHY, READER_RELATED_FROM_PRE_SEARCH
 from ...utils.common import suppress_exceptions_async
 
 logger = logging.getLogger(__name__)
@@ -36,15 +35,23 @@ def _update_memory_from_turn(*, store: Any, paper_id: int, user_message: str, as
         store.extract_memory_via_llm(paper_id, um, assistant_reply)
     except Exception:
         logger.debug("extract_memory_via_llm failed for paper %s", paper_id, exc_info=True)
+    # Eagerly embed the new memories here (background) so semantic recall
+    # almost never pays embedding API latency on a live chat turn.
+    try:
+        from ..memory.memory_semantic import precompute_embeddings
+
+        docs = store._list_recent_docs(
+            scope="paper", paper_id=paper_id,
+            kinds=["working", "short", "long", "paper_summary", "reflection"], limit_per_kind=200,
+        ) + store._list_recent_docs(scope="global", paper_id=None, kinds=["preference", "reflection"], limit_per_kind=50)
+        precompute_embeddings(store.store, docs)
+    except Exception:
+        logger.debug("memory embedding precompute failed for paper %s", paper_id, exc_info=True)
 
 class PaperReaderService:
     def __init__(self, db: Any, agent: Any | None = None) -> None:
         self._db = db
         self._agent = agent or get_paper_analysis_agent()
-
-    @property
-    def db(self) -> Any:
-        return self._db
 
     @staticmethod
     def _format_reader_history(turns: Iterable[Any]) -> str:
@@ -61,30 +68,28 @@ class PaperReaderService:
             lines.append(f"{label}：{content}")
         return "\n\n".join(lines)
 
-    async def _build_reader_context(self, paper_id: int, user_id: int, user_message: str = "") -> tuple[Any, str, str, list[dict]]:
+    async def _build_reader_context(self, paper_id: int, user_id: int, user_message: str = "") -> tuple[Any, str, str, list[dict], list[str], str, str | None]:
         from ..memory.memory_store import MemoryStore
         from .paper_reader_context import build_reader_context_for_paper
 
-        paper = await run_in_threadpool(self._db.get_paper_by_id, paper_id, user_id)
-        if not paper:
-            raise HTTPException(status_code=404, detail="文献不存在")
-        paper, base_ctx, pdf_ref_text, pdf_parsing, pdf_pages = await run_in_threadpool(build_reader_context_for_paper, self._db, paper_id, user_id)
+        paper, base_ctx, pdf_ref_text, pdf_parsing, pdf_pages, pdf_path = await run_in_threadpool(build_reader_context_for_paper, self._db, paper_id, user_id)
         if not paper:
             raise HTTPException(status_code=404, detail="文献不存在")
 
-        mem = await run_in_threadpool(
-            MemoryStore(self._db.db_path).build_context_block,
-            paper_id=paper_id,
-        )
         title_hint = str(getattr(paper, "title", None) or "")
+        # One judged retrieval per turn: base block + query block + injected ids
+        mem, query_mem, mem_ids = await run_in_threadpool(
+            lambda: MemoryStore(self._db.db_path).build_chat_memory(
+                paper_id=paper_id, query=user_message, context_hint=title_hint,
+            ),
+        )
         ctx = (base_ctx + ("\n\n" + mem if mem else "")).strip()
-        return paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages
+        return paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages, mem_ids, query_mem, pdf_path
 
-    def _schedule_pdf_excerpt(self, paper_id: int, user_id: int, ctx: str, background_tasks: BackgroundTasks) -> None:
+    def _schedule_pdf_excerpt(self, paper_id: int, user_id: int, ctx: str, background_tasks: BackgroundTasks, pdf_path: str | None) -> None:
         from .paper_reader_context import compute_and_cache_excerpt
 
         try:
-            pdf_path = self._db.get_library_pdf_abspath(paper_id, user_id=user_id)
             if pdf_path and "【PDF 正文摘录" not in ctx:
                 background_tasks.add_task(compute_and_cache_excerpt, self._db.db_path, paper_id, pdf_path)
         except Exception as exc:
@@ -103,7 +108,7 @@ class PaperReaderService:
         )
 
     @suppress_exceptions_async(default_return=None, log_level="warning", log_message="paper_reader.append_history_failed")
-    async def _append_history(self, *, paper_id: int, user_id: int, user_message: str, reply: str, metadata: str | None = None) -> None:
+    async def _append_history(self, *, paper_id: int, user_id: int, user_message: str, reply: str, metadata: str | None = None) -> int | None:
         from .paper_reader_history import append_turn
 
         await run_in_threadpool(
@@ -114,7 +119,7 @@ class PaperReaderService:
             role="user",
             content=user_message,
         )
-        await run_in_threadpool(
+        return await run_in_threadpool(
             append_turn,
             self._db.db_path,
             paper_id=int(paper_id),
@@ -129,23 +134,22 @@ class PaperReaderService:
 
         from .paper_reader_context import build_reader_snap
 
-        paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages = await self._build_reader_context(paper_id, user_id)
-
-        reader_snap = build_reader_snap(paper, pdf_text_for_references=pdf_ref_text, pdf_pages=pdf_pages)
-        try:
-            pdf_path = self._db.get_library_pdf_abspath(paper_id, user_id=user_id)
-            if pdf_path:
-                reader_snap["_pdf_abspath"] = pdf_path
-        except Exception:
-            pass
-        if pdf_parsing:
-            self._schedule_pdf_excerpt(paper_id, user_id, ctx, background_tasks)
-
+        # Cache check FIRST: a fresh cached opening needs no reader context,
+        # so we skip the judged memory retrieval (and its access-count
+        # increments) entirely — the memory block would be discarded here.
         cached, fresh = await run_in_threadpool(get_cached_opening, self._db.db_path, paper_id, 72)
         if cached and fresh:
             op = cached.strip()
             await self._ensure_opening_turn_safe(paper_id=paper_id, user_id=user_id, opening_text=op)
-            return {"opening": op, "pdf_parsing": pdf_parsing}
+            return {"opening": op, "pdf_parsing": False}
+
+        paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages, _mem_ids, _query_mem, pdf_path = await self._build_reader_context(paper_id, user_id)
+
+        reader_snap = build_reader_snap(paper, pdf_text_for_references=pdf_ref_text, pdf_pages=pdf_pages)
+        if pdf_path:
+            reader_snap["_pdf_abspath"] = pdf_path
+        if pdf_parsing:
+            self._schedule_pdf_excerpt(paper_id, user_id, ctx, background_tasks, pdf_path)
 
         if cached and not fresh:
             # Prevent concurrent refresh of the same stale paper: a process-level
@@ -192,56 +196,34 @@ class PaperReaderService:
     ) -> dict[str, Any]:
         from ..memory.memory_store import MemoryStore
 
-        paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages = await self._build_reader_context(paper_id, user_id, user_message)
+        paper, ctx, title_hint, pdf_ref_text, pdf_parsing, pdf_pages, mem_ids, query_mem, pdf_path = await self._build_reader_context(paper_id, user_id, user_message)
         from .paper_reader_context import build_reader_snap
 
         reader_snap = build_reader_snap(paper, pdf_text_for_references=pdf_ref_text, pdf_pages=pdf_pages)
-        try:
-            pdf_path = self._db.get_library_pdf_abspath(paper_id, user_id=user_id)
-            if pdf_path:
-                reader_snap["_pdf_abspath"] = pdf_path
-        except Exception:
-            pass
-        self._schedule_pdf_excerpt(paper_id, user_id, ctx, background_tasks)
+        if pdf_path:
+            reader_snap["_pdf_abspath"] = pdf_path
+        self._schedule_pdf_excerpt(paper_id, user_id, ctx, background_tasks, pdf_path)
 
+        # Query-specific memory came from the same judged retrieval (disjoint ids)
         store = MemoryStore(self._db.db_path)
-        # Query-specific memory: only inject if different from what _build_reader_context already added
-        rel_mem = await run_in_threadpool(
-            store.get_context_for_query,
-            paper_id=int(paper_id),
-            query=user_message,
-            limit=6,
-        )
-        if rel_mem and rel_mem not in ctx:
-            ctx += "\n\n" + rel_mem
+        if query_mem and query_mem not in ctx:
+            ctx += "\n\n" + query_mem
         hist = self._format_reader_history(messages)
 
         reply, related_papers, related_sources, citations = await run_in_threadpool(
             lambda: self._agent.paper_reader_reply(ctx, hist, user_message, reader_snap)
         )
-        rs = list(related_sources or [])
-        related_hints: list[dict[str, Any]] = [
-            {
-                "ref_idx": i,
-                "title": getattr(p, "title", None),
-                "reason": (
-                    "来自当前文献参考文献题录（OpenAlex 解析）"
-                    if i - 1 < len(rs) and rs[i - 1] == READER_RELATED_FROM_BIBLIOGRAPHY
-                    else "基于论文主题相似度匹配"
-                    if i - 1 < len(rs) and rs[i - 1] == READER_RELATED_FROM_PRE_SEARCH
-                    else "来自用户给定英文短语或外部题名检索（OpenAlex）"
-                ),
-            }
-            for i, p in enumerate(related_papers or [], start=1)
-        ]
 
-        # Serialize metadata for history (related papers count + citations count)
+        # Serialize metadata for history (related papers count + citations count
+        # + injected memory ids for feedback attribution). mem_ids from
+        # build_chat_memory already covers base + query + linked slices.
         import json as _json
         _meta = _json.dumps({
             "related_count": len(related_papers or []),
             "citation_count": len(citations or []),
+            "memory_ids": mem_ids,
         })
-        await self._append_history(paper_id=paper_id, user_id=user_id, user_message=user_message, reply=reply, metadata=_meta)
+        assistant_turn_id = await self._append_history(paper_id=paper_id, user_id=user_id, user_message=user_message, reply=reply, metadata=_meta)
         # Memory extraction runs an LLM call (extract_memory_via_llm via
         # stateless_llm_chat — no agent singleton / ReaderCtx involvement), so
         # defer it off the reply critical path. History append above stays
@@ -251,15 +233,14 @@ class PaperReaderService:
             store=store, paper_id=paper_id,
             user_message=user_message, assistant_reply=reply,
         )
-        background_tasks.add_task(store.compress_working, scope="paper", paper_id=int(paper_id), min_entries=6)
+        background_tasks.add_task(store.compress_working, scope="paper", paper_id=int(paper_id))
 
         return {
             "reply": reply.strip(),
             "pdf_parsing": pdf_parsing,
             "related_papers": related_papers,
-            "related_hints": related_hints,
-            "kg_edges": [],
             "citations": citations or [],
+            "assistant_turn_id": assistant_turn_id,
         }
 
     async def get_history(self, *, paper_id: int, limit: int, user_id: int) -> list[dict[str, Any]]:

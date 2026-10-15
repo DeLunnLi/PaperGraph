@@ -99,6 +99,7 @@ class SavePapersRequest(BaseModel):
     papers: list[Paper]
     download_pdfs: bool = Field(default=False, description="保存后下载 PDF")
     llm_classify: bool = Field(default=True, description="大模型划分 category")
+    search_query: str | None = Field(default=None, description="来源搜索查询（从搜索结果保存时传入，用于程序性记忆学习）")
 
 class SavePapersResponse(BaseAPIResponse):
     added: int
@@ -203,16 +204,23 @@ class PaperReaderChatResponse(BaseAPIResponse):
     pdf_parsing: bool = False
     related_papers: list[Paper] = Field(default_factory=list)
 
-    related_hints: list[dict[str, Any]] = Field(default_factory=list)
-
-    kg_edges: list[dict[str, Any]] = Field(default_factory=list)
-
     citations: list[dict[str, Any]] = Field(default_factory=list)
 
+    assistant_turn_id: int | None = Field(default=None, description="助手轮次 row id，用于反馈归因")
+
 class PaperReaderHistoryItem(BaseModel):
+    id: int | None = None
     role: str
     content: str
     created_at: int
+
+class PaperReaderFeedbackRequest(BaseModel):
+    paper_id: int = Field(..., ge=1)
+    turn_id: int = Field(..., ge=1, description="助手轮次 row id（history/chat 响应中的 id）")
+    signal: str = Field(..., description="up / down / citation_click")
+
+class PaperReaderFeedbackResponse(BaseAPIResponse):
+    affected_memory_count: int = 0
 
 class PaperReaderHistoryResponse(BaseAPIResponse):
     paper_id: int

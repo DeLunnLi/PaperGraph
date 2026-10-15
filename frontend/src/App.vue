@@ -41,6 +41,10 @@
             <template #icon><ShareAltOutlined /></template>
             <span>知识图谱</span>
           </a-menu-item>
+          <a-menu-item key="knowledge">
+            <template #icon><DatabaseOutlined /></template>
+            <span>知识库</span>
+          </a-menu-item>
         </a-menu>
         <div v-if="!collapsed" class="app-sider__calendar">
           <ReadingCalendar />
@@ -97,13 +101,14 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { theme as antdTheme } from 'ant-design-vue'
+import antdDefaultAlgorithm from 'ant-design-vue/es/theme/themes/default'
 import ReadingCalendar from '@/components/ReadingCalendar.vue'
 import {
   RobotOutlined,
   CalendarOutlined,
   BookOutlined,
   ShareAltOutlined,
+  DatabaseOutlined,
 } from '@ant-design/icons-vue'
 const router = useRouter()
 const route = useRoute()
@@ -129,6 +134,7 @@ const mobileNavItems = [
   { key: 'daily', label: '每日', icon: CalendarOutlined },
   { key: 'library', label: '文献库', icon: BookOutlined },
   { key: 'graph', label: '图谱', icon: ShareAltOutlined },
+  { key: 'knowledge', label: '知识库', icon: DatabaseOutlined },
 ]
 const pageTitle = computed(() => {
   const titles: Record<string, string> = {
@@ -137,6 +143,7 @@ const pageTitle = computed(() => {
     library: '我的文献库',
     'library-read': '文献阅读',
     graph: '知识图谱',
+    knowledge: '知识库',
   }
   const name = (route.name as string)?.toLowerCase() || ''
   return titles[name] || '知脉'
@@ -148,11 +155,12 @@ const pageSubtitle = computed(() => {
     library: '沉淀、整理与回顾知识',
     'library-read': '精读论文并记录思考',
     graph: '探索文献之间的关联',
+    knowledge: '会自我进化的记忆与偏好',
   }
   return subtitles[String(route.name || '').toLowerCase()] || ''
 })
 const themeConfig = {
-  algorithm: antdTheme.defaultAlgorithm,
+  algorithm: antdDefaultAlgorithm,
   token: {
     colorPrimary: '#5b5ce2',
     colorLink: '#5658d8',
@@ -207,16 +215,24 @@ watch(
   },
   { immediate: true }
 )
+let _resizeRaf = 0
 const onResize = () => {
-  windowWidth.value = window.innerWidth
-  if (window.innerWidth < 1024 && !collapsed.value) collapsed.value = true
-  if (window.innerWidth >= 1280 && collapsed.value) collapsed.value = false
+  if (_resizeRaf) return
+  _resizeRaf = requestAnimationFrame(() => {
+    _resizeRaf = 0
+    windowWidth.value = window.innerWidth
+    if (window.innerWidth < 1024 && !collapsed.value) collapsed.value = true
+    if (window.innerWidth >= 1280 && collapsed.value) collapsed.value = false
+  })
 }
 onMounted(() => {
   onResize()
   window.addEventListener('resize', onResize)
 })
-onBeforeUnmount(() => window.removeEventListener('resize', onResize))
+onBeforeUnmount(() => {
+  if (_resizeRaf) cancelAnimationFrame(_resizeRaf)
+  window.removeEventListener('resize', onResize)
+})
 </script>
 <style scoped>
 .standalone-root {

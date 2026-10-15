@@ -11,6 +11,7 @@ _RE_ARXIV_DOI = re.compile(r"10\.48550/arxiv\.?([\d.]+\d)", re.I)
 _RE_ARXIV_URL_IN_DOI = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w./]+)", re.I)
 _RE_ARXIV_VERSION_SUFFIX = re.compile(r"v\d+$", re.I)
 _RE_TITLE_ENTITY = re.compile(r"&amp;|&lt;|&gt;|&quot;|&#\d+;")
+_RE_TITLE_NON_ALNUM = re.compile(r"[^a-z0-9\u4e00-\u9fff]+", re.I)
 
 
 def strip_arxiv_version(arxiv_id: str | None) -> str:
@@ -19,7 +20,6 @@ def strip_arxiv_version(arxiv_id: str | None) -> str:
     Returns the input unchanged (as a stripped string) when there is no suffix.
     """
     return _RE_ARXIV_VERSION_SUFFIX.sub("", (arxiv_id or "").strip())
-_RE_TITLE_NON_ALNUM = re.compile(r"[^a-z0-9\u4e00-\u9fff]+", re.I)
 
 
 @functools.lru_cache(maxsize=128)
@@ -45,13 +45,13 @@ def split_query_phrases(query: str) -> list[str]:
     if not q:
         return []
     if not _QUERY_DELIM.search(q):
-        return [(q or "").strip()]
+        return [q]
     parts: list[str] = []
     for p in _QUERY_DELIM.split(q):
         t = p.strip()
         if t:
-            parts.append((t or "").strip())
-    return parts if parts else [(q or "").strip()]
+            parts.append(t)
+    return parts if parts else [q]
 
 
 def sanitize_search_keyword_list(raw: Any) -> list[str]:
@@ -152,8 +152,8 @@ def _openalex_collect_landing_urls(w: dict[str, Any]) -> list[str]:
         if not s.lower().startswith("http"):
             return
         sl = s.lower()
-        if bool(re.search(r"https?://(api\.)?openalex\.org/works?/", sl)) or bool(
-            re.search(r"https?://(www\.)?openalex\.org/w\d+", sl)
+        if re.search(r"https?://(api\.)?openalex\.org/works?/", sl) or re.search(
+            r"https?://(www\.)?openalex\.org/w\d+", sl
         ):
             return
         if sl in seen:
@@ -183,7 +183,7 @@ def _openalex_human_source_url(w: dict[str, Any], doi: str | None) -> str | None
         if s.lower().endswith(".pdf"):
             return s
     if doi:
-        d = str(doi).strip().lstrip("https://doi.org/").lstrip("doi.org/")
+        d = re.sub(r"^https?://(dx\.)?doi\.org/", "", str(doi).strip(), flags=re.I)
         if d:
             return f"https://doi.org/{d}"
     wid = w.get("id")

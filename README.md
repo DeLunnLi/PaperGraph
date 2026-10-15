@@ -122,6 +122,24 @@ LLM_MODEL_ID=deepseek-chat
   <i>🕸️ 知识图谱：可视化论文关系网络</i>
 </p>
 
+<p align="center">
+  <img src="./screenshots/library-management.png" alt="文献库" width="700">
+  <br>
+  <i>📚 文献库：分类管理、批量导出、一键进入深度阅读</i>
+</p>
+
+<p align="center">
+  <img src="./screenshots/knowledge-base.png" alt="知识库" width="700">
+  <br>
+  <i>🧠 自进化知识库：记忆条目、效用分布与进化时间线</i>
+</p>
+
+<p align="center">
+  <img src="./screenshots/daily-recommendations.png" alt="每日论文" width="700">
+  <br>
+  <i>📅 每日论文：结合文献库与研究偏好筛选当日新论文</i>
+</p>
+
 ---
 
 ## 🎯 为什么选择 PaperGraph？
@@ -185,15 +203,8 @@ LLM_MODEL_ID=deepseek-chat
 
 ## 💬 加入社区
 
-- 💬 **Discord**：[加入讨论](https://discord.gg/your-link)（国际用户）
-- 🐦 **Twitter/X**：[@PaperGraph](https://twitter.com/papergraph)
-- 📧 **Email**：contact@papergraph.dev
-
-<p align="center">
-  <img src="./screenshots/wechat-qr.png" alt="微信群" width="150">
-  <br>
-  <i>扫码加入微信群（国内用户）</i>
-</p>
+- 🐛 **反馈问题**：[GitHub Issues](https://github.com/DeLunnLi/PaperGraph/issues)
+- 💡 **交流讨论**：[GitHub Discussions](https://github.com/DeLunnLi/PaperGraph/discussions)
 
 ---
 
@@ -268,7 +279,7 @@ LLM_MODEL_ID=deepseek-chat
 
 🐛 发现问题？提交 [Issue](https://github.com/DeLunnLi/PaperGraph/issues)
 
-🔀 想贡献代码？查看 [CONTRIBUTING.md](./CONTRIBUTING.md)
+🔀 想贡献代码？欢迎直接提 [Pull Request](https://github.com/DeLunnLi/PaperGraph/pulls)
 
 ### 贡献者
 
@@ -280,7 +291,7 @@ LLM_MODEL_ID=deepseek-chat
 
 ## 📄 许可证
 
-[MIT License](./LICENSE)
+MIT License
 
 ---
 

@@ -1,30 +1,35 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
 import time
 from typing import Any
 
 from ..llm.agent_runtime import run_json_task, stateless_llm_chat
 from .sqlite_document_store_compat import SQLiteDocumentStore
 
-class MemoryStoreConfig:
-
-    working_ttl_minutes: int = 60
-    working_capacity: int = 80
-    short_capacity: int = 200
-    min_importance_for_context: float = 0.35
-    max_context_items: int = 10
+logger = logging.getLogger(__name__)
 
 class MemoryStore:
 
-    def __init__(self, db_path: str, config: MemoryStoreConfig | None = None) -> None:
+    _compression_guard = threading.Lock()
+    _compressions_in_flight: set[tuple[str, str]] = set()
+
+    def __init__(self, db_path: str, config: Any | None = None) -> None:
         # Reader memory uses synthetic papergraph:* identities and therefore must
         # not share the application memories table, whose user_id references
         # authenticated users. Keep one sidecar DB beside the application DB.
         root = os.path.dirname(os.path.abspath(db_path))
-        self.db_path = os.path.join(root, "reader_memory.db")
-        self.config = config or MemoryStoreConfig()
+        from .db_paths import READER_MEMORY_DB_NAME
+
+        self.db_path = os.path.join(root, READER_MEMORY_DB_NAME)
+        from .policy import get_memory_policy
+
+        # All tunables come from the policy module (single source of truth);
+        # ``config`` remains as a test override hook.
+        self.config = config or get_memory_policy()
         self.store = SQLiteDocumentStore(db_path=self.db_path)
 
     @staticmethod
@@ -66,13 +71,7 @@ class MemoryStore:
     def _type_of(doc: dict) -> str:
         return str(doc.get("memory_type") or "").strip() or "unknown"
 
-    @staticmethod
-    def _parse_scope_and_paper(kwargs: dict) -> tuple[str, int | None]:
-        scope = str(kwargs.get("scope") or "paper")
-        paper_id = kwargs.get("paper_id")
-        return scope, int(paper_id) if paper_id is not None else None
-
-    def _delete_docs(self, docs: list[dict]) -> int:
+    def _delete_docs(self, docs: list[dict], *, reason: str = "") -> int:
         deleted = 0
         for d in docs:
             mid = self._memory_id_of(d)
@@ -81,14 +80,39 @@ class MemoryStore:
             try:
                 if self.store.delete_memory(mid):
                     deleted += 1
+                    # Every deletion is an evolution event — the KB timeline
+                    # must explain why a memory disappeared.
+                    self.store.log_evolution(
+                        mid, "prune",
+                        utility_after=float(d.get("utility") or 0.0),
+                        importance_after=float(d.get("importance") or 0.5),
+                        access_count_after=int(d.get("access_count") or 0),
+                        reason=reason or "批量删除",
+                    )
             except Exception:
+                logger.debug("memory_store._delete_docs failed mid=%s", mid, exc_info=True)
                 continue
         return deleted
 
     @staticmethod
-    def _word_overlap(a: str, b: str) -> float:
-        words_a = set(a.lower().split())
-        words_b = set(b.lower().split())
+    def _overlap_tokens(text: str) -> set[str]:
+        """Token set for overlap gathering: whitespace words, plus character
+        bigrams for CJK runs (whitespace tokenization collapses a Chinese
+        sentence into one token, which made conflict detection dead code for
+        the app's dominant memory language)."""
+        tokens: set[str] = set()
+        for w in text.lower().split():
+            if not w:
+                continue
+            tokens.add(w)
+            if len(w) > 2 and any("一" <= ch <= "鿿" for ch in w):
+                tokens.update(w[i : i + 2] for i in range(len(w) - 1))
+        return tokens
+
+    @classmethod
+    def _word_overlap(cls, a: str, b: str) -> float:
+        words_a = cls._overlap_tokens(a)
+        words_b = cls._overlap_tokens(b)
         if not words_a or not words_b:
             return 0.0
         return len(words_a & words_b) / max(len(words_a), len(words_b))
@@ -96,29 +120,58 @@ class MemoryStore:
     def _llm_is_duplicate(self, a: str, b: str) -> bool:
         try:
             from ..llm.llm_service import get_llm
-            import json as _json
+            from ...utils.common import parse_llm_json
+
             llm = get_llm()
             prompt = f"Are these two research notes semantically the same topic? Answer JSON only: {{\"duplicate\":true/false}}\n1: {a[:200]}\n2: {b[:200]}"
             txt = stateless_llm_chat(llm, None, prompt, temperature=0.0, max_tokens=30).strip()
-            d = _json.loads(txt) if txt.startswith("{") else {}
-            return bool(d.get("duplicate", False))
+            d = parse_llm_json(txt)
+            return bool(d.get("duplicate", False)) if isinstance(d, dict) else False
         except Exception:
+            logger.debug("memory_store._llm_is_duplicate failed", exc_info=True)
             return False
 
-    @staticmethod
-    def _score_memory(doc: dict, query_tokens: set | None = None) -> float:
-        content = str(doc.get("content") or "")
-        imp = float(doc.get("importance") or 0.5)
-        ts = int(doc.get("timestamp") or 0)
-        import math
-        delta = max(time.time() - ts, 0)
-        rec = math.exp(-delta / 3600)
-        if query_tokens:
-            doc_tokens = set(content.lower().split())
-            rel = len(query_tokens & doc_tokens) / max(1, len(query_tokens))
-        else:
-            rel = 0.0
-        return 0.5 * imp + 0.3 * rec + 0.2 * rel
+    def _maybe_link(self, mid: str, content: str, *, scope: str, paper_id: int | None, kind: str) -> None:
+        """A-MEM-style link generation on write: judge which recent memories
+        this new one is substantively related to, store the edges."""
+        pol = self.config
+        if kind not in pol.linkable_kinds:
+            return
+        try:
+            candidates = [
+                d for d in self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=list(pol.linkable_kinds), limit_per_kind=pol.link_judge_candidates)
+                if self._memory_id_of(d) != mid
+            ][: pol.link_judge_candidates]
+            if not candidates:
+                return
+            from .memory_judge import judge_memory_links
+
+            links = judge_memory_links(new_content=content, candidates=candidates)
+            if not links:
+                return
+            self.store.add_links(mid, links, reason="写入期关联判别")
+            for dst in links:
+                self.store.log_evolution(mid, "link", reason=f"关联记忆 {dst}")
+        except Exception:
+            logger.debug("memory_store._maybe_link failed", exc_info=True)
+
+    def _absorb_into(self, doc: dict, *, content: str, importance: float, user_id: str, kind: str, props: dict, event: str, reason: str) -> str:
+        """Fold the new content into the existing memory in place — reusing its
+        id so accumulated utility/access stats survive (dedup-merge and
+        contradiction-supersede share this single write path)."""
+        old_mid = self._memory_id_of(doc)
+        new_imp = max(float(importance), self._imp_of(doc))
+        mid = self.store.add_memory(
+            user_id=user_id,
+            content=content,
+            memory_type=kind,
+            importance=new_imp,
+            properties=props,
+            memory_id=old_mid or None,
+        )
+        if old_mid:
+            self.store.log_evolution(old_mid, event, reason=reason)
+        return mid
 
     def add(
         self,
@@ -130,25 +183,45 @@ class MemoryStore:
         importance: float = 0.5,
         meta: dict[str, Any | None] = None,
     ) -> str:
-        now = int(time.time())
         user_id = self._user_id_for(scope, paper_id)
         props = self._properties(scope, paper_id, kind, meta)
 
         existing = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=[kind], limit_per_kind=10)
+        # Write-time conflict judgment (Mem0-style): gather similar candidates
+        # by word overlap (gathering only), let the judge decide same/supersede/
+        # keep. Fallback: the original overlap heuristic.
+        pol = self.config
+        similar: list[tuple[float, dict[str, Any]]] = []
         for doc in existing:
             ov = self._word_overlap(content, self._content_of(doc))
-            if ov > 0.7 or (ov > 0.35 and self._llm_is_duplicate(content, self._content_of(doc))):
-                old_mid = self._memory_id_of(doc)
-                new_imp = max(importance, self._imp_of(doc))
-                if old_mid:
-                    self.store.delete_memory(old_mid)
-                return self.store.add_memory(
-                    user_id=user_id,
-                    content=content,
-                    memory_type=kind,
-                    importance=new_imp,
-                    metadata=props,
-                )
+            if ov > pol.dedup_candidate_overlap:
+                similar.append((ov, doc))
+        if similar:
+            similar.sort(key=lambda x: -x[0])
+            from .memory_judge import judge_write_conflict
+
+            verdicts = judge_write_conflict(
+                new_content=content,
+                candidates=[d for _ov, d in similar[: pol.conflict_judge_candidates]],
+            )
+            if verdicts is None:
+                ov, doc = similar[0]
+                if ov > pol.dedup_merge_overlap or (
+                    ov > pol.dedup_gray_zone_overlap and self._llm_is_duplicate(content, self._content_of(doc))
+                ):
+                    return self._absorb_into(doc, content=content, importance=importance, user_id=user_id, kind=kind, props=props,
+                                             event="merge", reason="写入期判重合并")
+            else:
+                for _ov, doc in similar[: pol.conflict_judge_candidates]:
+                    old_mid = self._memory_id_of(doc)
+                    action = verdicts.get(old_mid or "", "keep")
+                    if action == "same":
+                        return self._absorb_into(doc, content=content, importance=importance, user_id=user_id, kind=kind, props=props,
+                                                 event="merge", reason="写入期判重合并")
+                    if action == "supersede":
+                        return self._absorb_into(doc, content=content, importance=importance, user_id=user_id, kind=kind, props=props,
+                                                 event="supersede", reason=f"被新记忆取代: {content[:80]}")
+                # all "keep" → fall through to a fresh add
 
         result = self.store.add_memory(
             user_id=user_id,
@@ -157,94 +230,13 @@ class MemoryStore:
             importance=float(importance),
             metadata=props,
         )
+        self._maybe_link(result, content, scope=scope, paper_id=paper_id, kind=kind)
 
         if kind == "working":
-            working_docs = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=["working"], limit_per_kind=100)
-            if len(working_docs) > 50:
-                working_docs.sort(key=lambda d: self._ts_of(d), reverse=True)
-                to_compress = working_docs[20:]
-                if to_compress:
-                    compressed = self._summarize_via_llm(to_compress)
-                    if compressed:
-                        self._delete_docs(to_compress)
-                        self.add(scope=scope, paper_id=paper_id, kind="long", content=compressed, importance=0.6)
+            self.compress_working(scope=scope, paper_id=paper_id)
 
         return result
 
-    def execute(self, action: str, **kwargs) -> str:
-        def _add():
-            scope, pid = self._parse_scope_and_paper(kwargs)
-            kind = str(kwargs.get("kind") or kwargs.get("memory_type") or "working")
-            content = str(kwargs.get("content") or "").strip()
-            importance = float(kwargs.get("importance") or 0.5)
-            if not content:
-                return "❌ content 不能为空"
-            mid = self.add(scope=scope, paper_id=pid, kind=kind, content=content, importance=importance)
-            return f"✅ 记忆已添加 (ID: {mid})"
-
-        def _search():
-            scope, pid = self._parse_scope_and_paper(kwargs)
-            query = str(kwargs.get("query") or "").strip()
-            kind = kwargs.get("kind") or kwargs.get("memory_type")
-            limit = int(kwargs.get("limit") or 5)
-            return self.search(scope=scope, paper_id=pid, query=query, kind=str(kind) if kind else None, limit=limit)
-
-        def _summary():
-            scope, pid = self._parse_scope_and_paper(kwargs)
-            limit = int(kwargs.get("limit") or 8)
-            return self.summary(scope=scope, paper_id=pid, limit=limit)
-
-        def _stats():
-            scope, pid = self._parse_scope_and_paper(kwargs)
-            return self.stats(scope=scope, paper_id=pid)
-
-        def _remove():
-            memory_id = str(kwargs.get("memory_id") or "").strip()
-            if not memory_id:
-                return "❌ memory_id 不能为空"
-            ok = bool(self.store.delete_memory(memory_id))
-            return "✅ 已删除" if ok else "⚠️ 未找到该记忆"
-
-        def _clear():
-            scope, pid = self._parse_scope_and_paper(kwargs)
-            n = self.clear_all(scope=scope, paper_id=pid)
-            return f"✅ 已清空 {n} 条记忆"
-
-        def _forget():
-            scope, pid = self._parse_scope_and_paper(kwargs)
-            kind = str(kwargs.get("kind") or kwargs.get("memory_type") or "working")
-            threshold = float(kwargs.get("threshold") or kwargs.get("min_importance") or 0.3)
-            n = self.forget_by_importance(scope=scope, paper_id=pid, kind=kind, threshold=threshold)
-            return f"✅ 已遗忘 {n} 条低重要性记忆"
-
-        def _consolidate():
-            scope, pid = self._parse_scope_and_paper(kwargs)
-            from_kind = str(kwargs.get("from_type") or kwargs.get("from_kind") or "working")
-            to_kind = str(kwargs.get("to_type") or kwargs.get("to_kind") or "short")
-            threshold = float(kwargs.get("importance_threshold") or 0.6)
-            n = self.consolidate(scope=scope, paper_id=pid, from_kind=from_kind, to_kind=to_kind, threshold=threshold)
-            return f"✅ 已整合 {n} 条记忆 ({from_kind} → {to_kind})"
-
-        a = (action or "").strip().lower()
-        handlers = {
-            "add": _add,
-            "search": _search,
-            "summary": _summary,
-            "stats": _stats,
-            "remove": _remove,
-            "delete": _remove,
-            "clear_all": _clear,
-            "clear": _clear,
-            "forget": _forget,
-            "consolidate": _consolidate,
-        }
-        handler = handlers.get(a)
-        if handler is None:
-            return "不支持的操作: " + action
-        try:
-            return handler()
-        except Exception as e:
-            return f"❌ 记忆操作失败: {e}"
 
     def upsert_single(
         self,
@@ -288,79 +280,26 @@ class MemoryStore:
             for d in items or []:
                 if isinstance(d, dict):
                     docs.append(d)
-        return docs
+        # Karpathy "position = last touched": rescue (injection → last_used)
+        # floats a memory above its creation recency. Stable sort preserves the
+        # SQL timestamp-DESC order as the final tiebreak.
+        from .policy import attention_key
+        return sorted(docs, key=attention_key, reverse=True)
 
-    def search(self, *, scope: str, paper_id: int | None, query: str, kind: str | None = None, limit: int = 5) -> str:
-        q = (query or "").strip().lower()
-        kinds = [kind] if kind else ["working", "short", "long", "paper_summary", "preference"]
-        docs = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=kinds, limit_per_kind=max(40, limit * 10))
-        scored: list[tuple[int, dict[str, Any]]] = []
-        for d in docs:
-            c = self._content_of(d)
-            if not c:
-                continue
-            hay = c.lower()
-            if q and q not in hay:
-                continue
-            ts = self._ts_of(d)
-            scored.append((ts, d))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        lines: list[str] = []
-        for i, (_ts, d) in enumerate(scored[: max(1, limit)], start=1):
-            mt = self._type_of(d)
-            imp = self._imp_of(d)
-            c = self._content_of(d)
-            lines.append(f"{i}. [{mt}] {c[:220]} (重要性: {imp:.2f})")
-        if not lines:
-            return "🔍 未找到相关记忆"
-        return "🔍 找到 {} 条相关记忆:\n{}".format(len(lines), "\n".join(lines))
 
-    def stats(self, *, scope: str, paper_id: int | None) -> str:
-        kinds = ["working", "short", "long", "paper_summary", "preference"]
-        docs = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=kinds, limit_per_kind=200)
-        by_kind: dict[str, int] = {}
-        for d in docs:
-            k = self._type_of(d)
-            by_kind[k] = by_kind.get(k, 0) + 1
-        total = sum(by_kind.values())
-        parts = [f"{k}:{by_kind[k]}" for k in sorted(by_kind.keys())]
-        who = "global" if scope == "global" else f"paper:{paper_id or 0}"
-        return "📈 记忆系统统计\n对象: {}\n总记忆数(近似): {}\n分布: {}".format(who, total, ", ".join(parts) if parts else "—")
 
-    def summary(self, *, scope: str, paper_id: int | None, limit: int = 8) -> str:
-        kinds = ["preference", "paper_summary", "long", "short", "working"]
-        docs = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=kinds, limit_per_kind=120)
-        items: list[tuple[int, str, float]] = []
-        for d in docs:
-            c = self._content_of(d)
-            if not c:
-                continue
-            ts = self._ts_of(d)
-            mt = self._type_of(d)
-            imp = self._imp_of(d)
-            items.append((ts, mt, imp))
-        items.sort(key=lambda x: x[0], reverse=True)
-        lines: list[str] = []
-        for ts, mt, imp in items[: max(1, limit)]:
-            lines.append(f"- [{mt}] (重要性:{imp:.2f}, ts:{ts})")
-        if not lines:
-            return "📋 记忆摘要：暂无"
-        return "📋 记忆摘要:\n" + "\n".join(lines)
 
-    def forget_by_importance(self, *, scope: str, paper_id: int | None, kind: str, threshold: float = 0.3) -> int:
-        docs = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=[kind], limit_per_kind=500)
-        to_delete = [d for d in docs if self._imp_of(d) < float(threshold)]
-        return self._delete_docs(to_delete)
 
     def _summarize_via_llm(self, docs: list[dict]) -> str:
         contents = [self._content_of(d) for d in docs if self._content_of(d)]
         if not contents:
             return ""
+        batch = int(self.config.working_compress_batch)
         prompt = (
             "你是一个学术文献阅读助手的记忆管理模块。请将以下用户阅读过程中的关注点和问答摘要"
             "综合为一段不超过 300 字的紧凑摘要，保留关键术语、用户兴趣方向和研究问题。"
             "只输出摘要文本，不要加前缀或解释。\n\n"
-            + "\n".join(f"- {c[:200]}" for c in contents[-20:])
+            + "\n".join(f"- {c[:200]}" for c in contents[-batch:])
         )
         try:
             from ..llm.llm_service import get_llm
@@ -368,52 +307,52 @@ class MemoryStore:
             summary = stateless_llm_chat(llm, None, prompt, temperature=0.3, max_tokens=400)
             return str(summary or "").strip()
         except Exception:
+            logger.debug("memory_store._summarize_via_llm failed", exc_info=True)
             return ""
 
-    def compress_working(self, *, scope: str = "paper", paper_id: int | None = None, min_entries: int = 6) -> str:
-        entries = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=["working"], limit_per_kind=999)
-        if len(entries) < min_entries:
-            return "not enough entries to compress"
+    def compress_working(self, *, scope: str = "paper", paper_id: int | None = None, min_entries: int | None = None) -> str:
+        """Summarize one old batch, sharing the policy across both entry paths.
 
-        to_compress = entries[5:]
-        if not to_compress:
-            return "nothing to compress"
-        compressed = self._summarize_via_llm(to_compress)
-        if not compressed:
+        The optional legacy threshold can only raise the policy threshold.
+        Concurrent requests for the same DB/scope join the in-flight work
+        instead of paying for another summary of the same entries.
+        """
+        user_id = self._user_id_for(scope, paper_id)
+        key = (os.path.realpath(self.db_path), user_id)
+        with self._compression_guard:
+            if key in self._compressions_in_flight:
+                return "compression in progress"
+            self._compressions_in_flight.add(key)
+        try:
+            pol = self.config
+            threshold = max(int(pol.working_compress_trigger), int(min_entries or 0))
+            batch = max(1, int(pol.working_compress_batch))
+            keep = max(0, int(pol.working_compress_keep_head))
+            required = max(threshold, keep + batch)
+            entries = self.store.search_memories(
+                user_id=user_id, memory_type="working", limit=required, oldest_first=True,
+            )
+            if len(entries) < required:
+                return "not enough entries to compress"
+            # Keep the newest head and summarize the oldest full batch, even
+            # when a backlog is larger than the trigger (bounded SQL read).
+            to_compress = entries[:batch]
+            compressed = self._summarize_via_llm(to_compress)
+            if not compressed:
+                return "compression failed"
+            mid = self.store.archive_with_summary(
+                to_compress, user_id=user_id, content=compressed,
+                properties=self._properties(scope, paper_id, "long", {}),
+            )
+            return "compressed" if mid else "compression inputs changed"
+        except Exception:
+            logger.debug("memory_store.compress_working failed", exc_info=True)
             return "compression failed"
-        self._delete_docs(to_compress)
-        self.add(scope=scope, paper_id=paper_id, kind="long", content=compressed, importance=0.6)
-        return "compressed"
+        finally:
+            with self._compression_guard:
+                self._compressions_in_flight.discard(key)
 
-    def consolidate(self, *, scope: str, paper_id: int | None, from_kind: str, to_kind: str, threshold: float = 0.6) -> int:
-        docs = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=[from_kind], limit_per_kind=400)
-        moved = 0
-        for d in docs:
-            try:
-                imp = self._imp_of(d)
-            except Exception:
-                imp = 0.0
-            if imp < float(threshold):
-                continue
-            content = self._content_of(d)
-            if not content:
-                continue
-            self.add(scope=scope, paper_id=paper_id, kind=to_kind, content=content, importance=max(imp, 0.65))
-            mid = self._memory_id_of(d)
-            if mid:
-                try:
-                    self.store.delete_memory(mid)
-                except Exception:
-                    pass
-            moved += 1
-            if moved >= 50:
-                break
-        return moved
 
-    def clear_all(self, *, scope: str, paper_id: int | None) -> int:
-        kinds = ["working", "short", "long", "paper_summary", "preference"]
-        docs = self._list_recent_docs(scope=scope, paper_id=paper_id, kinds=kinds, limit_per_kind=800)
-        return self._delete_docs(docs)
 
     def list_recent_contents(
         self,
@@ -441,120 +380,207 @@ class MemoryStore:
                 break
         return contents
 
-    def _collect_packets(
-        self, *, scope: str, paper_id: int | None, kinds: list[str], limit_per_kind: int, label: str
-    ) -> list[tuple[str, str, float]]:
-        """Fetch recent docs and project them onto ``(label, content, score)`` packets."""
-        return [
-            (label, self._content_of(doc), self._score_memory(doc))
-            for doc in self._list_recent_docs(
-                scope=scope, paper_id=paper_id, kinds=kinds, limit_per_kind=limit_per_kind,
-            )
-        ]
+    def _rank_with_judge(
+        self,
+        docs: list[dict[str, Any]],
+        *,
+        purpose: str,
+        context_hint: str = "",
+        max_items: int,
+    ) -> list[dict[str, Any]]:
+        """Model-judged ranking of candidate memories; recency fallback.
 
-    def build_context_block(self, *, paper_id: int, use_cache: bool = True, max_tokens: int = 1200) -> str:
+        The judge decides which candidates are worth injecting and in what
+        order — no hardcoded scoring formula. When the judge is unavailable
+        (LLM unconfigured / disabled / error) fall back to recency order.
+        """
+        docs = [d for d in docs if self._content_of(d)]
+        if not docs:
+            return []
+        from .memory_judge import rank_docs_with_judge
 
-        _ttl = self.config.working_ttl_minutes or 60
+        ranked = rank_docs_with_judge(
+            docs, purpose=purpose, context_hint=context_hint, max_items=max_items,
+        )
+        if ranked is None:
+            docs.sort(key=lambda d: self._ts_of(d), reverse=True)
+            return docs[: max(1, max_items)]
+        return ranked
+
+    def _semantic_recall_docs(
+        self, *, paper_id: int, query: str, exclude_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """Embedding-recalled docs across the FULL scope pool (long-tail memories
+        the recency buckets miss). Empty when embeddings are unavailable."""
+        from .memory_semantic import semantic_recall
+
+        pool = self._list_recent_docs(scope="paper", paper_id=paper_id,
+                                      kinds=["working", "short", "long", "paper_summary"], limit_per_kind=500)
+        pool += self._list_recent_docs(scope="global", paper_id=None,
+                                       kinds=["preference", "short", "long"], limit_per_kind=200)
+        recalled = semantic_recall(self.store, docs=pool, query=query)
+        return [d for d in recalled if self._memory_id_of(d) not in exclude_ids]
+
+    def build_chat_memory(
+        self,
+        *,
+        paper_id: int,
+        query: str = "",
+        context_hint: str = "",
+        max_tokens: int = 1200,
+        query_limit: int = 6,
+    ) -> tuple[str, str, list[str]]:
+        """One judged retrieval per chat turn. Returns
+        ``(base_text, query_text, injected_memory_ids)``.
+
+        Previously the base block (build_context_block) and the query block
+        (get_context_for_query) each fired their own judge LLM call over
+        overlapping pools. Now the union pool is ranked ONCE (the user query
+        also guides the base-block selection) and sliced twice: the base block
+        fills the token budget, the query block takes the top ``query_limit``
+        of the remainder — no double injection, no exclude_ids plumbing.
+        ``query`` is the user's message; ``context_hint`` (paper title) is the
+        recall fallback for query-less openings.
+        """
+        _ttl = self.config.working_ttl_minutes
         _cutoff = int(time.time()) - _ttl * 60
         for _uid in ["papergraph:global"]:
             for _d in (self.store.search_memories(user_id=_uid, memory_type="working", limit=500) or []):
                 if self._ts_of(_d) < _cutoff:
-                    self.store.delete_memory(str(_d.get("memory_id")))
+                    _mid = str(_d.get("memory_id"))
+                    if self.store.delete_memory(_mid):
+                        self.store.log_evolution(_mid, "prune", reason="working TTL 过期")
 
-        if not use_cache:
+        # Allocate inside the actual judge cap. Reserve recent short/working
+        # slots first, then distribute the remaining budget among the other
+        # buckets; semantic recall must never push recent questions out.
+        from ...settings import get_settings
 
-            for _d in self._list_recent_docs(
-                scope="paper", paper_id=paper_id,
-                kinds=["working", "short", "long", "paper_summary"],
-                limit_per_kind=200,
-            ):
-                _ts = self._ts_of(_d)
-                _imp = self._imp_of(_d, 0.5)
-                _age_hours = max(0, (int(time.time()) - _ts)) / 3600.0
-                if _age_hours >= 1:
-                    _new_imp = max(0.1, _imp - 0.03 * _age_hours)
-                    if _new_imp < _imp - 0.01:
-                        _mid = self._memory_id_of(_d)
-                        if _mid:
-                            _oc = self._content_of(_d)
-                            _ot = str(_d.get("memory_type") or "working").strip()
-                            _props = _d.get("properties") or {}
-                            try:
-                                self.store.delete_memory(_mid)
-                            except Exception:
-                                continue
-                            self.add(
-                                scope="paper", paper_id=paper_id, kind=_ot,
-                                content=_oc, importance=_new_imp, meta=_props,
-                            )
+        pol = self.config
+        cap = max(4, int(get_settings().memory_judge_max_candidates))
+        recent_quota = max(1, int(pol.recent_candidates_per_kind))
+        groups: list[tuple[str, list[dict[str, Any]]]] = []
+        for scope, pid, kind, quota, label in [
+            ("paper", paper_id, "working", recent_quota, "working"),
+            ("paper", paper_id, "short", recent_quota, "working"),
+            ("global", None, "preference", int(pol.global_candidates_per_kind), "preference"),
+            ("global", None, "reflection", int(pol.global_candidates_per_kind), "洞察"),
+            ("paper", paper_id, "paper_summary", recent_quota, "long"),
+            ("paper", paper_id, "long", recent_quota, "long"),
+        ]:
+            groups.append((label, self._list_recent_docs(
+                scope=scope, paper_id=pid, kinds=[kind], limit_per_kind=quota,
+            )))
+        recall_hint = (query or "").strip() or (context_hint or "").strip()
+        if recall_hint:
+            gathered_ids = {self._memory_id_of(doc) for _, group in groups for doc in group}
+            recalled = self._semantic_recall_docs(paper_id=paper_id, query=recall_hint, exclude_ids=gathered_ids)
+            groups.insert(2, ("recalled", recalled[:max(0, int(pol.semantic_candidates))]))
 
-            _docs = self._list_recent_docs(
-                scope="paper", paper_id=paper_id,
-                kinds=["working", "short"],
-                limit_per_kind=200,
-            )
-            if len(_docs) > 3:
-                _docs.sort(key=lambda d: -self._ts_of(d))
-                _to_del = [d for d in _docs[3:] if self._imp_of(d, 0.5) < 0.15]
-                self._delete_docs(_to_del)
+        label_of: dict[str, str] = {}
+        docs: list[dict[str, Any]] = []
 
-        packets: list[tuple[str, str, float]] = []
-        packets += self._collect_packets(
-            scope="global", paper_id=None, kinds=["preference"], limit_per_kind=5, label="preference",
+        def take_one(group: tuple[str, list[dict[str, Any]]]) -> bool:
+            label, candidates = group
+            while candidates and len(docs) < cap:
+                doc = candidates.pop(0)
+                mid = self._memory_id_of(doc)
+                if not mid or mid in label_of or not self._content_of(doc):
+                    continue
+                label_of[mid] = label
+                docs.append(doc)
+                return True
+            return False
+
+        for _ in range(min(recent_quota, cap // 2)):
+            for group in groups[:2]:
+                take_one(group)
+        while len(docs) < cap:
+            added = False
+            for group in groups[2:] + groups[:2]:
+                added = take_one(group) or added
+            if not added:
+                break
+
+        max_items = int(self.config.max_context_items) + max(1, int(query_limit))
+        ranked = self._rank_with_judge(
+            docs,
+            purpose="论文阅读对话的记忆注入（全局偏好/元记忆洞察/论文摘要/近期问答/语义召回）",
+            context_hint=recall_hint,
+            max_items=max_items,
         )
-        packets += self._collect_packets(
-            scope="paper", paper_id=paper_id, kinds=["paper_summary", "long"], limit_per_kind=3, label="long",
-        )
-        packets += self._collect_packets(
-            scope="paper", paper_id=paper_id, kinds=["short", "working"], limit_per_kind=10, label="working",
-        )
 
-        packets.sort(key=lambda x: x[2], reverse=True)
+        chars_per_token = int(self.config.chars_per_token_estimate)
         selected: list[str] = []
+        injected_ids: list[str] = []
         budget = 0
-        for kind, content, _score in packets:
+        for doc in ranked:
+            if len(injected_ids) >= int(self.config.max_context_items):
+                break
+            content = self._content_of(doc)
             if not content:
                 continue
-            cost = len(content) // 3
+            cost = len(content) // chars_per_token
             if budget + cost > max_tokens:
                 continue
-            selected.append(f"[{kind}] {content}")
+            mid = self._memory_id_of(doc)
+            label = label_of.get(mid or "", "working")
+            selected.append(f"[{label}] {content}")
             budget += cost
+            if mid:
+                injected_ids.append(mid)
 
-        return "\n".join(selected) if selected else ""
+        # Query slice next (before link expansion, so links can't poach its
+        # top candidates): top of the remainder, sharing the same token budget
+        # — never re-injecting base picks.
+        query_lines: list[str] = []
+        if (query or "").strip():
+            for doc in ranked:
+                mid = self._memory_id_of(doc)
+                if not mid or mid in injected_ids:
+                    continue
+                content = self._content_of(doc)
+                if not content:
+                    continue
+                cost = len(content[:260]) // chars_per_token
+                if budget + cost > max_tokens:
+                    continue
+                query_lines.append(f"- {content[:260]}")
+                budget += cost
+                injected_ids.append(mid)
+                if len(query_lines) >= max(1, int(query_limit)):
+                    break
 
-    def get_context_for_query(self, *, paper_id: int, query: str, limit: int = 6) -> str:
-        q = (query or "").strip().lower()
-        if not q:
-            return ""
-        paper_docs = self._list_recent_docs(
-            scope="paper",
-            paper_id=paper_id,
-            kinds=["short", "working", "paper_summary", "long"],
-            limit_per_kind=120,
-        )
-        global_docs = self._list_recent_docs(
-            scope="global",
-            paper_id=None,
-            kinds=["preference"],
-            limit_per_kind=80,
-        )
-        candidates = paper_docs + global_docs
-        matched: list[tuple[int, str]] = []
-        for d in candidates:
-            c = self._content_of(d)
-            if not c:
-                continue
-            if q not in c.lower():
-                continue
-            ts = self._ts_of(d)
-            matched.append((ts, c))
-        matched.sort(key=lambda x: x[0], reverse=True)
-        picked = [c for _ts, c in matched[: max(1, limit)]]
-        if not picked:
-            return ""
-        bullets = "\n".join(f"- {x[:260]}" for x in picked)
-        return "【与当前问题相关的记忆（检索匹配）】\n" + bullets
+        # A-MEM associative expansion: 1-hop neighbors of the judged selection
+        # surface as [关联] memories while token budget remains.
+        try:
+            link_map = self.store.linked_ids(injected_ids)
+            linked_extra: list[str] = []
+            for mid in injected_ids:
+                for nid in link_map.get(mid, []):
+                    if nid not in injected_ids and nid not in linked_extra:
+                        linked_extra.append(nid)
+            for doc in self.store.get_memories_by_ids(linked_extra[: self.config.link_expansion_max]):
+                content = str(doc.get("content") or "")
+                cost = len(content) // chars_per_token
+                if not content or budget + cost > max_tokens:
+                    continue
+                mid = str(doc.get("memory_id") or "")
+                selected.append(f"[关联] {content}")
+                budget += cost
+                if mid:
+                    injected_ids.append(mid)
+        except Exception:
+            logger.debug("build_chat_memory link expansion failed", exc_info=True)
+
+        if injected_ids:
+            self.store.increment_access(injected_ids)
+        base_text = "\n".join(selected) if selected else ""
+        query_text = "【与当前问题相关的记忆（检索匹配）】\n" + "\n".join(query_lines) if query_lines else ""
+        return base_text, query_text, injected_ids
+
+    def adjust_utility(self, memory_id: str, *, delta: float, event: str = "feedback", reason: str = "") -> bool:
+        return self.store.adjust_utility(memory_id, delta=delta, event=event, reason=reason)
 
     def extract_memory_via_llm(self, paper_id: int, user_msg: str, assistant_reply: str) -> None:
         from ..llm.llm_service import get_llm
@@ -591,14 +617,14 @@ class MemoryStore:
 
         for it in (data.get("paper_short") or [])[:3]:
             if isinstance(it, dict) and (c := self._content_of(it)):
-                imp = float(it.get("importance") or 0.6)
+                imp = float(it.get("importance") or self.config.default_importance)
                 self.add(scope="paper", paper_id=paper_id, kind="short", content=c[:240], importance=max(0.0, min(1.0, imp)))
 
         if isinstance(plu := data.get("paper_long_update"), dict) and (c := self._content_of(plu)):
-            self.upsert_single(scope="paper", paper_id=paper_id, kind="paper_summary", content=c[:900], importance=0.75)
+            self.upsert_single(scope="paper", paper_id=paper_id, kind="paper_summary", content=c[:900], importance=self.config.paper_summary_importance)
 
         if adds := [f"- {str(x).strip()[:240]}" for x in (data.get("global_preference_append") or [])[:2] if str(x).strip()]:
             prev = self.list_recent_contents(scope="global", paper_id=None, kinds=["preference"], limit=1)
             base = (prev[0] if prev else "").strip()
             merged = "\n".join(((base + "\n" if base else "") + "\n".join(adds)).splitlines()[-40:])
-            self.upsert_single(scope="global", paper_id=None, kind="preference", content=merged, importance=0.85)
+            self.upsert_single(scope="global", paper_id=None, kind="preference", content=merged, importance=self.config.preference_importance)

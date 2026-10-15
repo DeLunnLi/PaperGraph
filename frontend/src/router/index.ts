@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/library/read/:id', component: () => import('@/views/PaperReader.vue'), name: 'library-read' },
     { path: '/library', component: () => import('@/views/Library.vue'), name: 'library' },
     { path: '/graph', component: () => import('@/views/KnowledgeGraph.vue'), name: 'graph' },
+    { path: '/knowledge', component: () => import('@/views/KnowledgeBase.vue'), name: 'knowledge' },
   ],
 })
 

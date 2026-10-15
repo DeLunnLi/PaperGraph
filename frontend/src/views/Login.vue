@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import message from 'ant-design-vue/es/message'
+import AButton from 'ant-design-vue/es/button'
+import AInput, { InputPassword as AInputPassword } from 'ant-design-vue/es/input'
 import { apiClient } from '@/services/api/client'
 
 const router = useRouter()

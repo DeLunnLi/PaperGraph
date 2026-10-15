@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import concurrent.futures
+from contextvars import copy_context
+from functools import lru_cache
 import logging
+import threading
+import time
 from typing import Any, TypeVar
 from collections.abc import Callable
 
@@ -11,10 +15,61 @@ from hello_agents import SimpleAgent
 from app.exceptions import LLMError
 from ...settings import get_settings
 from .agent_config import apply_project_skills, papergraph_agent_config, resolve_task_skills
+from .call_budget import llm_deadline
 
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+
+class _TaskExecutor:
+    """Bound running work as well as queued work after a caller times out.
+
+    Python cannot interrupt a running thread. Its slot stays occupied until
+    the task actually finishes, while the caller can return at its deadline.
+    HTTP calls inherit the deadline via call_budget and use a bounded timeout.
+    """
+
+    def __init__(self, max_workers: int) -> None:
+        self.pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="papergraph-agent",
+        )
+        self.slots = threading.BoundedSemaphore(max_workers)
+
+    def run(self, fn: Callable[[], _T], timeout_sec: float) -> _T:
+        deadline = time.monotonic() + timeout_sec
+        parent_deadline = llm_deadline.get()
+        if parent_deadline is not None:
+            deadline = min(deadline, parent_deadline)
+        if not self.slots.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise TimeoutError("agent task timed out waiting for capacity")
+        context = copy_context()
+
+        def invoke() -> _T:
+            token = llm_deadline.set(deadline)
+            try:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("agent task deadline exceeded before execution")
+                return fn()
+            finally:
+                llm_deadline.reset(token)
+
+        try:
+            future = self.pool.submit(context.run, invoke)
+        except BaseException:
+            self.slots.release()
+            raise
+        future.add_done_callback(lambda _future: self.slots.release())
+        try:
+            return future.result(timeout=max(0.0, deadline - time.monotonic()))
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(f"agent task timeout after {timeout_sec}s") from exc
+
+
+@lru_cache(maxsize=1)
+def _get_task_executor() -> _TaskExecutor:
+    return _TaskExecutor(get_settings().agent_runtime_max_concurrency)
 
 def _exception_chain_predicate(exc: BaseException | None, pred) -> bool:
     seen: set[int] = set()
@@ -46,13 +101,7 @@ def _task_failed_due_to_timeout(exc: BaseException) -> bool:
 def _run_with_optional_timeout(fn: Callable[[], _T], timeout_sec: float | None) -> _T:
     if timeout_sec is None or float(timeout_sec) <= 0:
         return fn()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(fn)
-        try:
-            return fut.result(timeout=float(timeout_sec))
-        except concurrent.futures.TimeoutError as exc:
-            fut.cancel()
-            raise TimeoutError(f"agent task timeout after {timeout_sec}s") from exc
+    return _get_task_executor().run(fn, float(timeout_sec))
 
 def stateless_llm_chat(
     llm: Any, system_prompt: str | None, user_prompt: str, **invoke_kwargs: Any
@@ -96,19 +145,28 @@ def run_agent_task(
         log.debug("[%s] project skills: %s", task_name, ",".join(selected_skills))
     resolved_system_prompt = apply_project_skills(system_prompt, selected_skills)
     last_error: Exception | None = None
+    deadline = time.monotonic() + resolved_timeout if resolved_timeout > 0 else None
 
     for i in range(attempts):
         try:
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("agent task deadline exceeded")
             agent = SimpleAgent(
                 name=agent_name,
                 llm=llm,
                 system_prompt=resolved_system_prompt,
                 config=papergraph_agent_config(max_tokens=max_tokens),
             )
-            raw = _run_with_optional_timeout(lambda: agent.run(user_prompt), resolved_timeout)
+            raw = _run_with_optional_timeout(lambda: agent.run(user_prompt), remaining)
             return (raw or "").strip()
         except Exception as exc:
             last_error = exc
+            # A timed-out thread may still be unwinding. Retrying it would
+            # duplicate an in-flight LLM request and exceed the task budget.
+            if _task_failed_due_to_timeout(exc):
+                log.warning("[%s] timed out on attempt %d/%d: %s", task_name, i + 1, attempts, exc)
+                break
             if i + 1 < attempts:
                 log.warning("[%s] attempt %d/%d failed: %s", task_name, i + 1, attempts, exc)
             else:

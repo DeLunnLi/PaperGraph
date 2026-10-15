@@ -8,6 +8,7 @@ from collections.abc import Callable
 from hello_agents import HelloAgentsLLM
 from app.exceptions import ConfigError
 from ...settings import get_settings
+from .call_budget import remaining_call_budget
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,15 @@ def _patch_provider_disable_thinking() -> None:
     def _wrap(orig: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(orig)
         def inner(self: Any, *args: Any, **kwargs: Any) -> Any:
+            remaining = remaining_call_budget()
+            # OpenAI/Anthropic accept per-request timeouts; other adapters
+            # still get the pre-call deadline check above. Never mutate the
+            # shared adapter/client timeout for an individual task.
+            adapter_name = type(getattr(self, "_adapter", None)).__name__
+            if remaining is not None and adapter_name in {"OpenAIAdapter", "AnthropicAdapter"}:
+                kwargs = dict(kwargs)
+                configured = kwargs.get("timeout", getattr(self, "timeout", None))
+                kwargs["timeout"] = min(remaining, float(configured)) if isinstance(configured, (int, float)) and configured > 0 else remaining
             if _should_disable_thinking(self):
                 kwargs = dict(kwargs)
                 extra = dict(kwargs.get("extra_body") or {})
@@ -162,6 +172,15 @@ def get_llm() -> HelloAgentsLLM:
         _maybe_disable_proxy_for_llm(base_url)
 
         kw = {}
+        # A finite transport timeout also bounds non-agent, one-shot calls.
+        # Preserve an explicitly configured LLM_TIMEOUT when valid.
+        try:
+            transport_timeout = float(os.getenv("LLM_TIMEOUT", ""))
+            if not 0 < transport_timeout <= 300:
+                raise ValueError("LLM_TIMEOUT out of range")
+        except ValueError:
+            transport_timeout = 60.0
+        kw["timeout"] = transport_timeout
         if model:
             kw["model"] = model
         if api_key:

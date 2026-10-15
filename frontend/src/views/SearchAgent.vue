@@ -77,7 +77,7 @@
         </div>
       </div>
       <div ref="messagesContainer" class="messages-container" role="log" aria-live="polite" aria-label="搜索对话消息">
-        <div v-for="(msg, index) in messages" :key="index" class="message" :class="msg.role">
+        <div v-for="(msg, index) in messages" :key="msg.timestamp || index" class="message" :class="msg.role">
           <div v-if="msg.role === 'user'" class="user-bubble">
             <div class="message-content">{{ msg.content }}</div>
           </div>
@@ -96,17 +96,17 @@
               <div v-else-if="isLoading && index === messages.length - 1 && !msg.searchSteps?.length" class="ai-text ai-text--loading">{{ msg.content }}</div>
               <SearchToolTrace v-if="msg.toolCalls?.length" :tool-calls="msg.toolCalls" />
               <div v-if="msg.searchParams" class="search-params">
-                <a-tag v-if="msg.searchParams.venue" size="small" color="purple">{{ msg.searchParams.venue }}</a-tag>
+                <a-tag v-for="v in (msg.searchParams.venues || [])" :key="v" size="small" color="purple">{{ v }}</a-tag>
               </div>
               <SearchResultPapers
                 v-if="msg.results?.length"
                 :papers="msg.results"
                 :total="msg.total ?? msg.results.length"
-                @save-one="saveOne"
+                @save-one="(paper: Paper) => saveOne(paper, msg)"
                 @save-all="saveAllFromMessage(msg)"
               />
               <div v-if="msg.results && msg.results.length === 0 && !isLoading && !msg.isError" class="no-results">
-                <a-empty :image="Empty.PRESENTED_IMAGE_SIMPLE">
+                <a-empty :image="AEmpty.PRESENTED_IMAGE_SIMPLE">
                   <template #description>
                     <p style="color: var(--pg-text-secondary); margin-bottom: 12px;">未找到相关论文，试试以下建议：</p>
                   </template>
@@ -197,11 +197,18 @@
 <script setup lang="ts">
 import { ref, nextTick, watch, onMounted, onActivated, onBeforeUnmount, onDeactivated } from 'vue'
 import { useRoute } from 'vue-router'
-import { message, Empty, Modal } from 'ant-design-vue'
+import message from 'ant-design-vue/es/message'
+import AButton from 'ant-design-vue/es/button'
+import AEmpty from 'ant-design-vue/es/empty'
+import AModal from 'ant-design-vue/es/modal'
+import ASpace from 'ant-design-vue/es/space'
+import ASwitch from 'ant-design-vue/es/switch'
+import ATag from 'ant-design-vue/es/tag'
+import ATooltip from 'ant-design-vue/es/tooltip'
+import { Textarea as ATextarea } from 'ant-design-vue/es/input'
 import {
   RobotOutlined,
   SendOutlined,
-  SaveOutlined,
   PlusOutlined,
   MenuOutlined,
   CloseOutlined,
@@ -296,7 +303,7 @@ const flushConversationState = () => {
 }
 function deleteConversation(id: string) {
   const isDeletingCurrent = currentConversationId.value === id
-  Modal.confirm({
+  AModal.confirm({
     title: '删除对话',
     content: '确定要删除这条对话记录吗？删除后无法恢复。',
     okText: '删除',
@@ -380,12 +387,21 @@ const { sendMessage, abortActiveRequest } = useSearchAgentChat({
   },
 })
 const savingPaperIds = ref<Set<number>>(new Set())
-const saveOne = async (paper: Paper) => {
+// 程序性记忆：保存事件携带来源查询（该结果所属消息的前一条用户消息）
+const queryForMessage = (msg: Message): string | undefined => {
+  const idx = messages.value.indexOf(msg)
+  for (let i = idx - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m.role === 'user' && m.content.trim()) return m.content.trim()
+  }
+  return undefined
+}
+const saveOne = async (paper: Paper, msg?: Message) => {
   const pid = (paper as { id?: number }).id
   if (pid != null && savingPaperIds.value.has(pid)) return
   if (pid != null) savingPaperIds.value = new Set(savingPaperIds.value).add(pid)
   try {
-    const res = await savePapers([paper])
+    const res = await savePapers([paper], { search_query: msg ? queryForMessage(msg) : undefined })
     message.success(`已新增 ${res.added} 条到文献库`)
   } catch (e: unknown) {
     message.error((e as Error).message || '保存失败')
@@ -400,7 +416,7 @@ const saveOne = async (paper: Paper) => {
 const saveAllFromMessage = async (msg: Message) => {
   if (!msg.results || msg.results.length === 0) return
   try {
-    const res = await savePapers(msg.results, { llm_classify: false })
+    const res = await savePapers(msg.results, { llm_classify: false, search_query: queryForMessage(msg) })
     message.success(`已新增 ${res.added} 条到文献库`)
   } catch (e: unknown) {
     message.error((e as Error).message || '保存失败')
@@ -1049,9 +1065,6 @@ padding: 0;
   }
   .conversations-sidebar.right-sidebar.collapsed {
   transform: translateX(100%);
-  }
-  .current-conv-tag {
-  max-width: 80px;
   }
   .sidebar-toggle.right-toggle {
   right: 0;

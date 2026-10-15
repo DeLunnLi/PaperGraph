@@ -101,15 +101,15 @@ class LlmPaperRanker:
 
     @staticmethod
     def _ranked_paper_dedupe_key(rp: RankedPaper) -> str:
-        p = rp.paper
-        aid = str(getattr(p, "arxiv_id", "") or "").strip()
-        if aid:
-            return f"arxiv:{aid}"
-        doi = str(getattr(p, "doi", "") or "").strip().lower()
-        if doi:
-            return f"doi:{doi}"
-        t = str(getattr(p, "title", "") or "").strip().lower()[:240]
-        return f"t:{t}" if t else f"id:{id(p)}"
+        # Delegate to the shared identity function so arXiv versions,
+        # DOI-embedded arXiv IDs, and title normalisation all match exactly
+        # like PaperSearcher._paper_dedupe_key and rrf_fusion._paper_identity.
+        # Previously this used a naive str.strip() on arxiv_id/doi/title,
+        # causing the same paper to appear twice when sources formatted
+        # identifiers differently (e.g. "2401.12345" vs "arxiv:2401.12345v2"
+        # vs DOI "10.48550/arXiv.2401.12345").
+        from .rrf_fusion import _paper_identity
+        return _paper_identity(rp.paper)
 
     @staticmethod
     def _recover_complete_ranking_items(raw: str) -> list[dict[str, Any]]:
@@ -366,7 +366,7 @@ class LlmPaperRanker:
                         self._finalize_scores(ranked2)
                         return ranked2[:top_k], method2
                 except Exception:
-                    pass
+                    logger.debug("fine_rank retry failed", exc_info=True)
 
             if _looks_like_llm_timeout(e):
                 logger.warning(

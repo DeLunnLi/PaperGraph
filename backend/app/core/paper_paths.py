@@ -58,8 +58,6 @@ def _sanitize_filename(title: str | None, max_len: int = 80) -> str:
     for ch in title.strip():
         if ch.isalnum() or ("\u4e00" <= ch <= "\u9fff"):
             safe_chars.append(ch)
-        elif ch in (" ", "-", "_", "."):
-            safe_chars.append("_")
         else:
             safe_chars.append("_")
 
